@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-radar"
+version = "0.1.0"
+description = "Harvest the whole open job market for roles that fit you — direct from company ATS feeds and aggregator APIs — scored, deduped, with optional LLM semantic ranking."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Justin Hawkes" }]
+keywords = ["job-search", "ats", "scraping", "llm", "cli", "greenhouse", "lever"]
+dependencies = [
+  "requests>=2.28",
+  "pyyaml>=6.0",
+  "rapidfuzz>=3.0",
+]
+
+[project.optional-dependencies]
+llm = []          # LLM re-rank uses stdlib HTTP — no extra deps needed
+scrapers = []     # opt-in scraper sources (e.g. python-jobspy); add at your own risk re: site ToS
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+job-radar = "job_radar.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hawkesj12/job-radar"
+
+[tool.setuptools]
+packages = ["job_radar"]

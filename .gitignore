@@ -1,0 +1,22 @@
+# your real config + data (never commit these)
+job-radar.yaml
+watchlist.json
+watchlist.json.lock
+shortlist.csv
+shortlist.csv.tmp
+shortlist.json
+.env
+*.env
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+
+# IDE
+.idea/
+*.iml

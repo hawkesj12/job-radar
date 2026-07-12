@@ -1,0 +1,77 @@
+# job-radar config — copy this to `job-radar.yaml` and make it yours.
+# Everything is optional; anything you omit uses a sensible generic default.
+
+# ── profile: what you're looking for ────────────────────────────────────────
+profile:
+  # What the breadth (keyword) sources search for.
+  title_queries:
+    - AI Engineer
+    - Applied AI Engineer
+    - Machine Learning Engineer
+    - Forward Deployed Engineer
+    - LLM Engineer
+  # A title must contain at least one of these to count as relevant.
+  signal_titles:
+    [ai, ml, machine learning, llm, agent, engineer, developer, architect,
+     applied scientist, forward deployed, fde, solutions, automation]
+
+# ── scoring: your judgment model (keyword -> points) ────────────────────────
+scoring:
+  # Add your own domain and location keywords here — this is where you tune fit.
+  fit_weights:
+    ai engineer: 3
+    applied ai: 4
+    forward deployed: 4
+    fde: 4
+    rag: 4
+    agentic: 4
+    multi-agent: 4
+    llm: 3
+    generative ai: 3
+    claude: 2
+    mcp: 2
+    founding engineer: 5
+    own the ai: 4
+    internal tooling: 4
+    remote: 4
+    # e.g. add your own city / industry to pull those roles up:
+    # your-city: 5
+    # your-industry: 4
+  title_penalties: { research scientist: 8, ai researcher: 6 }
+  agency_penalties: { staffing: 8, our client: 12, consultancy: 10 }
+  length_norm_b: 0.75      # BM25 length penalty (0.75 = default)
+  avg_jd_tokens: 400       # reference "normal" JD length
+  body_cap: 60             # ceiling on the body keyword score
+  tiers: { strong: 30, worth_a_look: 22 }
+
+# ── filters: the gates ──────────────────────────────────────────────────────
+filters:
+  remote_only: true
+  max_age_days: 60         # drop anything older than this
+  stale_after_days: 30     # penalize (don't drop) past this
+  min_score: 22            # hide anything below this
+  exclude_titles: [intern, recruiter, sales, marketing, support engineer]
+  exclude_locations: [india, canada, europe, emea, apac, "(eu)"]  # non-US-remote
+
+# ── sources: default = all official public APIs; scrapers off ───────────────
+sources:
+  ats:    [greenhouse, lever, ashby, smartrecruiters, workable]
+  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, hn, braintrust, techtree]
+  scrapers: []            # opt-in only (e.g. jobspy) — respects the target sites' ToS
+  adzuna:                 # optional; set these env vars if you have free Adzuna keys
+    app_id_env: ADZUNA_APP_ID
+    app_key_env: ADZUNA_APP_KEY
+  funnel:
+    auto_grow: true        # discover + add new companies from breadth hits
+    max_new_per_run: 25
+
+# ── ai: optional LLM semantic fit-ranking (off by default) ──────────────────
+# Uncomment + set an api key env var to have an LLM re-rank the top of the list
+# for *semantic* fit and add a one-line why/gaps note. Cost-bounded to top-N.
+# llm:
+#   enabled: true
+#   provider: anthropic                 # anthropic | openai (OpenAI-compatible)
+#   model: claude-haiku-4-5-20251001
+#   api_key_env: ANTHROPIC_API_KEY      # the tool reads the key from this env var
+#   rerank_top_n: 25
+#   # base_url: https://api.openai.com/v1   # for an OpenAI-compatible endpoint

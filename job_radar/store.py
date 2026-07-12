@@ -1,0 +1,176 @@
+"""The store: a single upserted CSV (shortlist.csv).
+
+One inspectable file, keyed by dedup_key. Each scan UPSERTS -- refresh score /
+age on roles it's seen before, PRESERVE their status and first_seen, add new
+roles. Applied/dismissed roles are 'sticky': they persist even after they leave
+the market, so your application history is never lost. Written atomically
+(temp -> os.replace) so a crash never corrupts the file.
+
+Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
+salary, company, industry, title, department, employment_type, location,
+source, url, signals, dedup_key
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import os
+from datetime import datetime
+from pathlib import Path
+
+from .dedup import dedup_key
+from .util import age_int
+
+COLUMNS = [
+    "id",
+    "first_seen",
+    "posted",
+    "age_days",
+    "score",
+    "llm_score",
+    "llm_note",
+    "status",
+    "salary",
+    "company",
+    "industry",
+    "title",
+    "department",
+    "employment_type",
+    "location",
+    "source",
+    "url",
+    "signals",
+    "dedup_key",
+]
+
+# Statuses the user set by hand -- these rows persist even if they leave the feed.
+STICKY = {"applied", "dismissed", "interviewing", "screen", "offer", "rejected"}
+
+
+def short_id(key: str) -> str:
+    return hashlib.sha1(key.encode()).hexdigest()[:7]
+
+
+def load_all(path) -> list[dict]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    with p.open(newline="") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def write_all(path, rows: list[dict]) -> None:
+    """Atomic write: full rewrite to a temp file, then os.replace."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rows = sorted(rows, key=lambda r: int(r.get("score") or 0), reverse=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in COLUMNS})
+    os.replace(tmp, p)
+
+
+def _build_row(p: dict, today: str) -> dict:
+    key = dedup_key(p)
+    a = age_int(p.get("posted", ""))
+    src = ", ".join(
+        sorted(p.get("sources") or ([p.get("source")] if p.get("source") else []))
+    )
+    return {
+        "id": short_id(key),
+        "first_seen": today,
+        "posted": p.get("posted", ""),
+        "age_days": "" if a is None else str(a),
+        "score": p.get("score", 0),
+        "llm_score": "",
+        "llm_note": "",
+        "status": "new",
+        "salary": p.get("salary", ""),
+        "company": p.get("company", ""),
+        "industry": p.get("industry", ""),
+        "title": (p.get("title", "") or "").strip(),
+        "department": p.get("department", ""),
+        "employment_type": p.get("employment_type", ""),
+        "location": (p.get("location", "") or "").strip(),
+        "source": src,
+        "url": p.get("url", ""),
+        "signals": p.get("signals", ""),
+        "dedup_key": key,
+    }
+
+
+def upsert(path, postings: list[dict], today: str | None = None) -> list[dict]:
+    """Merge this run's scored postings into the store. Returns the merged rows,
+    each tagged `_is_new` (True if first seen this run)."""
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    existing = load_all(path)
+    by_key = {r.get("dedup_key"): r for r in existing if r.get("dedup_key")}
+
+    result: dict[str, dict] = {}
+    # 1) carry forward sticky rows (applied/dismissed/etc.) even if not seen now
+    for r in existing:
+        if r.get("status") in STICKY and r.get("dedup_key"):
+            r["_is_new"] = False
+            result[r["dedup_key"]] = r
+    # 2) upsert this run's postings
+    for p in postings:
+        row = _build_row(p, today)
+        k = row["dedup_key"]
+        old = by_key.get(k)
+        if old:
+            row["first_seen"] = old.get("first_seen") or today
+            row["status"] = old.get("status") or "new"
+            row["llm_score"] = old.get("llm_score", "")
+            row["llm_note"] = old.get("llm_note", "")
+            row["_is_new"] = False
+        else:
+            row["_is_new"] = True
+        result[k] = row
+
+    merged = list(result.values())
+    write_all(path, merged)
+    return merged
+
+
+def mark_status(path, job_id: str, status: str) -> bool:
+    rows = load_all(path)
+    hit = False
+    for r in rows:
+        if r.get("id") == job_id:
+            r["status"] = status
+            hit = True
+    if hit:
+        write_all(path, rows)
+    return hit
+
+
+def surface(
+    rows: list[dict], cfg, only_new: bool = False, limit: int | None = None
+) -> list[dict]:
+    """Filter to the roles worth showing: not applied/dismissed, above min_score,
+    within max_age_days; sorted by (llm_score if present, else score) desc."""
+    out = []
+    for r in rows:
+        if r.get("status") in ("applied", "dismissed"):
+            continue
+        if int(r.get("score") or 0) < cfg.min_score:
+            continue
+        a = r.get("age_days")
+        if a not in (None, "") and int(a) > cfg.max_age_days:
+            continue
+        if only_new and not r.get("_is_new"):
+            continue
+        out.append(r)
+    out.sort(
+        key=lambda r: (
+            int(r["llm_score"])
+            if str(r.get("llm_score")).isdigit()
+            else int(r.get("score") or 0)
+        ),
+        reverse=True,
+    )
+    return out[:limit] if limit else out

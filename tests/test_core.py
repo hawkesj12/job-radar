@@ -1,0 +1,145 @@
+"""Core tests: config, deterministic scoring, dedup, the upsert store, and the
+LLM no-op guarantee. Run: pytest"""
+
+from job_radar import config, dedup, llm, scoring, store
+
+
+def _cfg():
+    c = config.Config()
+    config.set_active(c)
+    return c
+
+
+# ── config ──────────────────────────────────────────────────────────────────
+def test_config_defaults():
+    c = config.load_config(None)
+    assert c.max_age_days == 60 and c.min_score == 22
+    assert "greenhouse" in c.depth_sources and "adzuna" in c.breadth_sources
+    assert c.llm.enabled is False
+
+
+def test_config_override(tmp_path):
+    p = tmp_path / "cfg.yaml"
+    p.write_text("filters:\n  max_age_days: 14\n  min_score: 40\n")
+    c = config.load_config(p)
+    assert c.max_age_days == 14 and c.min_score == 40
+    assert c.fit_weights  # untouched sections keep defaults
+
+
+# ── deterministic scoring + gates ────────────────────────────────────────────
+def test_score_is_deterministic_and_discriminates():
+    c = _cfg()
+    ai = {
+        "title": "AI Engineer",
+        "location": "Remote",
+        "text": "Build RAG and agentic LLM systems.",
+        "company": "Acme",
+    }
+    junk = {
+        "title": "Office Manager",
+        "location": "Remote",
+        "text": "Manage the office.",
+        "company": "Acme",
+    }
+    assert scoring.score(ai, c) == scoring.score(ai, c)  # same input, same output
+    assert scoring.score(ai, c) > scoring.score(junk, c)
+
+
+def test_relevance_and_remote_gates():
+    c = _cfg()
+    assert scoring.relevant("AI Engineer", c) is True
+    assert scoring.relevant("Warehouse Associate", c) is False  # no signal title
+    assert scoring.is_remote({"title": "AI Engineer", "location": "Remote"}, c) is True
+    assert (
+        scoring.is_remote({"title": "AI Engineer", "location": "New York, onsite"}, c)
+        is False
+    )
+
+
+# ── dedup ─────────────────────────────────────────────────────────────────────
+def test_dedup_key_ignores_seniority():
+    a = {"company": "Acme Inc", "title": "Senior AI Engineer"}
+    b = {"company": "Acme Inc", "title": "AI Engineer"}
+    assert dedup.dedup_key(a) == dedup.dedup_key(b)
+
+
+def test_ats_from_url():
+    assert dedup.ats_from_url("https://boards.greenhouse.io/airbnb/jobs/123") == (
+        "greenhouse",
+        "airbnb",
+    )
+    assert dedup.ats_from_url("https://jobs.lever.co/anchorage/abc") == (
+        "lever",
+        "anchorage",
+    )
+    assert dedup.ats_from_url("https://example.com/careers") is None
+
+
+# ── store: the load-bearing upsert ───────────────────────────────────────────
+def _post(company, title, score, url):
+    return {
+        "company": company,
+        "title": title,
+        "score": score,
+        "url": url,
+        "posted": "2026-07-10",
+        "sources": {"remoteok"},
+        "text": "x",
+        "signals": "ai",
+    }
+
+
+def test_upsert_preserves_status_across_runs(tmp_path):
+    csvp = tmp_path / "shortlist.csv"
+    p = _post("Acme", "AI Engineer", 40, "https://x/1")
+    # run 1: new
+    merged = store.upsert(csvp, [p], today="2026-07-10")
+    assert merged[0]["status"] == "new" and merged[0]["_is_new"] is True
+    rid = merged[0]["id"]
+    # user applies
+    assert store.mark_status(csvp, rid, "applied") is True
+    # run 2: same role reappears with a fresh score
+    p2 = _post("Acme", "AI Engineer", 55, "https://x/1")
+    merged2 = store.upsert(csvp, [p2], today="2026-07-12")
+    row = next(r for r in merged2 if r["id"] == rid)
+    assert row["status"] == "applied"  # status PRESERVED
+    assert row["first_seen"] == "2026-07-10"  # first_seen PRESERVED
+    assert int(row["score"]) == 55  # score refreshed
+    assert row["_is_new"] is False
+
+
+def test_applied_is_sticky_when_role_leaves_feed(tmp_path):
+    csvp = tmp_path / "shortlist.csv"
+    merged = store.upsert(
+        csvp, [_post("Acme", "AI Engineer", 40, "https://x/1")], today="2026-07-10"
+    )
+    store.mark_status(csvp, merged[0]["id"], "applied")
+    # next run: the role is gone from the market (empty postings)
+    merged2 = store.upsert(csvp, [], today="2026-07-12")
+    assert any(r["status"] == "applied" for r in merged2)  # history persists
+
+
+def test_surface_excludes_applied_and_low_score(tmp_path):
+    c = _cfg()
+    csvp = tmp_path / "shortlist.csv"
+    ps = [
+        _post("A", "AI Engineer", 40, "u1"),
+        _post("B", "AI Engineer", 5, "u2"),
+        _post("C", "AI Engineer", 33, "u3"),
+    ]
+    merged = store.upsert(csvp, ps, today="2026-07-12")
+    store.mark_status(
+        csvp, next(r["id"] for r in merged if r["company"] == "A"), "applied"
+    )
+    merged = store.load_all(csvp)
+    shown = store.surface(merged, c)
+    names = {r["company"] for r in shown}
+    assert names == {"C"}  # A applied (excluded), B below min_score (excluded)
+
+
+# ── the AI layer's no-op guarantee ───────────────────────────────────────────
+def test_llm_is_noop_when_disabled():
+    c = _cfg()
+    assert c.llm.enabled is False
+    items = [{"key": "k", "title": "AI Engineer", "company": "Acme", "text": "..."}]
+    assert llm.rerank(items, c) == {}  # never calls out when disabled
