@@ -51,6 +51,8 @@ filters:
   # (adzuna, usajobs) to search that location. For a local search, set
   # remote_only: false AND location: "Your City, ST".
   location: remote
+  radius_miles: 0          # 0 = the source's default; e.g. 200 = search 200 mi
+                           # around `location` (Adzuna + USAJOBS only)
   max_age_days: 60         # drop anything older than this
   stale_after_days: 30     # penalize (don't drop) past this
   min_score: 22            # hide anything below this

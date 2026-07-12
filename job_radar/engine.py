@@ -8,7 +8,6 @@ import json
 import time
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
 from . import config
 from .dedup import dedup_key, find_hit_key, norm

@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
 
 # ── generic defaults (NOT tuned to any one person) ──────────────────────────
 DEFAULT_TITLE_QUERIES = [
@@ -233,6 +232,7 @@ class Config:
     location: str = (
         "remote"  # "remote" or a place ("Louisville, KY") for general sources
     )
+    radius_miles: int = 0  # 0 = API default; >0 sets a search radius around `location`
     exclude_titles: list = field(default_factory=lambda: list(DEFAULT_TITLE_EXCLUDE))
     exclude_locations: list = field(default_factory=lambda: list(DEFAULT_NON_US))
     max_age_days: int = 60
@@ -297,6 +297,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
     for k, a in [
         ("remote_only", "remote_only"),
         ("location", "location"),
+        ("radius_miles", "radius_miles"),
         ("max_age_days", "max_age_days"),
         ("stale_after_days", "stale_after_days"),
         ("min_score", "min_score"),

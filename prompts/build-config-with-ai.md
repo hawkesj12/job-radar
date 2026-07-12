@@ -34,10 +34,11 @@ weaker-fit or staffing/agency posts you'd rather see sink (I'll **rank them down
 _Example: exclude "intern, volunteer, recruiter, groomer"; rank down staffing agencies._
 
 **Question 4 — Where, and how fresh?**
-Where do you want to work — a specific city or area (e.g. "Louisville, KY", used to
-target local job sources), **remote only**, or **anywhere**? And how old is too old —
-skip anything posted more than how many days ago?
-_Example: "around Louisville, KY; nothing older than 60 days."_
+Where do you want to work — **remote only**, **anywhere**, or a place with an optional
+**radius** (e.g. "within 200 miles of Louisville, KY")? A city plus a radius searches that
+whole area on the general sources. And how old is too old — skip anything posted more than
+how many days ago?
+_Example: "within 200 miles of Louisville, KY; nothing older than 60 days."_
 
 **Question 5 — How picky?**
 Do you want to see lots of roles (looser) or only strong matches (tighter)? Say
@@ -59,6 +60,8 @@ scoring:
   tiers: { strong: 30, worth_a_look: 22 }
 filters:
   remote_only: true
+  location: remote # or a place: "Louisville, KY"
+  radius_miles: 0 # e.g. 200 = search 200 mi around location (needs a place + a key)
   max_age_days: 60
   min_score: 22
   exclude_titles: [intern, recruiter]
@@ -82,8 +85,9 @@ sources:
 Rules for the weights: keep them small integers (1–5, up to ~8 for a bullseye).
 Weight my genuine strengths and target-role keywords highest. Only include
 keywords that are TRUE for me. If I name a city, add it to `fit_weights` (so
-nearby roles rank up) **and** set `filters.location` to it. Output the YAML in a
-single code block, ready to save.
+nearby roles rank up) **and** set `filters.location` to it; if I give a radius
+(e.g. 200 miles), also set `filters.radius_miles: 200` and `filters.remote_only:
+false`. Output the YAML in a single code block, ready to save.
 
 **One heads-up you must give me if my field isn't remote software/tech:** the
 free, no-key sources are remote-tech job boards, so a non-tech search will come

@@ -212,3 +212,42 @@ def test_rerank_tolerates_null_fit(monkeypatch):
     monkeypatch.setattr(llm, "_call", lambda cfg, u: '[{"id":0,"fit":null,"note":"x"}]')
     out = llm.rerank([{"key": "k", "title": "t", "company": "c", "text": "jd"}], c)
     assert out["k"]["llm_score"] == 0  # null fit -> 0, no crash
+
+
+# ── the location radius (200 miles around Louisville) ────────────────────────
+def test_config_loads_radius(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text('filters:\n  location: "Louisville, KY"\n  radius_miles: 200\n')
+    c = config.load_config(p)
+    assert c.radius_miles == 200 and c.location == "Louisville, KY"
+
+
+def _capture_url(monkeypatch, seen):
+    from job_radar import sources
+
+    monkeypatch.setenv("ADZUNA_APP_ID", "x")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "y")
+    monkeypatch.setattr(sources.time, "sleep", lambda *a: None)
+
+    def fake(url):
+        seen["url"] = url
+        return {"results": []}
+
+    monkeypatch.setattr(sources, "get_json", fake)
+    return sources
+
+
+def test_adzuna_url_includes_radius(monkeypatch):
+    seen = {}
+    sources = _capture_url(monkeypatch, seen)
+    config.set_active(config.Config(location="Louisville, KY", radius_miles=200))
+    sources.search_adzuna(["registered nurse"])
+    assert "distance=322" in seen["url"]  # 200 mi -> 322 km
+
+
+def test_adzuna_no_radius_when_remote(monkeypatch):
+    seen = {}
+    sources = _capture_url(monkeypatch, seen)
+    config.set_active(config.Config(location="remote", radius_miles=200))
+    sources.search_adzuna(["ai engineer"])
+    assert "distance=" not in seen["url"]  # a radius is meaningless for remote

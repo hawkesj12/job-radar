@@ -309,13 +309,18 @@ def search_adzuna(queries):
     if not (app_id and app_key):
         print("  adzuna: no API keys set -- skipped (the free sources still run)")
         return []
+    # A radius (miles) around `location`; Adzuna's `distance` is in km. Only when
+    # searching a real place (not "remote") and the user asked for one.
+    dist = ""
+    if cfg.radius_miles > 0 and cfg.location.lower() != "remote":
+        dist = f"&distance={round(cfg.radius_miles * 1.60934)}"
     out = []
     for qy in queries:
         try:
             data = get_json(
                 "https://api.adzuna.com/v1/api/jobs/us/search/1"
                 f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
-                f"&where={q(cfg.location)}&results_per_page=50&content-type=application/json"
+                f"&where={q(cfg.location)}{dist}&results_per_page=50&content-type=application/json"
             )
         except Exception:
             continue
@@ -559,13 +564,16 @@ def search_usajobs(queries):
     if not (key and email):
         print("  usajobs: no USAJOBS_API_KEY/USAJOBS_EMAIL -- skipped")
         return []
-    loc = "" if cfg.location.lower() == "remote" else f"&LocationName={q(cfg.location)}"
-    remote = "&RemoteIndicator=True" if cfg.location.lower() == "remote" else ""
+    is_place = cfg.location.lower() != "remote"
+    loc = f"&LocationName={q(cfg.location)}" if is_place else ""
+    # USAJOBS Radius is in miles and only applies alongside a LocationName.
+    rad = f"&Radius={cfg.radius_miles}" if (is_place and cfg.radius_miles > 0) else ""
+    remote = "" if is_place else "&RemoteIndicator=True"
     out = []
     for qy in queries:
         url = (
             f"https://data.usajobs.gov/api/Search?Keyword={q(qy)}"
-            f"&ResultsPerPage=50{loc}{remote}"
+            f"&ResultsPerPage=50{loc}{rad}{remote}"
         )
         req = urllib.request.Request(
             url,
