@@ -46,7 +46,11 @@ scoring:
 
 # ── filters: the gates ──────────────────────────────────────────────────────
 filters:
-  remote_only: true
+  remote_only: true        # set false to include on-site / hybrid roles
+  # "remote", or a place like "Louisville, KY" — used by the general sources
+  # (adzuna, usajobs) to search that location. For a local search, set
+  # remote_only: false AND location: "Your City, ST".
+  location: remote
   max_age_days: 60         # drop anything older than this
   stale_after_days: 30     # penalize (don't drop) past this
   min_score: 22            # hide anything below this
@@ -56,7 +60,9 @@ filters:
 # ── sources: default = all official public APIs; scrapers off ───────────────
 sources:
   ats:    [greenhouse, lever, ashby, smartrecruiters, workable]
-  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, hn, braintrust, techtree]
+  # adzuna + usajobs are GENERAL (every field, any location) but need free keys —
+  # set them and you can search any field / any city, not just remote tech.
+  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, usajobs, hn, braintrust, techtree]
   scrapers: []            # opt-in only (e.g. jobspy) — respects the target sites' ToS
   adzuna:                 # optional; set these env vars if you have free Adzuna keys
     app_id_env: ADZUNA_APP_ID

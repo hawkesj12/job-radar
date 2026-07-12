@@ -193,6 +193,7 @@ ALL_BREADTH = [
     "remoteok",
     "himalayas",
     "adzuna",
+    "usajobs",
     "hn",
     "braintrust",
     "techtree",
@@ -229,6 +230,9 @@ class Config:
     fuzzy_title_threshold: int = 90
     # filters
     remote_only: bool = True
+    location: str = (
+        "remote"  # "remote" or a place ("Louisville, KY") for general sources
+    )
     exclude_titles: list = field(default_factory=lambda: list(DEFAULT_TITLE_EXCLUDE))
     exclude_locations: list = field(default_factory=lambda: list(DEFAULT_NON_US))
     max_age_days: int = 60
@@ -289,6 +293,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         cfg.tier_look = scor["tiers"].get("worth_a_look", cfg.tier_look)
     for k, a in [
         ("remote_only", "remote_only"),
+        ("location", "location"),
         ("max_age_days", "max_age_days"),
         ("stale_after_days", "stale_after_days"),
         ("min_score", "min_score"),

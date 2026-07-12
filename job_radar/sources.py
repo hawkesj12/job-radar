@@ -315,7 +315,7 @@ def search_adzuna(queries):
             data = get_json(
                 "https://api.adzuna.com/v1/api/jobs/us/search/1"
                 f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
-                "&where=remote&results_per_page=50&content-type=application/json"
+                f"&where={q(cfg.location)}&results_per_page=50&content-type=application/json"
             )
         except Exception:
             continue
@@ -549,8 +549,73 @@ def search_techtree(queries):
     return out
 
 
+def search_usajobs(queries):
+    """USAJOBS -- the US federal government's official jobs API (every field, not
+    just tech). Free with a key + your email. Skipped gracefully if unset."""
+    import urllib.request
+
+    cfg = config.active()
+    key, email = cfg.env("USAJOBS_API_KEY"), cfg.env("USAJOBS_EMAIL")
+    if not (key and email):
+        print("  usajobs: no USAJOBS_API_KEY/USAJOBS_EMAIL -- skipped")
+        return []
+    loc = "" if cfg.location.lower() == "remote" else f"&LocationName={q(cfg.location)}"
+    remote = "&RemoteIndicator=True" if cfg.location.lower() == "remote" else ""
+    out = []
+    for qy in queries:
+        url = (
+            f"https://data.usajobs.gov/api/Search?Keyword={q(qy)}"
+            f"&ResultsPerPage=50{loc}{remote}"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Host": "data.usajobs.gov",
+                "User-Agent": email,
+                "Authorization-Key": key,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
+                import json as _json
+
+                data = _json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            continue
+        for it in (data.get("SearchResult") or {}).get("SearchResultItems", []):
+            d = it.get("MatchedObjectDescriptor") or {}
+            pay = (d.get("PositionRemuneration") or [{}])[0]
+            out.append(
+                {
+                    "title": d.get("PositionTitle", ""),
+                    "company": d.get("OrganizationName", ""),
+                    "location": (
+                        d.get("PositionLocationDisplay", "")
+                        + (" (Remote)" if remote else "")
+                    ),
+                    "url": d.get("PositionURI", ""),
+                    "posted": to_date(d.get("PublicationStartDate")),
+                    "department": d.get("DepartmentName", ""),
+                    "employment_type": ", ".join(
+                        s.get("Name", "") for s in (d.get("PositionSchedule") or [])
+                    ),
+                    "salary": salary_range(
+                        pay.get("MinimumRange"), pay.get("MaximumRange")
+                    ),
+                    "text": clean(
+                        (d.get("UserArea") or {})
+                        .get("Details", {})
+                        .get("JobSummary", "")
+                    ),
+                    "source": "usajobs",
+                }
+            )
+    return out
+
+
 BREADTH_ALL = {
     "remotive": search_remotive,
+    "usajobs": search_usajobs,
     "jobicy": search_jobicy,
     "arbeitnow": search_arbeitnow,
     "remoteok": search_remoteok,

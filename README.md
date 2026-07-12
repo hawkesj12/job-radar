@@ -40,9 +40,15 @@ Everything is in one file — `job-radar.yaml`. Set your **target titles**, tune
 
 **Or let AI write it for you (easiest).** Paste [`prompts/build-config-with-ai.md`](prompts/build-config-with-ai.md) into any AI assistant (Claude, ChatGPT). It interviews you about the job you want in plain English, then hands you a ready-to-save `job-radar.yaml` — no YAML editing required.
 
-## Honest scope
+## Scope — tuned for remote/tech, generalizes to anyone
 
-This is a **remote/tech** engine — its sources and defaults target remote software/AI roles. It will (correctly) return almost nothing for a local, in-person job like a car mechanic; for local trades, use Indeed or a local board. Its value is being _opinionated and tuned_, not universal.
+Out of the box it's tuned for **remote software/AI** roles, because the shipped example config and the free/keyless sources are remote-tech boards. But nothing about the engine is tech-specific — you generalize it in three steps:
+
+- **Any field:** change `signal_titles` + `fit_weights` in the config to your field's language (nursing, finance, trades…). No code.
+- **On-site / any location:** set `remote_only: false` and `location: "Your City, ST"`.
+- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna** and **USAJOBS** (free keys; every field, any location) and, if you accept the ToS tradeoff, the opt-in **JobSpy** scrapers (Indeed / LinkedIn / ZipRecruiter, where the whole market lives).
+
+Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
 
 ## Sources & etiquette
 
