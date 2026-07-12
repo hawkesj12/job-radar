@@ -146,6 +146,19 @@ def main(argv=None):
         s.add_argument("id")
     pl = sub.add_parser("list", parents=[common], help="show the current shortlist")
     pl.add_argument("--all", action="store_true", help="include applied/dismissed")
+    sd = sub.add_parser(
+        "seed",
+        parents=[common],
+        help="bulk-add companies from Common Crawl (build the universe)",
+    )
+    sd.add_argument(
+        "ats", choices=["greenhouse", "lever", "ashby", "workable", "smartrecruiters"]
+    )
+    sd.add_argument(
+        "--verify",
+        action="store_true",
+        help="probe each slug (slower; only add live boards)",
+    )
     args = ap.parse_args(argv)
 
     cfg = _resolve_config(args.config)
@@ -159,6 +172,19 @@ def main(argv=None):
         cmd_status(args, cfg, "dismissed")
     elif args.cmd == "list":
         cmd_list(args, cfg)
+    elif args.cmd == "seed":
+        cmd_seed(args, cfg)
+
+
+def cmd_seed(args, cfg):
+    from . import seed
+
+    wl = args.watchlist or "watchlist.json"
+    n = seed.seed_universe(args.ats, wl, limit=args.limit, verify=args.verify)
+    print(
+        f"✓ added {n} {args.ats} companies to {wl} "
+        f"(raise --limit to add more; run `job-radar` to scan them)"
+    )
 
 
 if __name__ == "__main__":

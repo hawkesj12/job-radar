@@ -17,7 +17,7 @@ job-radar list                              # see your current shortlist
 1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable), so you see roles the hour they post. _Breadth_ — queries free aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market.
 2. **Scores every role on one comparable scale** — a transparent, weighted keyword model (BM25 length-normalized) you fully control in the config.
 3. **De-duplicates** the same role across sources into one entry.
-4. **Grows its own watchlist** — when a job links to a company's ATS, that company is auto-added, so coverage compounds every run.
+4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` does one Common Crawl pass to enumerate **every** company hosting a public board on that ATS (~1,700+ for Greenhouse alone) and bulk-adds them. One command builds the whole universe.
 5. **Remembers.** One upserted `shortlist.csv` tracks `first_seen`, `status`, and every role's score. `apply`/`dismiss` are sticky — applied roles persist and stop resurfacing.
 
 ## Optional: LLM semantic fit-ranking
