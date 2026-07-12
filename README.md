@@ -50,9 +50,17 @@ Out of the box it's tuned for **remote software/AI** roles, because the shipped 
 
 Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
 
-## Sources & etiquette
+## Legal & etiquette
 
-All default sources are **official public APIs** — no scraping. Some require attribution (**RemoteOK**, **Remotive**): if you republish their data, credit and link back. Scraper-based sources (e.g. python-jobspy for LinkedIn/Indeed) are an **opt-in `[scrapers]` extra, off by default** — those sites' terms restrict scraping, so enabling them is your call and your risk.
+This is a **personal job-search tool**, not a data-resale product, and it's built to be a good citizen:
+
+- **Default sources are official, public, no-auth APIs**, used exactly as their vendors document them — Greenhouse, Lever, and Ashby publish these job-board endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter by default.
+- **It rate-limits itself** to each provider's documented limits (e.g. Remotive is capped at 4 calls/day in code) and sends a self-identifying `User-Agent` so providers can see and contact the caller.
+- **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
+- **Scrapers are opt-in and off by default.** The `[scrapers]` extra (e.g. python-jobspy for Indeed/LinkedIn) is never bundled or enabled by default — those sites' terms restrict scraping, so turning it on is your call and your risk.
+- **API keys** (Adzuna, USAJOBS, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's key travels in the request URL per their API design.
+
+In short: the defaults stay above-board. What you do with the opt-in scrapers is on you.
 
 ## License
 

@@ -4,7 +4,7 @@ One inspectable file, keyed by dedup_key. Each scan UPSERTS -- refresh score /
 age on roles it's seen before, PRESERVE their status and first_seen, add new
 roles. Applied/dismissed roles are 'sticky': they persist even after they leave
 the market, so your application history is never lost. Written atomically
-(temp -> os.replace) so a crash never corrupts the file.
+(temp -> os.replace), so an interrupted write leaves the previous file intact.
 
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
 salary, company, industry, title, department, employment_type, location,
@@ -46,6 +46,38 @@ COLUMNS = [
 
 # Statuses the user set by hand -- these rows persist even if they leave the feed.
 STICKY = {"applied", "dismissed", "interviewing", "screen", "offer", "rejected"}
+# Statuses hidden from the surfaced shortlist (you don't want these resurfacing).
+# interviewing/offer stay VISIBLE -- those are live and worth seeing.
+HIDDEN = {"applied", "dismissed", "rejected"}
+# Free-text columns fed by untrusted job-API data -- guarded against CSV/formula
+# injection so a hostile title like `=cmd|...` can't execute in Excel/Sheets.
+TEXT_COLS = {
+    "salary",
+    "company",
+    "industry",
+    "title",
+    "department",
+    "employment_type",
+    "location",
+    "source",
+    "url",
+    "signals",
+    "llm_note",
+}
+
+
+def _safe_int(v, default: int = 0) -> int:
+    """Tolerate hand-edited/decimal/garbage cells (the CSV is user-editable)."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _csv_safe(v) -> str:
+    """Neutralize spreadsheet formula injection in untrusted text cells."""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
 def short_id(key: str) -> str:
@@ -64,13 +96,18 @@ def write_all(path, rows: list[dict]) -> None:
     """Atomic write: full rewrite to a temp file, then os.replace."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    rows = sorted(rows, key=lambda r: int(r.get("score") or 0), reverse=True)
+    rows = sorted(rows, key=lambda r: _safe_int(r.get("score")), reverse=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
     with tmp.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({c: r.get(c, "") for c in COLUMNS})
+            w.writerow(
+                {
+                    c: (_csv_safe(r.get(c, "")) if c in TEXT_COLS else r.get(c, ""))
+                    for c in COLUMNS
+                }
+            )
     os.replace(tmp, p)
 
 
@@ -155,21 +192,21 @@ def surface(
     within max_age_days; sorted by (llm_score if present, else score) desc."""
     out = []
     for r in rows:
-        if r.get("status") in ("applied", "dismissed"):
+        if r.get("status") in HIDDEN:  # applied / dismissed / rejected
             continue
-        if int(r.get("score") or 0) < cfg.min_score:
+        if _safe_int(r.get("score")) < cfg.min_score:
             continue
         a = r.get("age_days")
-        if a not in (None, "") and int(a) > cfg.max_age_days:
+        if a not in (None, "") and _safe_int(a) > cfg.max_age_days:
             continue
         if only_new and not r.get("_is_new"):
             continue
         out.append(r)
     out.sort(
         key=lambda r: (
-            int(r["llm_score"])
-            if str(r.get("llm_score")).isdigit()
-            else int(r.get("score") or 0)
+            _safe_int(r["llm_score"])
+            if str(r.get("llm_score")).strip().isdigit()
+            else _safe_int(r.get("score"))
         ),
         reverse=True,
     )

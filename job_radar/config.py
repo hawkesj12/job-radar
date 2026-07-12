@@ -267,10 +267,13 @@ def load_config(path: str | os.PathLike | None) -> Config:
         return cfg
     import yaml
 
-    doc = yaml.safe_load(p.read_text()) or {}
-    prof, scor = doc.get("profile", {}), doc.get("scoring", {})
-    filt, srcs = doc.get("filters", {}), doc.get("sources", {})
-    llm = doc.get("llm", {})
+    doc = yaml.safe_load(p.read_text())
+    if not isinstance(doc, dict):  # empty file, or a scalar/list top level
+        return cfg
+    # `or {}` guards a present-but-empty section (`profile:` with no body -> None)
+    prof, scor = doc.get("profile") or {}, doc.get("scoring") or {}
+    filt, srcs = doc.get("filters") or {}, doc.get("sources") or {}
+    llm = doc.get("llm") or {}
 
     def take(section: dict, key: str, attr: str):
         if section.get(key) is not None:

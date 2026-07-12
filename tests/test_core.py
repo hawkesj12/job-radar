@@ -143,3 +143,72 @@ def test_llm_is_noop_when_disabled():
     assert c.llm.enabled is False
     items = [{"key": "k", "title": "AI Engineer", "company": "Acme", "text": "..."}]
     assert llm.rerank(items, c) == {}  # never calls out when disabled
+
+
+# ── regression tests for the three-critic review fixes ───────────────────────
+def test_config_empty_section_does_not_crash(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "profile:\nscoring:\nfilters:\n  min_score: 10\n"
+    )  # empty section bodies
+    c = config.load_config(p)
+    assert c.min_score == 10 and c.title_queries  # loads, defaults intact
+
+
+def test_config_nonmapping_yaml_falls_back(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("just some text\n")  # scalar top level
+    c = config.load_config(p)
+    assert c.max_age_days == 60  # generic defaults, no crash
+
+
+def test_llm_profile_nonempty_without_remote():
+    c = config.Config(remote_only=False)
+    assert llm._profile(c).strip()  # was empty before the fix
+
+
+def test_surface_hides_rejected(tmp_path):
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    merged = store.upsert(
+        csvp, [_post("A", "AI Engineer", 90, "u1")], today="2026-07-12"
+    )
+    store.mark_status(csvp, merged[0]["id"], "rejected")
+    assert store.surface(store.load_all(csvp), c) == []  # rejected never resurfaces
+
+
+def test_csv_formula_injection_neutralized(tmp_path):
+    csvp = tmp_path / "s.csv"
+    store.upsert(
+        csvp, [_post("=cmd|'/c calc'!A1", "AI Engineer", 40, "u1")], today="2026-07-12"
+    )
+    row = store.load_all(csvp)[0]
+    assert row["company"].startswith("'=")  # prefixed, inert in a spreadsheet
+
+
+def test_surface_tolerates_dirty_hand_edits(tmp_path):
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    store.write_all(
+        csvp,
+        [
+            {
+                "id": "x",
+                "dedup_key": "k",
+                "score": "45.5",
+                "age_days": "abc",
+                "status": "new",
+                "company": "A",
+            }
+        ],
+    )
+    store.surface(store.load_all(csvp), c)  # must not raise
+
+
+def test_rerank_tolerates_null_fit(monkeypatch):
+    c = config.Config()
+    c.llm.enabled = True
+    monkeypatch.setattr(c, "env", lambda k: "fake-key")
+    monkeypatch.setattr(llm, "_call", lambda cfg, u: '[{"id":0,"fit":null,"note":"x"}]')
+    out = llm.rerank([{"key": "k", "title": "t", "company": "c", "text": "jd"}], c)
+    assert out["k"]["llm_score"] == 0  # null fit -> 0, no crash

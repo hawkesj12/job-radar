@@ -76,7 +76,8 @@ def harvest(cfg=None, watchlist_path=None):
     companies = []
     if watchlist_path:
         try:
-            companies = json.loads(open(watchlist_path).read()).get("companies", [])
+            with open(watchlist_path) as f:
+                companies = json.loads(f.read()).get("companies", [])
         except Exception:
             pass
 

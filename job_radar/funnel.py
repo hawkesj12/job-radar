@@ -60,33 +60,19 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
 
 
 def append_watchlist(wl_path, new_entries):
-    """Atomic, lock-guarded append of verified new companies."""
+    """Append verified new companies. The temp-file + os.replace is atomic on its
+    own, so no lock is needed for a single-process CLI (a lock file only risked
+    getting stuck after a crash and permanently disabling discovery)."""
     if not new_entries:
         return []
-    lock = wl_path.with_suffix(".lock")
-    try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-    except FileExistsError:
-        print("  watchlist locked -- skipping auto-add this run")
-        return []
-    try:
-        doc = json.loads(wl_path.read_text())
-        existing = {
-            (c.get("ats"), (c.get("slug") or "").lower())
-            for c in doc.get("companies", [])
-        }
-        fresh = [
-            e for e in new_entries if (e["ats"], e["slug"].lower()) not in existing
-        ]
-        if fresh:
-            doc.setdefault("companies", []).extend(fresh)
-            tmp = wl_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(doc, indent=2) + "\n")
-            os.replace(tmp, wl_path)
-        return fresh
-    finally:
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
+    doc = json.loads(wl_path.read_text())
+    existing = {
+        (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
+    }
+    fresh = [e for e in new_entries if (e["ats"], e["slug"].lower()) not in existing]
+    if fresh:
+        doc.setdefault("companies", []).extend(fresh)
+        tmp = wl_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        os.replace(tmp, wl_path)
+    return fresh

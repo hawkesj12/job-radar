@@ -21,13 +21,11 @@ from . import config
 
 def _profile(cfg) -> str:
     top_kw = sorted(cfg.fit_weights.items(), key=lambda kv: kv[1], reverse=True)[:18]
-    return (
+    base = (
         "Target roles: " + "; ".join(cfg.title_queries) + ". "
-        "Values (highest-weight signals): " + ", ".join(k for k, _ in top_kw) + ". "
-        "Remote required."
-        if cfg.remote_only
-        else ""
+        "Values (highest-weight signals): " + ", ".join(k for k, _ in top_kw) + "."
     )
+    return base + (" Remote required." if cfg.remote_only else "")
 
 
 _SYSTEM = (
@@ -114,13 +112,15 @@ def rerank(items: list[dict], cfg=None) -> dict:
         return {}
     out = {}
     for obj in parsed:
+        if not isinstance(obj, dict):
+            continue
         try:
             i = int(obj["id"])
+            if 0 <= i < len(items):
+                out[items[i]["key"]] = {
+                    "llm_score": int(obj.get("fit") or 0),  # tolerate fit: null
+                    "llm_note": str(obj.get("note", ""))[:160],
+                }
         except (KeyError, ValueError, TypeError):
             continue
-        if 0 <= i < len(items):
-            out[items[i]["key"]] = {
-                "llm_score": int(obj.get("fit", 0)),
-                "llm_note": str(obj.get("note", ""))[:160],
-            }
     return out
