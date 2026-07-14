@@ -314,34 +314,44 @@ def search_adzuna(queries):
     dist = ""
     if cfg.radius_miles > 0 and cfg.location.lower() != "remote":
         dist = f"&distance={round(cfg.radius_miles * 1.60934)}"
+    # Adzuna caps a page at 50; walk `adzuna_pages` pages per query so a selective
+    # downstream filter (remote-only) still has a deep pool to carve from. Stop a
+    # query early once a page comes back short — there are no more results.
+    pages = max(1, getattr(cfg, "adzuna_pages", 1))
     out = []
     for qy in queries:
-        try:
-            data = get_json(
-                "https://api.adzuna.com/v1/api/jobs/us/search/1"
-                f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
-                f"&where={q(cfg.location)}{dist}&results_per_page=50&content-type=application/json"
-            )
-        except Exception:
-            continue
-        for j in data.get("results", []):
-            text = clean(j.get("description", ""))
-            out.append(
-                {
-                    "title": j.get("title", ""),
-                    "company": (j.get("company") or {}).get("display_name", ""),
-                    "location": ((j.get("location") or {}).get("display_name", ""))
-                    + " (Remote)",
-                    "url": j.get("redirect_url", ""),
-                    "posted": to_date(j.get("created")),
-                    "department": (j.get("category") or {}).get("label", ""),
-                    "employment_type": j.get("contract_time", ""),
-                    "salary": salary_range(j.get("salary_min"), j.get("salary_max")),
-                    "text": text,
-                    "source": "adzuna",
-                }
-            )
-        time.sleep(0.5)
+        for page in range(1, pages + 1):
+            try:
+                data = get_json(
+                    f"https://api.adzuna.com/v1/api/jobs/us/search/{page}"
+                    f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
+                    f"&where={q(cfg.location)}{dist}&results_per_page=50&content-type=application/json"
+                )
+            except Exception:
+                break  # a dead page ends this query; other queries still run
+            results = data.get("results", [])
+            for j in results:
+                text = clean(j.get("description", ""))
+                out.append(
+                    {
+                        "title": j.get("title", ""),
+                        "company": (j.get("company") or {}).get("display_name", ""),
+                        "location": ((j.get("location") or {}).get("display_name", ""))
+                        + " (Remote)",
+                        "url": j.get("redirect_url", ""),
+                        "posted": to_date(j.get("created")),
+                        "department": (j.get("category") or {}).get("label", ""),
+                        "employment_type": j.get("contract_time", ""),
+                        "salary": salary_range(
+                            j.get("salary_min"), j.get("salary_max")
+                        ),
+                        "text": text,
+                        "source": "adzuna",
+                    }
+                )
+            if len(results) < 50:
+                break  # last page for this query
+            time.sleep(0.5)  # be polite between pages of the same query
     return out
 
 
@@ -569,11 +579,12 @@ def search_usajobs(queries):
     # USAJOBS Radius is in miles and only applies alongside a LocationName.
     rad = f"&Radius={cfg.radius_miles}" if (is_place and cfg.radius_miles > 0) else ""
     remote = "" if is_place else "&RemoteIndicator=True"
+    rpp = max(1, getattr(cfg, "usajobs_results_per_page", 500))
     out = []
     for qy in queries:
         url = (
             f"https://data.usajobs.gov/api/Search?Keyword={q(qy)}"
-            f"&ResultsPerPage=50{loc}{rad}{remote}"
+            f"&ResultsPerPage={rpp}{loc}{rad}{remote}"
         )
         req = urllib.request.Request(
             url,

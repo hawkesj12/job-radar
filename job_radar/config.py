@@ -244,6 +244,15 @@ class Config:
     scraper_sources: list = field(default_factory=list)  # opt-in, off by default
     adzuna_app_id_env: str = "ADZUNA_APP_ID"
     adzuna_app_key_env: str = "ADZUNA_APP_KEY"
+    # Pages to pull per query. Adzuna caps a page at 50 results, so N pages ≈ N×50
+    # jobs/query before dedup; a selective filter (e.g. remote-only) then carves it
+    # down, so fetch generously. Env-overridable for prod tuning without a redeploy.
+    adzuna_pages: int = int(os.environ.get("ADZUNA_PAGES", "3"))
+    # USAJOBS allows up to 500 results/page (default 25) — one big page covers most
+    # federal queries, so a single call is both complete and frugal.
+    usajobs_results_per_page: int = int(
+        os.environ.get("USAJOBS_RESULTS_PER_PAGE", "500")
+    )
     funnel_auto_grow: bool = True
     funnel_max_new_per_run: int = 25
     # http
@@ -315,6 +324,11 @@ def load_config(path: str | os.PathLike | None) -> Config:
         cfg.adzuna_app_id_env = srcs["adzuna"].get("app_id_env", cfg.adzuna_app_id_env)
         cfg.adzuna_app_key_env = srcs["adzuna"].get(
             "app_key_env", cfg.adzuna_app_key_env
+        )
+        cfg.adzuna_pages = srcs["adzuna"].get("pages", cfg.adzuna_pages)
+    if isinstance(srcs.get("usajobs"), dict):
+        cfg.usajobs_results_per_page = srcs["usajobs"].get(
+            "results_per_page", cfg.usajobs_results_per_page
         )
     if isinstance(srcs.get("funnel"), dict):
         cfg.funnel_auto_grow = srcs["funnel"].get("auto_grow", cfg.funnel_auto_grow)
