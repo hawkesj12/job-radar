@@ -1,0 +1,25 @@
+{
+  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable), slug (the last path segment of the company's public job-board URL). The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
+  "companies": [
+    { "name": "Anthropic", "ats": "greenhouse", "slug": "anthropic", "frontier": true },
+    { "name": "OpenAI", "ats": "ashby", "slug": "openai", "frontier": true },
+    { "name": "Cohere", "ats": "ashby", "slug": "Cohere" },
+    { "name": "Stripe", "ats": "greenhouse", "slug": "stripe" },
+    { "name": "Databricks", "ats": "greenhouse", "slug": "databricks" },
+    { "name": "Ramp", "ats": "ashby", "slug": "ramp" },
+    { "name": "Notion", "ats": "greenhouse", "slug": "notion" },
+    { "name": "Figma", "ats": "greenhouse", "slug": "figma" },
+    { "name": "Vercel", "ats": "greenhouse", "slug": "vercel" },
+    { "name": "Retool", "ats": "greenhouse", "slug": "retool" },
+    { "name": "Discord", "ats": "greenhouse", "slug": "discord" },
+    { "name": "Brex", "ats": "greenhouse", "slug": "brex" },
+    { "name": "Plaid", "ats": "greenhouse", "slug": "plaid" },
+    { "name": "Samsara", "ats": "greenhouse", "slug": "samsara" },
+    { "name": "Benchling", "ats": "greenhouse", "slug": "benchling" },
+    { "name": "GitLab", "ats": "greenhouse", "slug": "gitlab" },
+    { "name": "Coinbase", "ats": "greenhouse", "slug": "coinbase" },
+    { "name": "DoorDash", "ats": "greenhouse", "slug": "doordash" },
+    { "name": "Robinhood", "ats": "greenhouse", "slug": "robinhood" },
+    { "name": "Dropbox", "ats": "greenhouse", "slug": "dropbox" }
+  ]
+}

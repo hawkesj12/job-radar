@@ -5,12 +5,15 @@
 Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
 
 ```
-pip install job-radar
-cp job-radar.example.yaml job-radar.yaml   # edit this to make it yours
+pipx install git+https://github.com/hawkesj12/job-radar   # or: pip install git+…
+job-radar init                              # write a starter job-radar.yaml + watchlist.json here
+# edit job-radar.yaml to make it yours
 job-radar                                   # scan → ranked shortlist.csv
 job-radar apply <id>                        # mark a role applied (it stops resurfacing)
 job-radar list                              # see your current shortlist
 ```
+
+> A PyPI release (`pip install job-radar`) is coming; until then install from Git as above.
 
 ## What it does
 
@@ -46,7 +49,7 @@ Out of the box it's tuned for **remote software/AI** roles, because the shipped 
 
 - **Any field:** change `signal_titles` + `fit_weights` in the config to your field's language (nursing, finance, trades…). No code.
 - **On-site / any location:** set `remote_only: false` and `location: "Your City, ST"`.
-- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna** and **USAJOBS** (free keys; every field, any location) and, if you accept the ToS tradeoff, the opt-in **JobSpy** scrapers (Indeed / LinkedIn / ZipRecruiter, where the whole market lives).
+- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna** and **USAJOBS** (free keys; every field, any location, where the whole market lives).
 
 Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
 
@@ -57,10 +60,9 @@ This is a **personal job-search tool**, not a data-resale product, and it's buil
 - **Default sources are official, public, no-auth APIs**, used exactly as their vendors document them — Greenhouse, Lever, and Ashby publish these job-board endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter by default.
 - **It rate-limits itself** to each provider's documented limits (e.g. Remotive is capped at 4 calls/day in code) and sends a self-identifying `User-Agent` so providers can see and contact the caller.
 - **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
-- **Scrapers are opt-in and off by default.** The `[scrapers]` extra (e.g. python-jobspy for Indeed/LinkedIn) is never bundled or enabled by default — those sites' terms restrict scraping, so turning it on is your call and your risk.
 - **API keys** (Adzuna, USAJOBS, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's key travels in the request URL per their API design.
 
-In short: the defaults stay above-board. What you do with the opt-in scrapers is on you.
+In short: every source is an official, public API used as documented.
 
 ## License
 

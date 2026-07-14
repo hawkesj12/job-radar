@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources as resources
 from datetime import datetime
 from pathlib import Path
 
 from . import config, engine, llm, store
 from .dedup import dedup_key
+
+
+def _packaged(name: str) -> str:
+    """Read a file shipped in job_radar/data/ (works from a wheel or the repo)."""
+    return (resources.files("job_radar") / "data" / name).read_text()
 
 
 def _resolve_config(path_arg):
@@ -36,19 +42,17 @@ def _fmt(r) -> str:
 
 
 def cmd_scan(args, cfg):
+    # Poll (and auto-grow) only a REAL watchlist.json — never the shipped template.
+    # On first run, seed watchlist.json from the packaged starter list so discovery
+    # writes there, not into a git-tracked *.example.json.
     wl = args.watchlist or "watchlist.json"
-    wl = (
-        wl
-        if Path(wl).exists()
-        else (
-            wl
-            if not Path("watchlist.example.json").exists()
-            else "watchlist.example.json"
-        )
-    )
     if not Path(wl).exists():
-        print(f"note: no watchlist ({wl}) — running breadth sources only.")
-        wl = None
+        try:
+            Path(wl).write_text(_packaged("watchlist.example.json"))
+            print(f"note: no watchlist found — seeded {wl} from the starter list.")
+        except (OSError, ModuleNotFoundError, FileNotFoundError):
+            print("note: no watchlist — running breadth sources only.")
+            wl = None
 
     print("scanning…")
     rows, discovered, errors = engine.harvest(cfg, wl)
@@ -94,6 +98,26 @@ def cmd_scan(args, cfg):
     print(f"\nFull list: {args.out}  ·  apply: job-radar apply <id>")
 
 
+def cmd_init(args, cfg):
+    """Write a starter job-radar.yaml (+ watchlist.json) into the cwd from the
+    packaged examples. Refuses to overwrite existing files."""
+    wrote, skipped = [], []
+    for src, dst in (
+        ("job-radar.example.yaml", "job-radar.yaml"),
+        ("watchlist.example.json", "watchlist.json"),
+    ):
+        if Path(dst).exists():
+            skipped.append(dst)
+            continue
+        Path(dst).write_text(_packaged(src))
+        wrote.append(dst)
+    if wrote:
+        print("✓ created " + ", ".join(wrote))
+    for s in skipped:
+        print(f"  kept existing {s} (not overwritten)")
+    print("edit job-radar.yaml to make it yours, then run `job-radar`.")
+
+
 def cmd_status(args, cfg, status):
     ok = store.mark_status(args.out, args.id, status)
     print(
@@ -137,6 +161,11 @@ def main(argv=None):
     )
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser(
+        "init",
+        parents=[common],
+        help="write a starter job-radar.yaml + watchlist.json into this folder",
+    )
+    sub.add_parser(
         "scan",
         parents=[common],
         help="poll all sources, score, update the shortlist (default)",
@@ -164,7 +193,9 @@ def main(argv=None):
     cfg = _resolve_config(args.config)
     config.set_active(cfg)
 
-    if args.cmd in (None, "scan"):
+    if args.cmd == "init":
+        cmd_init(args, cfg)
+    elif args.cmd in (None, "scan"):
         cmd_scan(args, cfg)
     elif args.cmd == "apply":
         cmd_status(args, cfg, "applied")
