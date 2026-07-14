@@ -336,8 +336,7 @@ def search_adzuna(queries):
                     {
                         "title": j.get("title", ""),
                         "company": (j.get("company") or {}).get("display_name", ""),
-                        "location": ((j.get("location") or {}).get("display_name", ""))
-                        + " (Remote)",
+                        "location": (j.get("location") or {}).get("display_name", ""),
                         "url": j.get("redirect_url", ""),
                         "posted": to_date(j.get("created")),
                         "department": (j.get("category") or {}).get("label", ""),

@@ -9,6 +9,39 @@ import re
 from . import config
 from .util import has
 
+# ── remote detection ────────────────────────────────────────────────────────
+# A pure predicate shared with downstream consumers (jobfitr). Title/location
+# match liberally; the BODY must hit a role-remoteness phrase AND not be negated,
+# which recovers Adzuna/USAJOBS roles that are genuinely remote but only say so in
+# the description (their APIs carry no reliable remote flag).
+_REMOTE_RE = re.compile(r"remote|anywhere|work from home|\bwfh\b", re.I)
+_REMOTE_BODY_RE = re.compile(
+    r"\b(?:fully|100%|completely|permanently)\s+remote\b"
+    r"|\bremote[- ](?:first|friendly|eligible|position|role|opportunity|work|based)\b"
+    r"|\b(?:this|the)\s+(?:is\s+a\s+)?remote\s+(?:position|role|job|opportunity)\b"
+    r"|\bwork[- ]from[- ]home\b|\bwork\s+from\s+home\b"
+    r"|\btelecommut\w*|\btelework\w*"
+    r"|\bremote\s+(?:within|in|across|throughout|anywhere)\b",
+    re.I,
+)
+_REMOTE_NEG_RE = re.compile(
+    r"\bno[t]?\s+(?:a\s+)?remote\b|\bno\s+remote\b"
+    r"|\bon[- ]?site\s+only\b|\bin[- ]office\s+only\b"
+    r"|\bnot\s+(?:a\s+)?remote\s+(?:position|role|job)\b",
+    re.I,
+)
+
+
+def remote_posting(title: str, location: str, body: str = "") -> bool:
+    """True when a role is remote. Title/location match liberally; the body must
+    hit a role-remoteness phrase and not be negated. Pure -- no config, safe to
+    share with jobfitr's tag derivation."""
+    if _REMOTE_RE.search(f"{title} {location}"):
+        return True
+    if body and _REMOTE_BODY_RE.search(body) and not _REMOTE_NEG_RE.search(body):
+        return True
+    return False
+
 
 def relevant(title: str, cfg=None) -> bool:
     cfg = cfg or config.active()
@@ -22,9 +55,9 @@ def is_remote(p: dict, cfg=None) -> bool:
     cfg = cfg or config.active()
     if not cfg.remote_only:
         return True
-    b = f"{p.get('title', '')} {p.get('location', '')}".lower()
-    if not (has("remote", b) or has("remotely", b) or "work from anywhere" in b):
+    if not remote_posting(p.get("title", ""), p.get("location", ""), p.get("text", "")):
         return False
+    b = f"{p.get('title', '')} {p.get('location', '')}".lower()
     return not any(x in b for x in cfg.exclude_locations)
 
 

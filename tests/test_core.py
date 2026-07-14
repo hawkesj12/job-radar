@@ -56,6 +56,27 @@ def test_relevance_and_remote_gates():
     )
 
 
+def test_remote_posting_reads_body():
+    # remote stated only in the body, title/location silent -> caught
+    assert scoring.remote_posting(
+        "Engineer", "United States", "This is a fully remote position."
+    )
+    # a body that negates remoteness stays onsite (no false positive)
+    assert not scoring.remote_posting(
+        "Engineer", "Austin, TX", "On-site only. This is not a remote role."
+    )
+    # nothing anywhere -> onsite
+    assert not scoring.remote_posting("Engineer", "Austin, TX", "")
+
+
+def test_is_remote_gate_uses_body():
+    # a body-only remote signal now passes the remote_only gate (recovers Adzuna/
+    # USAJOBS roles that carry no remote flag in title/location)
+    c = config.Config(remote_only=True, exclude_locations=[])
+    p = {"title": "Engineer", "location": "United States", "text": "Fully remote role."}
+    assert scoring.is_remote(p, c) is True
+
+
 # ── dedup ─────────────────────────────────────────────────────────────────────
 def test_dedup_key_ignores_seniority():
     a = {"company": "Acme Inc", "title": "Senior AI Engineer"}
