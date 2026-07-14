@@ -8,6 +8,7 @@ import re
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from functools import lru_cache
 
 from . import config
 
@@ -67,9 +68,16 @@ def salary_range(lo, hi) -> str:
     return ""
 
 
+@lru_cache(maxsize=None)
+def _kw_re(kw: str) -> re.Pattern:
+    """Compile a keyword's whole-word matcher once (keyword lists are static per
+    config; this is called ~200×/posting, so caching the compile matters)."""
+    return re.compile(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])")
+
+
 def has(kw: str, text: str) -> bool:
     """Whole-word match: 'ai' hits 'AI' but not 'training' / 'available'."""
-    return re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", text) is not None
+    return _kw_re(kw).search(text) is not None
 
 
 def env(key: str) -> str:

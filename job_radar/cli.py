@@ -56,14 +56,17 @@ def cmd_scan(args, cfg):
 
     print("scanning…")
     rows, discovered, errors = engine.harvest(cfg, wl)
-    by_key = {dedup_key(p): p for p in rows}
+    by_key = {(p.get("dedup_key") or dedup_key(p)): p for p in rows}
     today = datetime.now().strftime("%Y-%m-%d")
-    merged = store.upsert(args.out, rows, today)
+    # When the LLM re-rank runs we annotate in memory and write ONCE at the end;
+    # otherwise upsert does the single write itself.
+    llm_on = cfg.llm.enabled
+    merged = store.upsert(args.out, rows, today, write=not llm_on)
 
     surfaced = store.surface(merged, cfg)
     targets = surfaced[: cfg.llm.rerank_top_n]
 
-    if cfg.llm.enabled:
+    if llm_on:
         items = [
             {
                 "key": r["dedup_key"],
@@ -74,13 +77,12 @@ def cmd_scan(args, cfg):
             for r in targets
         ]
         ann = llm.rerank(items, cfg)
-        if ann:
-            for r in merged:
-                a = ann.get(r.get("dedup_key"))
-                if a:
-                    r["llm_score"], r["llm_note"] = a["llm_score"], a["llm_note"]
-            store.write_all(args.out, merged)
-            surfaced = store.surface(merged, cfg)
+        for r in merged:
+            a = ann.get(r.get("dedup_key"))
+            if a:
+                r["llm_score"], r["llm_note"] = a["llm_score"], a["llm_note"]
+        store.write_all(args.out, merged)  # the single write for the LLM path
+        surfaced = store.surface(merged, cfg)
 
     new_n = sum(1 for r in surfaced if r.get("_is_new"))
     print(
