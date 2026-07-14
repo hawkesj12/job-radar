@@ -15,8 +15,6 @@ from .scoring import is_remote, relevant, score_and_signals
 from .sources import enabled_breadth, enabled_depth
 from .util import age_int
 
-APPLIED_DOOR_DEFAULT = None  # uses cfg.applied_door
-
 
 def _consume(postings, hits, blocks, cfg, meta):
     for p in postings:
@@ -166,10 +164,13 @@ def harvest(cfg=None, watchlist_path=None):
 
     discovered = []
     if cfg.funnel_auto_grow and watchlist_path:
-        found = funnel(breadth_postings, known_companies, known_slugs, cfg)
         from pathlib import Path
 
-        discovered = append_watchlist(Path(watchlist_path), found)
+        try:
+            found = funnel(breadth_postings, known_companies, known_slugs, cfg)
+            discovered = append_watchlist(Path(watchlist_path), found)
+        except Exception as e:  # noqa: BLE001 — discovery must never sink a scan
+            errors.append(f"funnel: {type(e).__name__}")
 
     rows = sorted(hits.values(), key=lambda p: p["score"], reverse=True)
     return rows, discovered, errors

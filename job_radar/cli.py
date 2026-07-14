@@ -172,8 +172,8 @@ def main(argv=None):
         parents=[common],
         help="poll all sources, score, update the shortlist (default)",
     )
-    for name in ("apply", "dismiss"):
-        s = sub.add_parser(name, parents=[common], help=f"mark a role {name}")
+    for name, past in (("apply", "applied"), ("dismiss", "dismissed")):
+        s = sub.add_parser(name, parents=[common], help=f"mark a role {past}")
         s.add_argument("id")
     pl = sub.add_parser("list", parents=[common], help="show the current shortlist")
     pl.add_argument("--all", action="store_true", help="include applied/dismissed")
