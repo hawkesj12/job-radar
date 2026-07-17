@@ -6,16 +6,10 @@ from __future__ import annotations
 
 import re
 
+from rapidfuzz import fuzz as _rf_fuzz
+
 from . import config
 
-try:
-    from rapidfuzz import fuzz as _rf_fuzz
-except ImportError:  # optional; degrade to exact-match dedup
-    _rf_fuzz = None
-
-_SENIORITY = re.compile(
-    r"^(senior|sr\.?|staff|lead|principal|junior|jr\.?|mid|entry[- ]level)\s+", re.I
-)
 _CORP_SUFFIX = re.compile(r"\b(inc|llc|ltd|corp|co|company|the)\b")
 
 
@@ -24,8 +18,11 @@ def norm(s: str) -> str:
 
 
 def normalize_title(t: str) -> str:
-    t = _SENIORITY.sub("", (t or "").lower())
-    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+    # Keep seniority (Staff/Senior/Lead are genuinely different roles). Cross-source
+    # re-titling of the SAME role is still caught by the fuzzy pass; the fuzzy score
+    # of two distinct levels (e.g. "staff … eng" vs "senior … eng") stays below the
+    # match threshold, so they no longer collapse into one.
+    return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
 
 
 def dedup_key(p: dict) -> str:
@@ -38,7 +35,7 @@ def company_block(p: dict) -> str:
 
 def fuzzy_title_match(a: str, b: str, cfg=None) -> bool:
     cfg = cfg or config.active()
-    if _rf_fuzz is None or not a or not b:
+    if not a or not b:
         return False
     return _rf_fuzz.token_set_ratio(a, b) >= cfg.fuzzy_title_threshold
 
@@ -55,8 +52,6 @@ def find_hit_key(p: dict, hits: dict, blocks: dict, cfg=None):
     key = dedup_key(p)
     if key in hits:
         return key
-    if _rf_fuzz is None:
-        return None
     blk = company_block(p)
     if not blk:
         return None

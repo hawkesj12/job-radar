@@ -11,6 +11,7 @@ from . import config
 from .dedup import ats_from_url, norm
 from .scoring import relevant
 from .sources import DEPTH_ALL
+from .util import NET_ERRORS
 
 
 def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
@@ -44,8 +45,8 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
             continue
         try:
             ps = fetch(slug)
-        except Exception:
-            continue
+        except NET_ERRORS:
+            continue  # dead/unreachable slug — skip (a real bug would surface)
         if ps:  # >=1 posting -> the slug is real
             added.append(
                 {

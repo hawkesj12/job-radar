@@ -17,7 +17,15 @@ import re
 import time
 
 from . import config
-from .util import clean, get_json, q, salary_from_text, salary_range, to_date
+from .util import (
+    NET_ERRORS,
+    clean,
+    get_json,
+    q,
+    salary_from_text,
+    salary_range,
+    to_date,
+)
 
 
 # ── DEPTH: per-company ATS feeds -- fetch_<ats>(slug) -> [posting] ───────────
@@ -175,7 +183,7 @@ def search_remotive(queries):
     for qy in queries[:4]:  # Remotive: <=4 calls/day
         try:
             data = get_json(f"https://remotive.com/api/remote-jobs?search={q(qy)}")
-        except Exception:
+        except NET_ERRORS:
             continue
         for j in data.get("jobs", []):
             text = clean(j.get("description", ""))
@@ -279,7 +287,7 @@ def search_himalayas(queries):
     for qy in queries:
         try:
             data = get_json(f"https://himalayas.app/jobs/api/search?q={q(qy)}&limit=20")
-        except Exception:
+        except NET_ERRORS:
             continue
         for j in data.get("jobs", []):
             text = clean(j.get("description") or j.get("excerpt", ""))
@@ -327,7 +335,7 @@ def search_adzuna(queries):
                     f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
                     f"&where={q(cfg.location)}{dist}&results_per_page=50&content-type=application/json"
                 )
-            except Exception:
+            except NET_ERRORS:
                 break  # a dead page ends this query; other queries still run
             results = data.get("results", [])
             for j in results:
@@ -362,7 +370,7 @@ def search_hn_whoishiring(queries):
             "https://hn.algolia.com/api/v1/search_by_date"
             "?tags=story,author_whoishiring&hitsPerPage=8"
         ).get("hits", [])
-    except Exception:
+    except NET_ERRORS:
         return []
     thread = next(
         (h for h in hits if "who is hiring" in (h.get("title") or "").lower()), None
@@ -371,7 +379,7 @@ def search_hn_whoishiring(queries):
         return []
     try:
         tree = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}")
-    except Exception:
+    except NET_ERRORS:
         return []
     out = []
     for c in tree.get("children", []):
@@ -446,7 +454,7 @@ def search_braintrust(queries):
     while url and pages < 10:
         try:
             d = get_json(url)
-        except Exception:
+        except NET_ERRORS:
             break
         for j in d.get("results", []):
             t = j.get("title") or ""
@@ -598,7 +606,7 @@ def search_usajobs(queries):
                 import json as _json
 
                 data = _json.loads(r.read().decode("utf-8", "replace"))
-        except Exception:
+        except NET_ERRORS:
             continue
         for it in (data.get("SearchResult") or {}).get("SearchResultItems", []):
             d = it.get("MatchedObjectDescriptor") or {}

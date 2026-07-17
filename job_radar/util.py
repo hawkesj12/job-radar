@@ -5,12 +5,23 @@ from __future__ import annotations
 import html
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from . import config
+
+# Expected transient fetch failures (network down, timeout, a source returning
+# non-JSON). Catching THESE and moving on is correct; catching everything hides a
+# real schema-break bug (KeyError/AttributeError) as if the source had no jobs.
+NET_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeError)
+
+# All dates are Eastern Time (this is a US-centric job tool; naive local time gave
+# off-by-one ages near the day boundary depending on the machine's zone).
+_ET = ZoneInfo("America/New_York")
 
 
 def get_json(url: str):
@@ -39,7 +50,7 @@ def to_date(val) -> str:
     if isinstance(val, (int, float)):
         ts = val / 1000 if val > 1e11 else val
         try:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            return datetime.fromtimestamp(ts, tz=_ET).strftime("%Y-%m-%d")
         except Exception:
             return ""
     return str(val)[:10]
@@ -48,11 +59,28 @@ def to_date(val) -> str:
 _SAL_RE = re.compile(
     r"\$\s?\d{2,3}(?:,\d{3})?\s?[kK]?\s?(?:[-–—]|to)\s?\$?\s?\d{2,3}(?:,\d{3})?\s?[kK]?"
 )
+# A range is only a SALARY if it reads like pay: it carries a k / thousands, or is
+# immediately followed by a per-period unit. A magnitude word right after (million/
+# billion/M/B) means it's funding or revenue, not comp — reject it.
+_SAL_MAGNITUDE = re.compile(r"^\s*(?:million|billion|mn|bn|[mb])\b", re.I)
+_SAL_UNIT = re.compile(
+    r"^\s*(?:/|per\b)?\s*(?:hr|hour|yr|year|annum|annually|wk|week|mo|month|k\b)",
+    re.I,
+)
 
 
 def salary_from_text(text: str) -> str:
     m = _SAL_RE.search(text or "")
-    return re.sub(r"\s+", " ", m.group(0)).strip() if m else ""
+    if not m:
+        return ""
+    matched = m.group(0)
+    tail = (text or "")[m.end() :]
+    if _SAL_MAGNITUDE.match(tail):  # "$20-40 million in Series B" -> funding
+        return ""
+    has_anchor = "k" in matched.lower() or "," in matched
+    if not has_anchor and not _SAL_UNIT.match(tail):  # bare "$20-40" -> too ambiguous
+        return ""
+    return re.sub(r"\s+", " ", matched).strip()
 
 
 def salary_range(lo, hi) -> str:
@@ -80,16 +108,11 @@ def has(kw: str, text: str) -> bool:
     return _kw_re(kw).search(text) is not None
 
 
-def env(key: str) -> str:
-    import os
-
-    return os.environ.get(key, "") or ""
-
-
 def age_int(posted: str):
     if not posted:
         return None
     try:
-        return (datetime.now() - datetime.strptime(posted[:10], "%Y-%m-%d")).days
+        d = datetime.strptime(posted[:10], "%Y-%m-%d").replace(tzinfo=_ET)
+        return (datetime.now(_ET) - d).days
     except Exception:
         return None

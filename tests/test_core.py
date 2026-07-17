@@ -1,7 +1,7 @@
 """Core tests: config, deterministic scoring, dedup, the upsert store, and the
 LLM no-op guarantee. Run: pytest"""
 
-from job_radar import config, dedup, llm, scoring, store
+from job_radar import config, dedup, engine, funnel, llm, scoring, sources, store, util
 
 
 def _cfg():
@@ -78,10 +78,11 @@ def test_is_remote_gate_uses_body():
 
 
 # ── dedup ─────────────────────────────────────────────────────────────────────
-def test_dedup_key_ignores_seniority():
-    a = {"company": "Acme Inc", "title": "Senior AI Engineer"}
-    b = {"company": "Acme Inc", "title": "AI Engineer"}
-    assert dedup.dedup_key(a) == dedup.dedup_key(b)
+def test_dedup_key_keeps_seniority():
+    # Staff and Senior are genuinely different roles — they must NOT collapse.
+    a = {"company": "Acme Inc", "title": "Staff AI Engineer"}
+    b = {"company": "Acme Inc", "title": "Senior AI Engineer"}
+    assert dedup.dedup_key(a) != dedup.dedup_key(b)
 
 
 def test_ats_from_url():
@@ -272,3 +273,146 @@ def test_adzuna_no_radius_when_remote(monkeypatch):
     config.set_active(config.Config(location="remote", radius_miles=200))
     sources.search_adzuna(["ai engineer"])
     assert "distance=" not in seen["url"]  # a radius is meaningless for remote
+
+
+# ── pure helpers (util) ───────────────────────────────────────────────────────
+def test_to_date_handles_epoch_and_iso():
+    assert util.to_date("2026-07-14T09:00:00Z") == "2026-07-14"
+    assert util.to_date(1_752_000_000) == "2025-07-08"  # epoch seconds
+    assert (
+        util.to_date(1_752_000_000_000) == "2025-07-08"
+    )  # epoch millis (same instant)
+    assert util.to_date("") == "" and util.to_date(None) == ""
+
+
+def test_salary_from_text_accepts_pay_rejects_funding():
+    assert util.salary_from_text("Comp: $120k-$150k") == "$120k-$150k"
+    assert util.salary_from_text("$120,000 - $150,000 annually").startswith("$120,000")
+    assert util.salary_from_text("Rate $100-150/hr") == "$100-150"  # unit anchor
+    assert util.salary_from_text("We raised $20-40 million in Series B") == ""
+    assert util.salary_from_text("a $20-40 discount") == ""  # bare range, ambiguous
+
+
+def test_has_is_whole_word():
+    # callers pass already-lowercased text (see scoring.score); has() is case-exact
+    assert util.has("ai", "senior ai engineer")
+    assert not util.has("ai", "available training")  # not a substring hit
+
+
+# ── source parser (the brittle provider-JSON → posting mapping) ───────────────
+def test_greenhouse_parser_maps_fields(monkeypatch):
+    fake = {
+        "jobs": [
+            {
+                "title": "AI Engineer",
+                "location": {"name": "Remote - US"},
+                "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+                "updated_at": "2026-07-10T00:00:00Z",
+                "departments": [{"name": "Engineering"}],
+                "content": "<p>Build &amp; ship LLM systems.</p>",
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: fake)
+    out = sources.fetch_greenhouse("acme")
+    assert len(out) == 1
+    j = out[0]
+    assert j["title"] == "AI Engineer"
+    assert j["location"] == "Remote - US"
+    assert j["url"].endswith("/acme/jobs/1")
+    assert j["posted"] == "2026-07-10"
+    assert j["department"] == "Engineering"
+    assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
+
+
+# ── engine.harvest end-to-end (monkeypatched sources, no network) ─────────────
+def test_harvest_end_to_end(monkeypatch):
+    cfg = config.Config(remote_only=True, min_score=0)
+    config.set_active(cfg)
+
+    def fake_breadth(queries):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/1",
+                "posted": "2026-07-12",
+                "text": "Build RAG agentic LLM systems.",
+                "source": "fake",
+            },
+            {  # same role, different source + slight retitle -> should dedup
+                "title": "AI Engineer - Remote",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/2",
+                "posted": "2026-07-12",
+                "text": "Build RAG agentic LLM systems.",
+                "source": "fake2",
+            },
+            {  # excluded by title
+                "title": "Office Manager",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/3",
+                "posted": "2026-07-12",
+                "text": "Manage the office.",
+                "source": "fake",
+            },
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+    rows, discovered, errors = engine.harvest(cfg, watchlist_path=None)
+    titles = {r["title"] for r in rows}
+    assert "Office Manager" not in titles  # relevance gate
+    ai = [r for r in rows if "AI Engineer" in r["title"]]
+    assert len(ai) == 1  # the two AI rows deduped into one
+    assert errors == []
+
+
+def test_harvest_surfaces_broken_source(monkeypatch):
+    cfg = config.Config()
+    config.set_active(cfg)
+
+    def boom(queries):
+        raise KeyError("schema changed")  # a real bug, not a network blip
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("boom", boom)])
+    rows, discovered, errors = engine.harvest(cfg, watchlist_path=None)
+    assert any("boom" in e for e in errors)  # surfaced, not swallowed as "no jobs"
+
+
+# ── funnel: grows a real watchlist, never the shipped template ────────────────
+def test_append_watchlist_grows_real_file(tmp_path):
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": []}')
+    added = funnel.append_watchlist(
+        wl, [{"name": "Acme", "ats": "greenhouse", "slug": "acme"}]
+    )
+    assert added and "Acme" in wl.read_text()
+
+
+def test_append_watchlist_refuses_template(tmp_path):
+    ex = tmp_path / "watchlist.example.json"
+    ex.write_text('{"companies": []}')
+    added = funnel.append_watchlist(
+        ex, [{"name": "Acme", "ats": "greenhouse", "slug": "acme"}]
+    )
+    assert added == [] and "Acme" not in ex.read_text()  # template untouched
+
+
+# ── C3: a re-titled applied role keeps its status (matched on URL) ────────────
+def test_upsert_rematches_retitled_role_by_url(tmp_path):
+    csvp = tmp_path / "s.csv"
+    merged = store.upsert(
+        csvp, [_post("Acme", "AI Engineer", 40, "https://x/1")], today="2026-07-10"
+    )
+    store.mark_status(csvp, merged[0]["id"], "applied")
+    # next run: the recruiter re-titled it (new dedup_key) but the URL is stable
+    p2 = _post("Acme", "AI Engineer, Platform Team", 55, "https://x/1")
+    merged2 = store.upsert(csvp, [p2], today="2026-07-12")
+    applied = [r for r in merged2 if r["status"] == "applied"]
+    assert len(applied) == 1  # one row, status preserved (no duplicate 'new' row)
+    assert applied[0]["first_seen"] == "2026-07-10"

@@ -150,6 +150,10 @@ def upsert(
     today = today or datetime.now().strftime("%Y-%m-%d")
     existing = load_all(path)
     by_key = {r.get("dedup_key"): r for r in existing if r.get("dedup_key")}
+    # A role's URL is stable even when a recruiter re-titles it (which changes its
+    # dedup_key). Index by URL so a re-titled role inherits its prior status
+    # instead of resurfacing as a brand-new row you might re-apply to.
+    by_url = {r.get("url"): r for r in existing if r.get("url")}
 
     result: dict[str, dict] = {}
     # 1) carry forward sticky rows (applied/dismissed/etc.) even if not seen now
@@ -162,12 +166,17 @@ def upsert(
         row = _build_row(p, today)
         k = row["dedup_key"]
         old = by_key.get(k)
+        if old is None and row.get("url"):
+            old = by_url.get(row["url"])  # exact key missed -> try the stable URL
         if old:
             row["first_seen"] = old.get("first_seen") or today
             row["status"] = old.get("status") or "new"
             row["llm_score"] = old.get("llm_score", "")
             row["llm_note"] = old.get("llm_note", "")
             row["_is_new"] = False
+            old_key = old.get("dedup_key")
+            if old_key and old_key != k:  # re-titled: drop the stale old-key row
+                result.pop(old_key, None)
         else:
             row["_is_new"] = True
         result[k] = row
