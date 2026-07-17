@@ -12,6 +12,16 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back on a missing/garbage value
+    so a bad env var can never crash the CLI at import time."""
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # ── generic defaults (NOT tuned to any one person) ──────────────────────────
 DEFAULT_TITLE_QUERIES = [
     "AI Engineer",
@@ -241,17 +251,16 @@ class Config:
     # sources
     depth_sources: list = field(default_factory=lambda: list(ALL_DEPTH))
     breadth_sources: list = field(default_factory=lambda: list(ALL_BREADTH))
-    scraper_sources: list = field(default_factory=list)  # opt-in, off by default
     adzuna_app_id_env: str = "ADZUNA_APP_ID"
     adzuna_app_key_env: str = "ADZUNA_APP_KEY"
     # Pages to pull per query. Adzuna caps a page at 50 results, so N pages ≈ N×50
     # jobs/query before dedup; a selective filter (e.g. remote-only) then carves it
     # down, so fetch generously. Env-overridable for prod tuning without a redeploy.
-    adzuna_pages: int = int(os.environ.get("ADZUNA_PAGES", "3"))
+    adzuna_pages: int = field(default_factory=lambda: _env_int("ADZUNA_PAGES", 3))
     # USAJOBS allows up to 500 results/page (default 25) — one big page covers most
     # federal queries, so a single call is both complete and frugal.
-    usajobs_results_per_page: int = int(
-        os.environ.get("USAJOBS_RESULTS_PER_PAGE", "500")
+    usajobs_results_per_page: int = field(
+        default_factory=lambda: _env_int("USAJOBS_RESULTS_PER_PAGE", 500)
     )
     funnel_auto_grow: bool = True
     funnel_max_new_per_run: int = 25
@@ -274,9 +283,15 @@ def load_config(path: str | os.PathLike | None) -> Config:
     p = Path(path)
     if not p.exists():
         return cfg
+    import sys
+
     import yaml
 
-    doc = yaml.safe_load(p.read_text())
+    try:
+        doc = yaml.safe_load(p.read_text())
+    except yaml.YAMLError as e:
+        print(f"  config parse error in {p} — using defaults ({e})", file=sys.stderr)
+        return cfg
     if not isinstance(doc, dict):  # empty file, or a scalar/list top level
         return cfg
     # `or {}` guards a present-but-empty section (`profile:` with no body -> None)
@@ -317,7 +332,6 @@ def load_config(path: str | os.PathLike | None) -> Config:
     for k, a in [
         ("ats", "depth_sources"),
         ("boards", "breadth_sources"),
-        ("scrapers", "scraper_sources"),
     ]:
         take(srcs, k, a)
     if isinstance(srcs.get("adzuna"), dict):

@@ -65,6 +65,8 @@ def append_watchlist(wl_path, new_entries):
     getting stuck after a crash and permanently disabling discovery)."""
     if not new_entries:
         return []
+    if wl_path.name.endswith(".example.json"):
+        return []  # never mutate a shipped template
     doc = json.loads(wl_path.read_text())
     existing = {
         (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
