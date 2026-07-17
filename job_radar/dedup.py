@@ -43,9 +43,15 @@ def fuzzy_title_match(a: str, b: str, cfg=None) -> bool:
     return _rf_fuzz.token_set_ratio(a, b) >= cfg.fuzzy_title_threshold
 
 
-def find_hit_key(p: dict, hits: dict, cfg=None):
+def find_hit_key(p: dict, hits: dict, blocks: dict, cfg=None):
     """Resolve p to an existing hit: exact key first, then a fuzzy-title near-dup
-    within the same company block. Returns the matching key or None (new role)."""
+    within the same company block. Returns the matching key or None (new role).
+
+    `blocks` is a company-block index (block -> [key]) so the fuzzy pass only
+    compares against hits in the SAME company, not the whole set — turning an
+    O(n) scan per posting into O(hits-in-this-company). The compared hits carry
+    their normalized title precomputed on insert (`_nt`), so nothing is re-derived
+    inside the loop. Together this keeps de-dup linear instead of O(n²)."""
     key = dedup_key(p)
     if key in hits:
         return key
@@ -55,10 +61,9 @@ def find_hit_key(p: dict, hits: dict, cfg=None):
     if not blk:
         return None
     ptitle = normalize_title(p.get("title", ""))
-    for k, cur in hits.items():
-        if company_block(cur) == blk and fuzzy_title_match(
-            ptitle, normalize_title(cur.get("title", "")), cfg
-        ):
+    for k in blocks.get(blk, ()):
+        cur = hits.get(k)
+        if cur is not None and fuzzy_title_match(ptitle, cur.get("_nt", ""), cfg):
             return k
     return None
 

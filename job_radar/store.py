@@ -112,7 +112,7 @@ def write_all(path, rows: list[dict]) -> None:
 
 
 def _build_row(p: dict, today: str) -> dict:
-    key = dedup_key(p)
+    key = p.get("dedup_key") or dedup_key(p)  # reuse the engine's key when present
     a = age_int(p.get("posted", ""))
     src = ", ".join(
         sorted(p.get("sources") or ([p.get("source")] if p.get("source") else []))
@@ -140,9 +140,13 @@ def _build_row(p: dict, today: str) -> dict:
     }
 
 
-def upsert(path, postings: list[dict], today: str | None = None) -> list[dict]:
+def upsert(
+    path, postings: list[dict], today: str | None = None, write: bool = True
+) -> list[dict]:
     """Merge this run's scored postings into the store. Returns the merged rows,
-    each tagged `_is_new` (True if first seen this run)."""
+    each tagged `_is_new` (True if first seen this run). Pass `write=False` to
+    skip the file write when the caller will annotate + write once itself (the
+    LLM path), avoiding a redundant full rewrite."""
     today = today or datetime.now().strftime("%Y-%m-%d")
     existing = load_all(path)
     by_key = {r.get("dedup_key"): r for r in existing if r.get("dedup_key")}
@@ -169,7 +173,8 @@ def upsert(path, postings: list[dict], today: str | None = None) -> list[dict]:
         result[k] = row
 
     merged = list(result.values())
-    write_all(path, merged)
+    if write:
+        write_all(path, merged)
     return merged
 
 

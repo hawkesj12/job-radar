@@ -61,11 +61,15 @@ def is_remote(p: dict, cfg=None) -> bool:
     return not any(x in b for x in cfg.exclude_locations)
 
 
-def score(p: dict, cfg=None) -> int:
+def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
+    """Score a posting AND derive its top signal labels in a SINGLE keyword scan.
+    `score()` and `top_signals()` are thin wrappers so the public API is unchanged;
+    the engine calls this to avoid scanning `fit_weights` over the blob twice."""
     cfg = cfg or config.active()
     fw = cfg.fit_weights
     blob = f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
-    raw = sum(w for kw, w in fw.items() if has(kw, blob))
+    blob_hits = [(w, kw) for kw, w in fw.items() if has(kw, blob)]  # the one scan
+    raw = sum(w for w, _ in blob_hits)
     # BM25-style length normalization: divide the body score by a saturating
     # length factor so a long JD can't accrue score just by being long, then cap.
     dl = len(re.findall(r"[a-z0-9]+", blob))
@@ -76,13 +80,13 @@ def score(p: dict, cfg=None) -> int:
     body -= sum(w for kw, w in cfg.title_penalty.items() if has(kw, tl))
     agency_blob = f"{p.get('company', '')} {p.get('text', '')}".lower()
     body -= sum(w for kw, w in cfg.agency_penalty.items() if has(kw, agency_blob))
-    return round(body)
+    sig = ", ".join(kw for _, kw in sorted(blob_hits, reverse=True)[:n])
+    return round(body), sig
+
+
+def score(p: dict, cfg=None) -> int:
+    return score_and_signals(p, cfg=cfg)[0]
 
 
 def top_signals(p: dict, n: int = 7, cfg=None) -> str:
-    cfg = cfg or config.active()
-    blob = f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
-    hits = sorted(
-        ((w, kw) for kw, w in cfg.fit_weights.items() if has(kw, blob)), reverse=True
-    )
-    return ", ".join(kw for _, kw in hits[:n])
+    return score_and_signals(p, n=n, cfg=cfg)[1]
