@@ -1,7 +1,23 @@
 """Core tests: config, deterministic scoring, dedup, the upsert store, and the
 LLM no-op guarantee. Run: pytest"""
 
-from job_radar import config, dedup, engine, funnel, llm, scoring, sources, store, util
+import types
+
+import pytest
+
+from job_radar import (
+    cli,
+    config,
+    dedup,
+    engine,
+    funnel,
+    llm,
+    scoring,
+    seed,
+    sources,
+    store,
+    util,
+)
 
 
 def _cfg():
@@ -416,3 +432,141 @@ def test_upsert_rematches_retitled_role_by_url(tmp_path):
     applied = [r for r in merged2 if r["status"] == "applied"]
     assert len(applied) == 1  # one row, status preserved (no duplicate 'new' row)
     assert applied[0]["first_seen"] == "2026-07-10"
+
+
+# ── panel-review punch-list fixes ────────────────────────────────────────────
+def test_store_roundtrips_unicode(tmp_path):
+    """Non-cp1252 titles (CJK/emoji) survive write+read — the Windows
+    UnicodeEncodeError guard (encoding='utf-8' on every file open)."""
+    csvp = tmp_path / "s.csv"
+    store.upsert(
+        csvp, [_post("Acme", "Senior AI Engineer 🚀 — 东京", 40, "https://x/1")],
+        today="2026-07-10",
+    )
+    rows = store.load_all(csvp)
+    assert any("🚀" in r["title"] and "东京" in r["title"] for r in rows)
+
+
+def test_total_outage_preserves_store(tmp_path, monkeypatch):
+    """Every source failing (0 rows + errors) must NOT overwrite the store (which
+    would wipe 'new' roles / reset first_seen) and must exit nonzero."""
+    c = _cfg()
+    csvp = tmp_path / "shortlist.csv"
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": []}', encoding="utf-8")
+    merged = store.upsert(
+        csvp,
+        [
+            _post("Acme", "AI Engineer", 40, "https://x/1"),
+            _post("Beta", "AI Engineer", 45, "https://x/2"),
+        ],
+        today="2026-07-10",
+    )
+    store.mark_status(csvp, merged[0]["id"], "applied")
+    before = csvp.read_bytes()
+    monkeypatch.setattr(
+        engine, "harvest", lambda cfg, w: ([], [], ["breadth:x: URLError"])
+    )
+    args = types.SimpleNamespace(
+        out=str(csvp), watchlist=str(wl), verbose=False, limit=25
+    )
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_scan(args, c)
+    assert ei.value.code == 1
+    assert csvp.read_bytes() == before  # nothing overwritten
+
+
+def test_list_all_tolerates_garbage_score(tmp_path):
+    """`list --all` sorts by _safe_int, so a hand-typed bad score can't crash it."""
+    import csv as _csv
+
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    with open(csvp, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=store.COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        w.writerow(
+            {
+                "id": "abc",
+                "score": "notanumber",
+                "title": "AI Engineer",
+                "company": "Acme",
+                "status": "new",
+                "url": "u",
+                "dedup_key": "acme|ai engineer",
+            }
+        )
+    args = types.SimpleNamespace(out=str(csvp), all=True, limit=25)
+    cli.cmd_list(args, c)  # must not raise ValueError
+
+
+def test_corrupt_watchlist_surfaces_error(tmp_path, monkeypatch):
+    """A corrupt watchlist is LOUD (an error), and breadth still runs — no silent
+    drop of the entire depth harvest."""
+    c = _cfg()
+    bad = tmp_path / "watchlist.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+
+    def fake_breadth(queries):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/1",
+                "posted": "2026-07-12",
+                "text": "Build RAG LLM systems.",
+                "source": "fake",
+            }
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda cfg: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda cfg: [("fake", fake_breadth)])
+    rows, discovered, errors = engine.harvest(c, watchlist_path=str(bad))
+    assert any("watchlist" in e for e in errors)  # surfaced, not swallowed
+    assert any(r["company"] == "Acme" for r in rows)  # breadth still ran
+
+
+def test_fuzzy_dedup_rejects_subset_keeps_reorder():
+    """A bare title must not merge into a longer, more-specific one at the same
+    company (distinct opening), but a reorder / noise-only retitle still merges."""
+    c = _cfg()
+    n = dedup.normalize_title
+    assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer - Remote"), c)
+    assert not dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Payments"), c)
+    assert dedup.fuzzy_title_match(n("Senior AI Engineer"), n("AI Engineer (Senior)"), c)
+
+
+def test_title_score_double_count_is_capped():
+    """A keyword-stuffed TITLE can't run away — its double-count is bounded by
+    title_score_cap."""
+    stuffed = {
+        "title": "AI Engineer LLM RAG Agentic Founding Remote Senior",
+        "location": "Remote",
+        "text": "x",
+        "company": "Acme",
+    }
+    s0 = scoring.score(stuffed, config.Config(title_score_cap=0))
+    s12 = scoring.score(stuffed, config.Config(title_score_cap=12))
+    s100 = scoring.score(stuffed, config.Config(title_score_cap=100))
+    assert s12 - s0 <= 12  # the cap bounds the title bonus
+    assert s12 < s100  # ...and it actually bites on a stuffed title
+
+
+def test_seed_degrades_gracefully(tmp_path, monkeypatch):
+    """A Common Crawl hiccup raises a clean SeedError (not a raw traceback), and
+    `seed` exits nonzero without crashing."""
+
+    def boom():
+        raise seed.SeedError("Common Crawl index unavailable (URLError)")
+
+    monkeypatch.setattr(seed, "_latest_cdx", boom)
+    with pytest.raises(seed.SeedError):
+        seed.seed_universe("greenhouse", tmp_path / "wl.json", limit=10)
+
+    args = types.SimpleNamespace(
+        ats="greenhouse", max=10, verify=False, watchlist=str(tmp_path / "wl.json")
+    )
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_seed(args, _cfg())
+    assert ei.value.code == 1

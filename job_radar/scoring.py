@@ -62,13 +62,15 @@ def is_remote(p: dict, cfg=None) -> bool:
 
 
 def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
-    """Score a posting AND derive its top signal labels in a SINGLE keyword scan.
-    `score()` and `top_signals()` are thin wrappers so the public API is unchanged;
-    the engine calls this to avoid scanning `fit_weights` over the blob twice."""
+    """Score a posting AND derive its top signal labels in ONE pass over
+    `fit_weights` (each keyword is counted independently, so overlapping keywords
+    like 'ai' and 'ai engineer' both contribute). `score()` and `top_signals()`
+    are thin wrappers so the public API is unchanged; the engine calls this to
+    avoid walking `fit_weights` over the blob twice."""
     cfg = cfg or config.active()
     fw = cfg.fit_weights
     blob = f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
-    blob_hits = [(w, kw) for kw, w in fw.items() if has(kw, blob)]  # the one scan
+    blob_hits = [(w, kw) for kw, w in fw.items() if has(kw, blob)]
     raw = sum(w for w, _ in blob_hits)
     # BM25-style length normalization: divide the body score by a saturating
     # length factor so a long JD can't accrue score just by being long, then cap.
@@ -76,7 +78,8 @@ def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
     norm = (1 - cfg.score_len_b) + cfg.score_len_b * (dl / cfg.avg_jd_tokens)
     body = min(raw / norm if norm > 0 else raw, cfg.blob_score_cap)
     tl = p.get("title", "").lower()
-    body += sum(w for kw, w in fw.items() if has(kw, tl))  # title double
+    # Title double-count, but CAPPED so a keyword-stuffed title can't run away.
+    body += min(sum(w for kw, w in fw.items() if has(kw, tl)), cfg.title_score_cap)
     body -= sum(w for kw, w in cfg.title_penalty.items() if has(kw, tl))
     agency_blob = f"{p.get('company', '')} {p.get('text', '')}".lower()
     body -= sum(w for kw, w in cfg.agency_penalty.items() if has(kw, agency_blob))

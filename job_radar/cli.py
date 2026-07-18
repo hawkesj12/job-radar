@@ -13,7 +13,7 @@ from .dedup import dedup_key
 
 def _packaged(name: str) -> str:
     """Read a file shipped in job_radar/data/ (works from a wheel or the repo)."""
-    return (resources.files("job_radar") / "data" / name).read_text()
+    return (resources.files("job_radar") / "data" / name).read_text(encoding="utf-8")
 
 
 def _resolve_config(path_arg):
@@ -48,7 +48,7 @@ def cmd_scan(args, cfg):
     wl = args.watchlist or "watchlist.json"
     if not Path(wl).exists():
         try:
-            Path(wl).write_text(_packaged("watchlist.example.json"))
+            Path(wl).write_text(_packaged("watchlist.example.json"), encoding="utf-8")
             print(f"note: no watchlist found — seeded {wl} from the starter list.")
         except (OSError, ModuleNotFoundError, FileNotFoundError):
             print("note: no watchlist — running breadth sources only.")
@@ -56,6 +56,24 @@ def cmd_scan(args, cfg):
 
     print("scanning…")
     rows, discovered, errors = engine.harvest(cfg, wl)
+    # Total failure (nothing harvested, but sources errored) — do NOT let upsert
+    # write an empty store: that would wipe "new" roles and reset first_seen,
+    # corrupting the "remembers what you've seen" history. Keep the prior file.
+    if not rows and errors:
+        existing = store.load_all(args.out)
+        print(
+            f"⚠ all sources failed ({len(errors)} errors) — keeping your existing "
+            f"shortlist ({len(existing)} roles). Nothing overwritten."
+        )
+        if args.verbose:
+            for e in errors:
+                print(f"    {e}")
+        else:
+            print("  (run with --verbose to see which sources failed)")
+        for r in store.surface(existing, cfg)[: args.limit]:
+            print(_fmt(r))
+        # Nonzero so a scheduled/cron wrapper can detect a dead run.
+        raise SystemExit(1)
     by_key = {(p.get("dedup_key") or dedup_key(p)): p for p in rows}
     today = datetime.now().strftime("%Y-%m-%d")
     # When the LLM re-rank runs we annotate in memory and write ONCE at the end;
@@ -85,10 +103,16 @@ def cmd_scan(args, cfg):
         surfaced = store.surface(merged, cfg)
 
     new_n = sum(1 for r in surfaced if r.get("_is_new"))
+    err_tail = f"{len(errors)} feed errors"
+    if errors and not args.verbose:
+        err_tail += " (--verbose to see them)"
     print(
         f"\n{len(merged)} roles tracked · {len(surfaced)} on the shortlist · "
-        f"{new_n} new since last run · {len(errors)} feed errors"
+        f"{new_n} new since last run · {err_tail}"
     )
+    if args.verbose and errors:
+        for e in errors:
+            print(f"    {e}")
     if discovered:
         print(
             f"+{len(discovered)} companies auto-discovered: "
@@ -111,7 +135,7 @@ def cmd_init(args, cfg):
         if Path(dst).exists():
             skipped.append(dst)
             continue
-        Path(dst).write_text(_packaged(src))
+        Path(dst).write_text(_packaged(src), encoding="utf-8")
         wrote.append(dst)
     if wrote:
         print("✓ created " + ", ".join(wrote))
@@ -135,7 +159,7 @@ def cmd_list(args, cfg):
         print(f"no shortlist yet — run `job-radar` first ({args.out} not found).")
         return
     if args.all:
-        rows = sorted(rows, key=lambda r: int(r.get("score") or 0), reverse=True)
+        rows = sorted(rows, key=lambda r: store._safe_int(r.get("score")), reverse=True)
     else:
         rows = store.surface(rows, cfg)
     for r in rows[: args.limit]:
@@ -157,6 +181,11 @@ def main(argv=None):
         "--watchlist", help="watchlist.json (companies to poll directly)"
     )
     common.add_argument("--limit", type=int, default=25, help="how many to print")
+    common.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print the per-source error list (which feeds failed and why)",
+    )
 
     ap = argparse.ArgumentParser(
         prog="job-radar", description="Find roles that fit you.", parents=[common]
@@ -186,6 +215,12 @@ def main(argv=None):
         "ats", choices=["greenhouse", "lever", "ashby", "workable", "smartrecruiters"]
     )
     sd.add_argument(
+        "--max",
+        type=int,
+        default=500,
+        help="max companies to add this run (its own limit, not the print --limit)",
+    )
+    sd.add_argument(
         "--verify",
         action="store_true",
         help="probe each slug (slower; only add live boards)",
@@ -213,10 +248,14 @@ def cmd_seed(args, cfg):
     from . import seed
 
     wl = args.watchlist or "watchlist.json"
-    n = seed.seed_universe(args.ats, wl, limit=args.limit, verify=args.verify)
+    try:
+        n = seed.seed_universe(args.ats, wl, limit=args.max, verify=args.verify)
+    except seed.SeedError as e:
+        print(f"seed unavailable ({e}) — try again later.")
+        raise SystemExit(1) from None
     print(
         f"✓ added {n} {args.ats} companies to {wl} "
-        f"(raise --limit to add more; run `job-radar` to scan them)"
+        f"(raise --max to add more; run `job-radar` to scan them)"
     )
 
 

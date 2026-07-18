@@ -88,7 +88,7 @@ def load_all(path) -> list[dict]:
     p = Path(path)
     if not p.exists():
         return []
-    with p.open(newline="") as f:
+    with p.open(newline="", encoding="utf-8") as f:
         return [dict(row) for row in csv.DictReader(f)]
 
 
@@ -98,7 +98,7 @@ def write_all(path, rows: list[dict]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     rows = sorted(rows, key=lambda r: _safe_int(r.get("score")), reverse=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    with tmp.open("w", newline="") as f:
+    with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
         for r in rows:

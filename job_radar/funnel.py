@@ -68,7 +68,7 @@ def append_watchlist(wl_path, new_entries):
         return []
     if wl_path.name.endswith(".example.json"):
         return []  # never mutate a shipped template
-    doc = json.loads(wl_path.read_text())
+    doc = json.loads(wl_path.read_text(encoding="utf-8"))
     existing = {
         (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
     }
@@ -76,6 +76,6 @@ def append_watchlist(wl_path, new_entries):
     if fresh:
         doc.setdefault("companies", []).extend(fresh)
         tmp = wl_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, wl_path)
     return fresh

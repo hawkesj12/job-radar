@@ -234,9 +234,19 @@ class Config:
     score_len_b: float = 0.75
     avg_jd_tokens: int = 400
     blob_score_cap: int = 60
+    # Cap the title-keyword double-count too, so a keyword-stuffed TITLE can't
+    # outrank a thorough JD (the body already caps at blob_score_cap). Keyword
+    # scoring favors recall by design; the optional LLM re-rank is the precision layer.
+    title_score_cap: int = 12
     tier_strong: int = 30
     tier_look: int = 22
     fuzzy_title_threshold: int = 90
+    # Secondary gate on the fuzzy de-dup. token_set_ratio alone returns 100 for a
+    # SUBSET ("ai engineer" ⊂ "ai engineer, payments"), which would wrongly merge
+    # two distinct openings at one company. token_sort_ratio penalizes the length
+    # gap, so a reorder/punctuation retitle still matches but a subset-with-an-extra
+    # -token does not. Both gates must clear for a fuzzy merge.
+    fuzzy_title_sort_floor: int = 82
     # filters
     remote_only: bool = True
     location: str = (
@@ -288,7 +298,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
     import yaml
 
     try:
-        doc = yaml.safe_load(p.read_text())
+        doc = yaml.safe_load(p.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         print(f"  config parse error in {p} — using defaults ({e})", file=sys.stderr)
         return cfg
@@ -313,6 +323,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("length_norm_b", "score_len_b"),
         ("avg_jd_tokens", "avg_jd_tokens"),
         ("body_cap", "blob_score_cap"),
+        ("title_cap", "title_score_cap"),
     ]:
         take(scor, k, a)
     if isinstance(scor.get("tiers"), dict):

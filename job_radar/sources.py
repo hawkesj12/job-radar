@@ -180,7 +180,7 @@ DEPTH_ALL = {
 # ── BREADTH: keyword aggregators -- search_<src>(queries) -> [posting] ───────
 def search_remotive(queries):
     out = []
-    for qy in queries[:4]:  # Remotive: <=4 calls/day
+    for qy in queries[:4]:  # Remotive: <=4 calls per run (be a polite API citizen)
         try:
             data = get_json(f"https://remotive.com/api/remote-jobs?search={q(qy)}")
         except NET_ERRORS:

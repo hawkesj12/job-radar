@@ -6,8 +6,8 @@ one query to the Common Crawl CDX index enumerates (almost) every company that
 hosts a public board on a given ATS, so you know their boards before any job
 appears. Run it occasionally to bootstrap or widen your watchlist:
 
-    job-radar seed greenhouse --limit 300
-    job-radar seed lever --limit 200 --verify
+    job-radar seed greenhouse --max 300
+    job-radar seed lever --max 200 --verify
 
 `--verify` probes each new slug (slower) so only live boards are added; without
 it, dead slugs are simply skipped at scan time.
@@ -17,11 +17,19 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 from . import config
 from .sources import DEPTH_ALL
+from .util import NET_ERRORS
+
+
+class SeedError(RuntimeError):
+    """Common Crawl was unreachable/overloaded — a transient, retryable failure
+    (raised instead of leaking a raw traceback out of the `seed` command)."""
+
 
 # ATS -> (CDX url-pattern, token-extract regex)
 ATS_PATTERNS = {
@@ -46,8 +54,11 @@ def _latest_cdx() -> str:
         "https://index.commoncrawl.org/collinfo.json",
         headers={"User-Agent": cfg.user_agent},
     )
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
-        return json.loads(r.read().decode())[0]["cdx-api"]
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
+            return json.loads(r.read().decode())[0]["cdx-api"]
+    except (*NET_ERRORS, urllib.error.HTTPError, KeyError, IndexError) as e:
+        raise SeedError(f"Common Crawl index unavailable ({type(e).__name__})") from e
 
 
 def enumerate_tokens(ats: str, max_rows: int = 20000) -> set[str]:
@@ -63,17 +74,20 @@ def enumerate_tokens(ats: str, max_rows: int = 20000) -> set[str]:
     req = urllib.request.Request(url, headers={"User-Agent": cfg.user_agent})
     tokens: set[str] = set()
     pat = re.compile(rx)
-    with urllib.request.urlopen(req, timeout=cfg.timeout * 4) as r:
-        for line in r:  # CDX streams newline-delimited JSON
-            try:
-                u = json.loads(line).get("url", "")
-            except Exception:
-                continue
-            m = pat.search(u.lower())
-            if m:
-                tok = m.group(1).strip("/")
-                if tok and tok not in _JUNK and not tok.startswith("%"):
-                    tokens.add(tok)
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout * 4) as r:
+            for line in r:  # CDX streams newline-delimited JSON
+                try:
+                    u = json.loads(line).get("url", "")
+                except Exception:
+                    continue
+                m = pat.search(u.lower())
+                if m:
+                    tok = m.group(1).strip("/")
+                    if tok and tok not in _JUNK and not tok.startswith("%"):
+                        tokens.add(tok)
+    except (*NET_ERRORS, urllib.error.HTTPError) as e:
+        raise SeedError(f"Common Crawl CDX unavailable ({type(e).__name__})") from e
     return tokens
 
 
@@ -83,7 +97,9 @@ def seed_universe(
     """Enumerate slugs from Common Crawl and append the new ones to the watchlist.
     Returns the number added."""
     wl = Path(watchlist_path)
-    doc = json.loads(wl.read_text()) if wl.exists() else {"companies": []}
+    doc = (
+        json.loads(wl.read_text(encoding="utf-8")) if wl.exists() else {"companies": []}
+    )
     existing = {
         (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
     }
@@ -109,7 +125,7 @@ def seed_universe(
     if added:
         doc.setdefault("companies", []).extend(added)
         tmp = wl.with_suffix(".tmp")
-        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
         import os
 
         os.replace(tmp, wl)

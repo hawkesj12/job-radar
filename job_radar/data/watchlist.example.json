@@ -7,19 +7,22 @@
     { "name": "Stripe", "ats": "greenhouse", "slug": "stripe" },
     { "name": "Databricks", "ats": "greenhouse", "slug": "databricks" },
     { "name": "Ramp", "ats": "ashby", "slug": "ramp" },
-    { "name": "Notion", "ats": "greenhouse", "slug": "notion" },
+    { "name": "Notion", "ats": "ashby", "slug": "notion" },
     { "name": "Figma", "ats": "greenhouse", "slug": "figma" },
     { "name": "Vercel", "ats": "greenhouse", "slug": "vercel" },
-    { "name": "Retool", "ats": "greenhouse", "slug": "retool" },
     { "name": "Discord", "ats": "greenhouse", "slug": "discord" },
     { "name": "Brex", "ats": "greenhouse", "slug": "brex" },
-    { "name": "Plaid", "ats": "greenhouse", "slug": "plaid" },
+    { "name": "Plaid", "ats": "ashby", "slug": "plaid" },
     { "name": "Samsara", "ats": "greenhouse", "slug": "samsara" },
-    { "name": "Benchling", "ats": "greenhouse", "slug": "benchling" },
+    { "name": "Benchling", "ats": "ashby", "slug": "benchling" },
     { "name": "GitLab", "ats": "greenhouse", "slug": "gitlab" },
     { "name": "Coinbase", "ats": "greenhouse", "slug": "coinbase" },
-    { "name": "DoorDash", "ats": "greenhouse", "slug": "doordash" },
+    { "name": "DoorDash", "ats": "greenhouse", "slug": "doordashusa" },
     { "name": "Robinhood", "ats": "greenhouse", "slug": "robinhood" },
-    { "name": "Dropbox", "ats": "greenhouse", "slug": "dropbox" }
+    { "name": "Dropbox", "ats": "greenhouse", "slug": "dropbox" },
+    { "name": "Harvey", "ats": "ashby", "slug": "harvey", "frontier": true },
+    { "name": "Sierra", "ats": "ashby", "slug": "sierra", "frontier": true },
+    { "name": "LangChain", "ats": "ashby", "slug": "langchain" },
+    { "name": "ElevenLabs", "ats": "ashby", "slug": "elevenlabs", "frontier": true }
   ]
 }

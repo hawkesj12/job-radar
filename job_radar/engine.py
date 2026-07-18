@@ -9,7 +9,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config
-from .dedup import company_block, dedup_key, find_hit_key, norm, normalize_title
+from .dedup import find_hit_key, norm
 from .funnel import append_watchlist, funnel
 from .scoring import is_remote, relevant, score_and_signals
 from .sources import enabled_breadth, enabled_depth
@@ -48,15 +48,12 @@ def _consume(postings, hits, blocks, cfg, meta):
         p["signals"] = sig
         p["sources"] = {p["source"]} if p["source"] else set()
 
-        match = find_hit_key(p, hits, blocks, cfg)
+        # find_hit_key computes dedup_key/block/normalized-title once and returns
+        # them, so the insert branch below reuses them instead of re-deriving.
+        match, key, blk, nt = find_hit_key(p, hits, blocks, cfg)
         if match is None:
-            key = dedup_key(p)
-            # Precompute the block + normalized title ONCE, on insert, so the
-            # fuzzy pass never re-derives them (the O(n²) → linear fix). Index the
-            # key under its company block for same-company-only comparison.
-            blk = company_block(p)
-            p["_blk"] = blk
-            p["_nt"] = normalize_title(p.get("title", ""))
+            p["_blk"] = blk  # block + normalized title, stashed for the fuzzy pass
+            p["_nt"] = nt
             p["dedup_key"] = key  # stash so the store/CLI don't recompute it
             hits[key] = p
             if blk:
@@ -76,10 +73,7 @@ def _consume(postings, hits, blocks, cfg, meta):
             # future fuzzy compares use the WINNER's title (a new winner `p` was
             # never inserted, so derive its `_nt`; `_blk` is the shared block).
             if winner is p:
-                winner["_blk"], winner["_nt"] = (
-                    cur["_blk"],
-                    normalize_title(p.get("title", "")),
-                )
+                winner["_blk"], winner["_nt"] = cur["_blk"], nt  # p's own title
             winner["dedup_key"] = match
             hits[match] = winner
 
@@ -88,12 +82,16 @@ def harvest(cfg=None, watchlist_path=None):
     """Run a full scan. Returns (rows, discovered, errors)."""
     cfg = cfg or config.active()
     companies = []
+    watchlist_err = None
     if watchlist_path:
         try:
-            with open(watchlist_path) as f:
+            with open(watchlist_path, encoding="utf-8") as f:
                 companies = json.loads(f.read()).get("companies", [])
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            # A corrupt/unreadable watchlist must be LOUD -- silently dropping the
+            # entire depth harvest (all your companies) is the one place this tool
+            # would betray its own fail-fast rule. Surfaced via `errors` below.
+            watchlist_err = f"watchlist {watchlist_path}: {type(e).__name__}"
 
     meta, known_slugs = {}, set()
     for c in companies:
@@ -111,6 +109,8 @@ def harvest(cfg=None, watchlist_path=None):
     # depth + breadth _consume passes; _consume mutates them ONLY on the main
     # thread (workers just fetch), so the shared state needs no lock.
     hits, blocks, errors = {}, {}, []
+    if watchlist_err:
+        errors.append(watchlist_err)
 
     def _fetch_company(c):
         ats, slug = c.get("ats"), c.get("slug")

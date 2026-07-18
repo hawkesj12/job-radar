@@ -1,6 +1,6 @@
 # job-radar
 
-**Scan ~500 companies across the open job market in about a minute** — straight from company applicant-tracking-system feeds and aggregator APIs — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_.
+**Scan the open job market in about a minute** — your watchlist of companies plus a dozen aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
 
 Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
 
@@ -18,9 +18,9 @@ job-radar list                              # see your current shortlist
 ## What it does
 
 1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable), so you see roles the hour they post. _Breadth_ — queries free aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market.
-2. **Scores every role on one comparable scale** — a transparent, weighted keyword model (BM25 length-normalized) you fully control in the config.
+2. **Scores every role on one comparable scale** — a transparent, weighted keyword model (BM25 length-normalized) you fully control in the config. It's tuned for _recall_ by design (catch everything that might fit); the optional LLM re-rank below is the _precision_ layer.
 3. **De-duplicates** the same role across sources into one entry.
-4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` does one Common Crawl pass to enumerate **every** company hosting a public board on that ATS (~1,700+ for Greenhouse alone) and bulk-adds them. One command builds the whole universe.
+4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` does one Common Crawl pass to enumerate the companies hosting a public board on that ATS (the enumerable ceiling is ~1,700+ for Greenhouse alone) and bulk-adds them — up to `--max` per run (default 500). A couple of `seed` runs build out a several-hundred-company watchlist.
 5. **Remembers.** One upserted `shortlist.csv` tracks `first_seen`, `status`, and every role's score. `apply`/`dismiss` are sticky — applied roles persist and stop resurfacing.
 
 ## Optional: LLM semantic fit-ranking
@@ -58,7 +58,7 @@ Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, 
 This is a **personal job-search tool**, not a data-resale product, and it's built to be a good citizen:
 
 - **Default sources are official, public, no-auth APIs**, used exactly as their vendors document them — Greenhouse, Lever, and Ashby publish these job-board endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter by default.
-- **It rate-limits itself** to each provider's documented limits (e.g. Remotive is capped at 4 calls/day in code) and sends a self-identifying `User-Agent` so providers can see and contact the caller.
+- **It rate-limits itself** to each provider's documented limits (e.g. Remotive is capped at 4 calls per run in code) and sends a self-identifying `User-Agent` so providers can see and contact the caller.
 - **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
 - **API keys** (Adzuna, USAJOBS, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's key travels in the request URL per their API design.
 
