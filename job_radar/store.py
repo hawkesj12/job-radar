@@ -16,11 +16,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
-from datetime import datetime
 from pathlib import Path
 
 from .dedup import dedup_key
-from .util import age_int
+from .util import age_int, today_et
 
 COLUMNS = [
     "id",
@@ -147,7 +146,7 @@ def upsert(
     each tagged `_is_new` (True if first seen this run). Pass `write=False` to
     skip the file write when the caller will annotate + write once itself (the
     LLM path), avoiding a redundant full rewrite."""
-    today = today or datetime.now().strftime("%Y-%m-%d")
+    today = today or today_et()
     existing = load_all(path)
     by_key = {r.get("dedup_key"): r for r in existing if r.get("dedup_key")}
     # A role's URL is stable even when a recruiter re-titles it (which changes its

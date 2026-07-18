@@ -1,6 +1,6 @@
 # job-radar
 
-**Scan the open job market in about a minute** — your watchlist of companies plus a dozen aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
+**Scan the open job market in about a minute** — your watchlist of companies plus ten aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
 
 Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
 

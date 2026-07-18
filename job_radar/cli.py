@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.resources as resources
-from datetime import datetime
+import sys
 from pathlib import Path
 
 from . import config, engine, llm, store
 from .dedup import dedup_key
+from .util import today_et
 
 
 def _packaged(name: str) -> str:
@@ -23,11 +24,23 @@ def _resolve_config(path_arg):
     return config.load_config(None)  # generic defaults
 
 
-def _fmt(r) -> str:
+def _tier(score: int, cfg) -> str:
+    """The configurable quality tier for a score (the `scoring.tiers` knob)."""
+    if score >= cfg.tier_strong:
+        return "★ strong"
+    if score >= cfg.tier_look:
+        return "◆ worth a look"
+    return ""
+
+
+def _fmt(r, cfg) -> str:
     sc = r.get("llm_score") or r.get("score")
     tag = f"[{r.get('id')}]"
     head = f"  {tag} {str(sc):>3}  {r.get('title', '')[:52]:52}  {r.get('company', '')[:24]}"
     extra = []
+    tier = _tier(store._safe_int(sc), cfg)
+    if tier:
+        extra.append(tier)
     if r.get("salary"):
         extra.append(r["salary"])
     if r.get("age_days"):
@@ -71,11 +84,11 @@ def cmd_scan(args, cfg):
         else:
             print("  (run with --verbose to see which sources failed)")
         for r in store.surface(existing, cfg)[: args.limit]:
-            print(_fmt(r))
+            print(_fmt(r, cfg))
         # Nonzero so a scheduled/cron wrapper can detect a dead run.
         raise SystemExit(1)
     by_key = {(p.get("dedup_key") or dedup_key(p)): p for p in rows}
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = today_et()
     # When the LLM re-rank runs we annotate in memory and write ONCE at the end;
     # otherwise upsert does the single write itself.
     llm_on = cfg.llm.enabled
@@ -120,7 +133,7 @@ def cmd_scan(args, cfg):
         )
     print()
     for r in surfaced[: args.limit]:
-        print(_fmt(r))
+        print(_fmt(r, cfg))
     print(f"\nFull list: {args.out}  ·  apply: job-radar apply <id>")
 
 
@@ -146,11 +159,11 @@ def cmd_init(args, cfg):
 
 def cmd_status(args, cfg, status):
     ok = store.mark_status(args.out, args.id, status)
-    print(
-        f"{'✓' if ok else 'no match for id'} {args.id} -> {status}"
-        if ok
-        else f"no role with id {args.id} in {args.out}"
-    )
+    if ok:
+        print(f"✓ {args.id} -> {status}")
+    else:
+        print(f"no role with id {args.id} in {args.out}")
+        raise SystemExit(1)  # nonzero so a typo'd id in a script is detectable
 
 
 def cmd_list(args, cfg):
@@ -163,11 +176,20 @@ def cmd_list(args, cfg):
     else:
         rows = store.surface(rows, cfg)
     for r in rows[: args.limit]:
-        print(_fmt(r))
+        print(_fmt(r, cfg))
     print(f"\n{len(rows)} shown · full file: {args.out}")
 
 
 def main(argv=None):
+    # Force UTF-8 on our streams so the ✓/⚠/↳ glyphs and non-ASCII job titles never
+    # crash a run on a cp1252-defaulted Windows console or a redirected stdout (a
+    # scheduled task logging to a file). Worst case a glyph degrades to '?'.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     # Shared options attached to BOTH the top level and each subcommand, so they
     # work in either position (`job-radar --limit 5` and `job-radar list --limit 5`).
     common = argparse.ArgumentParser(add_help=False)

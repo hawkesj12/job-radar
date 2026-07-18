@@ -104,8 +104,16 @@ def _kw_re(kw: str) -> re.Pattern:
 
 
 def has(kw: str, text: str) -> bool:
-    """Whole-word match: 'ai' hits 'AI' but not 'training' / 'available'."""
+    """Whole-word match, CASE-SENSITIVE: 'ai' hits 'ai' but not 'training' /
+    'available'. Callers lowercase both the keyword and the text first (keyword
+    lists are lowercase; the scored blob is `.lower()`-ed), so this never uppercases."""
     return _kw_re(kw).search(text) is not None
+
+
+def today_et() -> str:
+    """Today's date (YYYY-MM-DD) in Eastern Time — the tool's single zone, so
+    first_seen can't sit off-by-one from age_int's ET-based math near midnight."""
+    return datetime.now(_ET).strftime("%Y-%m-%d")
 
 
 def age_int(posted: str):

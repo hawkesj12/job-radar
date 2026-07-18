@@ -115,7 +115,7 @@ def fetch_ashby(slug: str):
 
 def fetch_smartrecruiters(slug: str):
     data = get_json(
-        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?q=AI&limit=100"
+        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100"
     )
     out = []
     for j in data.get("content", []):

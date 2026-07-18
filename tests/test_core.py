@@ -570,3 +570,108 @@ def test_seed_degrades_gracefully(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         cli.cmd_seed(args, _cfg())
     assert ei.value.code == 1
+
+
+# ── panel re-review follow-up (F1-F5 + minors) ───────────────────────────────
+def _rand_posting(rnd, vocab):
+    def words(k):
+        return " ".join(rnd.choice(vocab) for _ in range(rnd.randint(0, k)))
+
+    return {
+        "title": words(6),
+        "location": words(3),
+        "text": words(40),
+        "company": words(3),
+    }
+
+
+def test_scoring_matches_bruteforce_reference():
+    """F3 equivalence GATE: the optimized score_and_signals must be byte-identical
+    (score AND signal string) to the brute-force per-keyword reference for every
+    posting. If this ever fails, the optimization changed the results and must not
+    ship."""
+    import random
+    import re as _re
+
+    c = _cfg()
+    fw = c.fit_weights
+
+    def ref(p):
+        blob = f"{p.get('title','')} {p.get('location','')} {p.get('text','')}".lower()
+        bh = [(w, kw) for kw, w in fw.items() if util.has(kw, blob)]
+        raw = sum(w for w, _ in bh)
+        dl = len(_re.findall(r"[a-z0-9]+", blob))
+        norm = (1 - c.score_len_b) + c.score_len_b * (dl / c.avg_jd_tokens)
+        body = min(raw / norm if norm > 0 else raw, c.blob_score_cap)
+        tl = p.get("title", "").lower()
+        body += min(sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap)
+        body -= sum(w for kw, w in c.title_penalty.items() if util.has(kw, tl))
+        ab = f"{p.get('company','')} {p.get('text','')}".lower()
+        body -= sum(w for kw, w in c.agency_penalty.items() if util.has(kw, ab))
+        sig = ", ".join(kw for _, kw in sorted(bh, reverse=True)[:7])
+        return round(body), sig
+
+    vocab = list(fw) + [
+        "python", "remote", "the", "platform", "payments", "nurse", "staff",
+        "ai-first", "multi-agent", "ml/ai", "onsite", "systems", "team",
+    ]
+    rnd = random.Random(1234)
+    for _ in range(2000):
+        p = _rand_posting(rnd, vocab)
+        assert scoring.score_and_signals(p, cfg=c) == ref(p)
+
+
+def test_seed_wraps_real_connection_reset(monkeypatch):
+    """F1: a real mid-stream connection reset (http.client.RemoteDisconnected, NOT a
+    URLError) must become a clean SeedError — the gap that shipped a raw traceback."""
+    import http.client
+
+    def raiser(*a, **k):
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    monkeypatch.setattr(seed.urllib.request, "urlopen", raiser)
+    with pytest.raises(seed.SeedError):
+        seed.enumerate_tokens("greenhouse")
+
+
+def test_smartrecruiters_url_has_no_hardcoded_query(monkeypatch):
+    """F4: SmartRecruiters must fetch generically (relevance gate filters), not
+    server-side filter to q=AI."""
+    captured = {}
+
+    def fake_get_json(url):
+        captured["url"] = url
+        return {"content": []}
+
+    monkeypatch.setattr(sources, "get_json", fake_get_json)
+    sources.fetch_smartrecruiters("acme")
+    assert "q=AI" not in captured["url"]
+    assert "acme" in captured["url"]
+
+
+def test_remote_negation_in_title_or_location():
+    """Minor: a negated title/location ('Non-remote', 'Onsite only') is not remote."""
+    assert scoring.remote_posting("Non-remote AI Engineer", "United States", "") is False
+    assert scoring.remote_posting("AI Engineer", "Onsite only", "") is False
+    assert scoring.remote_posting("Remote AI Engineer", "United States", "") is True
+
+
+def test_apply_bad_id_exits_nonzero(tmp_path):
+    """Minor: apply/dismiss on a non-existent id exits nonzero (script-detectable)."""
+    csvp = tmp_path / "s.csv"
+    store.upsert(csvp, [_post("Acme", "AI Engineer", 40, "u1")], today="2026-07-10")
+    args = types.SimpleNamespace(out=str(csvp), id="ZZZZZZZ")
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_status(args, _cfg(), "applied")
+    assert ei.value.code == 1
+
+
+def test_fmt_shows_tier_tag():
+    """F5: the tiers knob now drives a visible tier tag on each surfaced role."""
+    c = _cfg()  # tier_strong=30, tier_look=22
+    strong = {"id": "a", "score": "35", "title": "AI Engineer", "company": "Acme"}
+    look = {"id": "b", "score": "25", "title": "AI Engineer", "company": "Acme"}
+    plain = {"id": "c", "score": "10", "title": "AI Engineer", "company": "Acme"}
+    assert "strong" in cli._fmt(strong, c)
+    assert "worth a look" in cli._fmt(look, c)
+    assert "strong" not in cli._fmt(plain, c) and "worth a look" not in cli._fmt(plain, c)

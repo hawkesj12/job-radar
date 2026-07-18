@@ -15,6 +15,7 @@ it, dead slugs are simply skipped at scan time.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -57,7 +58,14 @@ def _latest_cdx() -> str:
     try:
         with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
             return json.loads(r.read().decode())[0]["cdx-api"]
-    except (*NET_ERRORS, urllib.error.HTTPError, KeyError, IndexError) as e:
+    except (
+        *NET_ERRORS,
+        urllib.error.HTTPError,
+        ConnectionError,
+        http.client.HTTPException,
+        KeyError,
+        IndexError,
+    ) as e:
         raise SeedError(f"Common Crawl index unavailable ({type(e).__name__})") from e
 
 
@@ -86,7 +94,12 @@ def enumerate_tokens(ats: str, max_rows: int = 20000) -> set[str]:
                     tok = m.group(1).strip("/")
                     if tok and tok not in _JUNK and not tok.startswith("%"):
                         tokens.add(tok)
-    except (*NET_ERRORS, urllib.error.HTTPError) as e:
+    except (
+        *NET_ERRORS,
+        urllib.error.HTTPError,
+        ConnectionError,
+        http.client.HTTPException,
+    ) as e:
         raise SeedError(f"Common Crawl CDX unavailable ({type(e).__name__})") from e
     return tokens
 
