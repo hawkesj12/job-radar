@@ -2,17 +2,40 @@
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
+import os
 import re
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import config
+
+
+def atomic_write_text(path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` atomically: a UNIQUE temp file (mkstemp) in the same
+    dir, then os.replace. Unique so two overlapping runs can't collide on a fixed
+    `.tmp` name and replace a half-written or foreign file; the replace itself is
+    atomic so an interrupted write leaves the prior file intact."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
+            f.write(text)
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
 
 # Expected transient fetch failures (network down, timeout, a source returning
 # non-JSON). Catching THESE and moving on is correct; catching everything hides a

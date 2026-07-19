@@ -135,6 +135,8 @@ def cmd_scan(args, cfg):
     for r in surfaced[: args.limit]:
         print(_fmt(r, cfg))
     print(f"\nFull list: {args.out}  ·  apply: job-radar apply <id>")
+    if args.strict and errors:  # opt-in: a partial failure is a failure
+        raise SystemExit(1)
 
 
 def cmd_init(args, cfg):
@@ -207,6 +209,11 @@ def main(argv=None):
         "--verbose",
         action="store_true",
         help="print the per-source error list (which feeds failed and why)",
+    )
+    common.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit nonzero if ANY source errored (for scheduled runs / CI)",
     )
 
     ap = argparse.ArgumentParser(

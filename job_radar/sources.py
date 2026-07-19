@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import time
+from urllib.parse import urlparse
 
 from . import config
 from .util import (
@@ -484,8 +485,11 @@ def search_braintrust(queries):
                     "source": "braintrust",
                 }
             )
+        # Follow the API-supplied `next` only if it stays on Braintrust's own host
+        # — never chase an arbitrary URL a response could point us at (SSRF guard).
         nxt = d.get("next")
-        url = nxt.replace("http://", "https://") if nxt else None
+        nxt = nxt.replace("http://", "https://") if nxt else None
+        url = nxt if nxt and urlparse(nxt).hostname == "app.usebraintrust.com" else None
         pages += 1
         time.sleep(0.4)
     return out

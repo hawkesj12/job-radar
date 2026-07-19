@@ -5,6 +5,7 @@ newly-discovered ATS slugs. Returns scored postings; the store writes them."""
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,6 +15,11 @@ from .funnel import append_watchlist, funnel
 from .scoring import is_remote, relevant, score_and_signals
 from .sources import enabled_breadth, enabled_depth
 from .util import age_int
+
+# A valid ATS slug is the last path segment of a board URL — alphanumerics plus
+# -, _, . only. Reject anything else so a hand-edited watchlist can't inject path
+# traversal (`../`) or a query into the fixed API URLs the slug is spliced into.
+_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _consume(postings, hits, blocks, cfg, meta):
@@ -118,6 +124,8 @@ def harvest(cfg=None, watchlist_path=None):
         fetch = depth.get(ats)
         if not fetch:
             return (c, None, f"{name}: source '{ats}' not enabled")
+        if not slug or not _SLUG_RE.match(slug):
+            return (c, None, f"{name}: invalid slug {slug!r}")
         try:
             return (c, fetch(slug), None)
         except urllib.error.HTTPError as e:

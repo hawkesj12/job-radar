@@ -5,13 +5,12 @@ append it -- so the depth list grows itself over time."""
 from __future__ import annotations
 
 import json
-import os
 
 from . import config
 from .dedup import ats_from_url, norm
 from .scoring import relevant
 from .sources import DEPTH_ALL
-from .util import NET_ERRORS
+from .util import NET_ERRORS, atomic_write_text
 
 
 def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
@@ -75,7 +74,5 @@ def append_watchlist(wl_path, new_entries):
     fresh = [e for e in new_entries if (e["ats"], e["slug"].lower()) not in existing]
     if fresh:
         doc.setdefault("companies", []).extend(fresh)
-        tmp = wl_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, wl_path)
+        atomic_write_text(wl_path, json.dumps(doc, indent=2) + "\n")
     return fresh

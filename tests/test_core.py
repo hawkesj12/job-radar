@@ -675,3 +675,72 @@ def test_fmt_shows_tier_tag():
     assert "strong" in cli._fmt(strong, c)
     assert "worth a look" in cli._fmt(look, c)
     assert "strong" not in cli._fmt(plain, c) and "worth a look" not in cli._fmt(plain, c)
+
+
+# ── deferred minors (atomic writes, --strict, SSRF guards) ───────────────────
+def test_atomic_write_text_roundtrip_no_leftover(tmp_path):
+    """util.atomic_write_text writes via a unique temp + os.replace and leaves no
+    stray .tmp behind (so overlapping runs can't collide on a fixed name)."""
+    p = tmp_path / "sub" / "f.json"
+    util.atomic_write_text(p, '{"a": 1}\n')
+    assert p.read_text(encoding="utf-8") == '{"a": 1}\n'
+    assert list(p.parent.glob("*.tmp")) == []
+
+
+def test_strict_exits_nonzero_on_partial_failure(tmp_path, monkeypatch):
+    """--strict turns any source error into a nonzero exit (for scheduled runs);
+    the same run without --strict exits 0."""
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": []}', encoding="utf-8")
+    row = _post("Acme", "AI Engineer", 40, "https://x/1")
+    monkeypatch.setattr(
+        engine, "harvest", lambda cfg, w: ([row], [], ["breadth:x: URLError"])
+    )
+    base = dict(out=str(csvp), watchlist=str(wl), verbose=False, limit=25)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_scan(types.SimpleNamespace(strict=True, **base), c)
+    assert ei.value.code == 1
+    cli.cmd_scan(types.SimpleNamespace(strict=False, **base), c)  # no raise
+
+
+def test_braintrust_does_not_follow_offsite_next(monkeypatch):
+    """SSRF guard: a `next` URL pointing off Braintrust's host is never fetched."""
+    calls = []
+
+    def fake_get_json(url):
+        calls.append(url)
+        if len(calls) == 1:
+            return {"results": [], "next": "https://evil.example.com/api/jobs/?p=2"}
+        return {"results": [], "next": None}
+
+    monkeypatch.setattr(sources, "get_json", fake_get_json)
+    sources.search_braintrust(["ai"])
+    assert len(calls) == 1  # stopped after page 1; off-site next not chased
+    assert all("evil.example.com" not in u for u in calls)
+
+
+def test_invalid_slug_is_rejected(tmp_path, monkeypatch):
+    """A malformed watchlist slug (path traversal) is skipped with an error and
+    never reaches the fetcher; valid slugs still run."""
+    c = _cfg()
+    called = []
+
+    def fake_fetch(slug):
+        called.append(slug)
+        return []
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda cfg: {"greenhouse": fake_fetch})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda cfg: [])
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(
+        '{"companies": ['
+        '{"name": "Bad", "ats": "greenhouse", "slug": "../../etc"},'
+        '{"name": "Good", "ats": "greenhouse", "slug": "anthropic"}]}',
+        encoding="utf-8",
+    )
+    rows, discovered, errors = engine.harvest(c, watchlist_path=str(wl))
+    assert any("invalid slug" in e for e in errors)
+    assert "../../etc" not in called  # never reached the fetcher
+    assert "anthropic" in called  # valid slug still fetched

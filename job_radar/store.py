@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import os
+import io
 from pathlib import Path
 
 from .dedup import dedup_key
-from .util import age_int, today_et
+from .util import age_int, atomic_write_text, today_et
 
 COLUMNS = [
     "id",
@@ -92,22 +92,20 @@ def load_all(path) -> list[dict]:
 
 
 def write_all(path, rows: list[dict]) -> None:
-    """Atomic write: full rewrite to a temp file, then os.replace."""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    """Atomic write: render to a string, then a unique-temp-file + os.replace via
+    atomic_write_text (so concurrent runs can't collide on a fixed temp name)."""
     rows = sorted(rows, key=lambda r: _safe_int(r.get("score")), reverse=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
-        w.writeheader()
-        for r in rows:
-            w.writerow(
-                {
-                    c: (_csv_safe(r.get(c, "")) if c in TEXT_COLS else r.get(c, ""))
-                    for c in COLUMNS
-                }
-            )
-    os.replace(tmp, p)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=COLUMNS, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow(
+            {
+                c: (_csv_safe(r.get(c, "")) if c in TEXT_COLS else r.get(c, ""))
+                for c in COLUMNS
+            }
+        )
+    atomic_write_text(path, buf.getvalue())
 
 
 def _build_row(p: dict, today: str) -> dict:

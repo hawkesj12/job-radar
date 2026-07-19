@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import config
 from .sources import DEPTH_ALL
-from .util import NET_ERRORS
+from .util import NET_ERRORS, atomic_write_text
 
 
 class SeedError(RuntimeError):
@@ -137,9 +137,5 @@ def seed_universe(
 
     if added:
         doc.setdefault("companies", []).extend(added)
-        tmp = wl.with_suffix(".tmp")
-        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        import os
-
-        os.replace(tmp, wl)
+        atomic_write_text(wl, json.dumps(doc, indent=2) + "\n")
     return len(added)
