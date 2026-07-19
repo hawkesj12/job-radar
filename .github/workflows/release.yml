@@ -1,0 +1,28 @@
+name: Release
+
+# Publishes to PyPI when you publish a GitHub Release (tag a version → Release).
+# Uses PyPI Trusted Publishing (OIDC) — no API token stored in the repo.
+# One-time setup: on pypi.org → the job-radar project → Publishing, add a trusted
+# publisher for repo hawkesj12/job-radar, workflow "release.yml", environment "pypi".
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
