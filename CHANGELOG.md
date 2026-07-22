@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-07-22
+
+Documentation correctness. An independent panel review reproduced five claims in the
+docs and comments that contradicted the shipped code; a docstring that confidently
+states the opposite of what a function does is worse than no docstring, because it is
+the one place a caller looks. No behaviour changed except the one item noted below.
+
+### Changed
+
+- `fetch_workday`'s docstring claimed descriptions are "deliberately NOT fetched."
+  They are fetched by default. It now states the real cost — one request per role,
+  not per page — and the cap comment gives the combined list+detail total rather than
+  the list-only figure, which understated a realistic run by an order of magnitude.
+- `verify_identity` credited `capital`/Capital One and `foundation`/Foundation for
+  the NIH as catches. Neither is a live Greenhouse board, so the liveness probe drops
+  them before the identity gate runs. The docstring now cites only confirmed catches
+  and states two boundaries that were easy to misread: a dead slug never reaches the
+  gate, and on Lever it returns `True` unconditionally — so the motivating example
+  (`jobs.lever.co/capital`, a real board that is not Capital One's) is protected by
+  `from_names` withholding the first-word variant, not by this function.
+- `probe`'s documented outcome enum omitted `throttled` and `unsupported`. It is now
+  complete and split into terminal versus retryable, since deciding whether to
+  blacklist is the reason a caller reads it. Also documents that `wrong-owner`
+  currently fires when the identity endpoint is merely unreachable.
+- The 200-role Workday cap (`WORKDAY_MAX_PAGES` x 20) was undisclosed. It is
+  documented as silent and lossy — NVIDIA reports `total=2000` and returns 200 — and
+  ordering is Workday's own, so the roles kept are not necessarily the newest.
+- `engine`'s module docstring still said the engine grows the watchlist and that
+  `store` writes postings. Neither has been true since 0.3.0.
+- The 0.3.0 entry credited a fix for a Workday pagination bug that never shipped:
+  `git log -S` shows the `total` latch was present in the same commit that
+  introduced the adapter. Recorded as a design note under Added instead.
+- README scopes its "every source is an official, public API used as documented"
+  claim to exclude Workday, whose CxS endpoint is public and no-auth but is not
+  documented for third-party use the way Greenhouse's and Lever's are.
+
+### Added
+
+- `WORKDAY_MAX_PAGES` reads the environment, like `WORKDAY_FETCH_DETAILS` and
+  `WORKDAY_DETAIL_WORKERS` already did. Default unchanged at 10. It was the only
+  Workday knob that could not be tuned, and documenting an unadjustable cap is half
+  a fix.
+
 ## [0.3.1] - 2026-07-22
 
 ### Fixed
