@@ -83,7 +83,7 @@ This is a **personal job-search tool**, not a data-resale product, and it's buil
 - **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
 - **API keys** (Adzuna, USAJOBS, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's key travels in the request URL per their API design.
 
-In short: every source is an official, public API used as documented.
+One honest exception to "used as documented": **Workday**. Its CxS endpoint is public and no-auth — it's the same one Workday's own hosted careers-site widget calls — but Workday doesn't publish third-party API documentation for it the way Greenhouse and Lever do. It's a public endpoint used as its own front end uses it, which is a weaker claim than the others on this list, and worth knowing before you point it at hundreds of employers.
 
 ## License
 

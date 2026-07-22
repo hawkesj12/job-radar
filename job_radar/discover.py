@@ -179,11 +179,22 @@ def verify_identity(ats: str, slug: str, company: str) -> bool:
     jobs — owned by someone else entirely. Liveness cannot distinguish that; only the
     ATS's own claim about who it is can.
 
-    Measured on 120 real store names (2026-07-22) it rejected every known false
-    binding — `capital`/Capital One, `veterans`/Veterans Health Administration,
-    `foundation`/Foundation for the NIH — AND caught one the conservative
-    full-name heuristic had already let through: slug `remote` for the company
-    'Remote' is really owned by 'General Assembly Remote Jobs'.
+    Confirmed catches (2026-07-22, live Greenhouse): `veterans` for Veterans Health
+    Administration is really owned by 'IntelliDyne Jobs for Veterans'; `remote` for
+    the company 'Remote' is owned by 'General Assembly Remote Jobs' — one the
+    conservative full-name heuristic had already let through. Run over the 30 names
+    in a real shortlist it also rejected `general` for General Dynamics IT (owner
+    'General Interest') and `parallel` for Parallel Partners (owner 'Parallel
+    Systems'). Every one is a first-word collision that liveness alone admits.
+
+    Note what this gate does NOT do, because the boundary is easy to misread. It
+    only runs on a board that already returned live roles (see `probe`), so a dead
+    slug — `capital`, `foundation` — never reaches it; the liveness probe drops
+    those first. And it only runs where the ATS reports an owner, i.e. Greenhouse:
+    for the motivating example `jobs.lever.co/capital` (a real board, 38 live roles,
+    not Capital One's) this function returns True unconditionally. What protects the
+    Lever/Ashby lane is `from_names` withholding the bare-first-word variant from an
+    ATS whose ownership cannot be checked — not this gate.
 
     Matching is strict equality after normalization, deliberately. Relaxing it to a
     prefix rule would recover renames (slug `vaco` reports 'Vaco LLC' while the
@@ -223,9 +234,25 @@ def probe(
     CDX mining, where we never had a company name to begin with) skip the check.
 
     Pass a list as `outcomes` to receive EVERY candidate annotated with why it did or
-    did not survive (`ok` / `refused` / `missing` / `empty` / `wrong-owner` / `error`).
-    The return value stays the verified subset either way, so existing callers are
-    unaffected — but a caller that wants to record a refusal permanently can.
+    did not survive. The return value stays the verified subset either way, so
+    existing callers are unaffected — but a caller that wants to record a refusal
+    permanently can, and for that the distinction below is the whole point:
+
+      TERMINAL — safe to stop asking:
+        `refused`      401/403: the board exists and will not serve us.
+        `wrong-owner`  the ATS named an owner and it wasn't this company.
+        `unsupported`  no adapter for this ats value.
+      RETRYABLE — a caller that blacklists on these WILL lose real companies:
+        `throttled`    429. Transient by definition. Probing a few hundred Workday
+                       tenants reliably trips this on boards that served roles
+                       minutes earlier.
+        `missing`      404. No board today; a company may adopt one tomorrow.
+        `empty`        live board, zero open roles right now.
+        `error`        network/parse failure, including a timeout.
+
+    Caveat on `wrong-owner`: it currently also fires when the identity endpoint was
+    unreachable, because `board_owner` cannot distinguish "not this company" from
+    "no answer." Treat it as terminal only if you can tolerate that conflation.
     """
 
     def _one(c):

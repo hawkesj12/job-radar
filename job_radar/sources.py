@@ -175,9 +175,19 @@ def fetch_workable(slug: str):
 
 
 # Workday's list endpoint pages 20 at a time (limit>20 is a hard HTTP 400), so a
-# 400-req employer costs 20 calls. Cap it: 10 pages = 200 roles/employer keeps a
-# nightly harvest across ~100 enterprise tenants bounded at ~1k requests.
-WORKDAY_MAX_PAGES = 10
+# 400-role employer costs 20 calls. Cap it: 10 pages = 200 roles/employer, which
+# bounds the LIST traffic across ~100 enterprise tenants at ~1k requests.
+#
+# That ~1k is the list lane only, and it is NOT the run's total: with details on
+# (the default, below) each returned role costs one more request, so the same 100
+# tenants cost ~1k list + up to ~20k detail calls. Read the two together before
+# sizing a harvest window -- the detail pass dominates by an order of magnitude.
+#
+# The cap is silent by design and lossy: an employer with more than 200 open roles
+# is TRUNCATED, not flagged. NVIDIA reports total=2000 and returns 200 here.
+# Ordering is Workday's own (not newest-first), so the 200 you keep are not
+# necessarily the 200 you want. Raise WORKDAY_MAX_PAGES to widen it.
+WORKDAY_MAX_PAGES = int(os.environ.get("WORKDAY_MAX_PAGES", "10"))
 WORKDAY_PAGE = 20
 # Workday's LIST endpoint returns no description at all — those live on a per-job
 # detail call, so bodies cost one request per role instead of one per twenty. Fetch
@@ -221,10 +231,16 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
     is why the watchlist stores all three (discovery: `job_radar.discover`).
 
     Reaches the enterprise/government/healthcare employers the startup ATSs never
-    see. Descriptions are deliberately NOT fetched: they live on a per-job detail
-    endpoint, so pulling them would cost one request per posting instead of one per
-    20. Title + location still carry the BM25 signal; the body is the trade for
-    covering ~200 employers a night instead of ~8.
+    see.
+
+    Descriptions ARE fetched, by default. They do not exist on the list endpoint,
+    so each role costs one additional detail request (WORKDAY_FETCH_DETAILS=0 turns
+    that off). Budget one request per role, not per page: a 200-role employer is
+    ~10 list calls + ~200 detail calls. The rationale for paying that is at
+    WORKDAY_FETCH_DETAILS above -- a body-less job is unrankable and unreadable.
+
+    Returns at most WORKDAY_MAX_PAGES x WORKDAY_PAGE (default 200) roles, silently
+    truncated -- see the cap comment above.
     """
     base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
     out, offset, total = [], 0, None

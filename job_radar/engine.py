@@ -1,6 +1,7 @@
 """The harvest pipeline: poll depth (ATS) + breadth (aggregator) sources,
-filter -> score -> dedup into one ranked list, and grow the watchlist from any
-newly-discovered ATS slugs. Returns scored postings; the store writes them."""
+filter -> score -> dedup into one ranked list, and RETURN any newly-discovered ATS
+slugs for the caller to persist. Returns scored postings; `shortlist` writes them.
+The engine itself writes nothing."""
 
 from __future__ import annotations
 

@@ -26,7 +26,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adapter declare the extra watchlist fields it requires. Job descriptions are fetched
   from the per-job detail endpoint behind `WORKDAY_FETCH_DETAILS` (default on) —
   without a body a job cannot be ranked or read, so this is a precondition rather than
-  an enhancement.
+  an enhancement. Budget one request per role for it, on top of one per 20 for the
+  listing. Two design notes worth knowing before relying on it: Workday reports
+  `total` only on the first page (it is latched once — re-reading it per page ends the
+  loop after two pages), and each employer is silently truncated at
+  `WORKDAY_MAX_PAGES` × 20 = 200 roles.
 - **`job_radar.discover`** — bulk company discovery. Mines the Common Crawl CDX index
   by ATS URL pattern to recover slugs (and Workday's full triple) in bulk instead of
   one company at a time, and resolves a company NAME to a slug for employers the index
@@ -50,11 +54,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sources.py` and had already drifted, silently disabling a newly added adapter.
 - Rate-limiting (429) is distinguished from a hard refusal (401/403) and a miss (404).
   Conflating them let a transient throttle be recorded as permanent.
-
-### Fixed
-
-- Workday pagination reported `total` only on the first page, which ended the loop
-  immediately and silently capped every employer at 40 roles.
 
 ### BREAKING
 
