@@ -133,7 +133,13 @@ def test_name_variants_ignores_junk():
 
 # ── CDX mining ───────────────────────────────────────────────────────────────
 def _cdx(monkeypatch, urls):
+    """Stub the CDX endpoint. `mine` STREAMS the response (CDX is newline-delimited
+    JSON and a wide query is megabytes), so the fake is iterable, not just read()able."""
+
     class R:
+        def __iter__(self):
+            return iter(json.dumps({"url": u}).encode() + b"\n" for u in urls)
+
         def read(self):
             return "\n".join(json.dumps({"url": u}) for u in urls).encode()
 
@@ -144,6 +150,18 @@ def _cdx(monkeypatch, urls):
             return False
 
     monkeypatch.setattr(discover.urllib.request, "urlopen", lambda *a, **k: R())
+
+
+def _liveness(monkeypatch, mapping):
+    """Stub the LIVENESS lookup probe() uses.
+
+    One seam for every probe test. These used to patch `discover.DEPTH_ALL`
+    directly, which meant six tests each knew that probe answers "is this board
+    real" by running the full harvest adapter — the thing 0.4.0 stopped doing.
+    Patching the single lookup keeps the tests indifferent to which ATSs have a
+    cheap variant. Each callable returns a ROLE COUNT, not a list of postings.
+    """
+    monkeypatch.setattr(discover, "liveness_for", lambda ats: mapping.get(ats))
 
 
 def test_mine_greenhouse_dedupes_and_drops_non_slugs(monkeypatch):
@@ -177,10 +195,9 @@ def test_mine_workday_recovers_the_triple_and_skips_locales(monkeypatch):
 
 
 def test_probe_drops_boards_that_return_nothing(monkeypatch):
-    monkeypatch.setattr(
-        discover,
-        "DEPTH_ALL",
-        {"greenhouse": lambda slug, **kw: [{"t": 1}] if slug == "real" else []},
+    _liveness(
+        monkeypatch,
+        {"greenhouse": lambda slug, **kw: 1 if slug == "real" else 0},
     )
     got = discover.probe(
         [{"ats": "greenhouse", "slug": "real"}, {"ats": "greenhouse", "slug": "dead"}]
@@ -193,7 +210,7 @@ def test_probe_survives_a_fetcher_that_raises(monkeypatch):
     def boom(slug, **kw):
         raise RuntimeError("upstream schema change")
 
-    monkeypatch.setattr(discover, "DEPTH_ALL", {"greenhouse": boom})
+    _liveness(monkeypatch, {"greenhouse": boom})
     assert discover.probe([{"ats": "greenhouse", "slug": "x"}]) == []
 
 
@@ -270,9 +287,7 @@ def test_from_names_only_guesses_first_word_where_identity_is_verifiable(monkeyp
 
 
 def test_probe_enforces_identity_when_asked(monkeypatch):
-    monkeypatch.setattr(
-        discover, "DEPTH_ALL", {"greenhouse": lambda s, **k: [{"t": 1}]}
-    )
+    _liveness(monkeypatch, {"greenhouse": lambda s, **k: 1})
     monkeypatch.setattr(
         discover, "verify_identity", lambda ats, slug, company: slug == "good"
     )
@@ -287,9 +302,7 @@ def test_probe_enforces_identity_when_asked(monkeypatch):
 
 def test_probe_skips_identity_for_candidates_with_no_company_name(monkeypatch):
     """Pure CDX mining never had a company name to compare against."""
-    monkeypatch.setattr(
-        discover, "DEPTH_ALL", {"greenhouse": lambda s, **k: [{"t": 1}]}
-    )
+    _liveness(monkeypatch, {"greenhouse": lambda s, **k: 1})
     monkeypatch.setattr(
         discover, "verify_identity", lambda *a: (_ for _ in ()).throw(AssertionError)
     )
@@ -310,7 +323,7 @@ def test_probe_distinguishes_a_refusal_from_a_miss(monkeypatch):
             raise urllib.error.HTTPError("u", code, "no", None, None)
         return [{"t": 1}]
 
-    monkeypatch.setattr(discover, "DEPTH_ALL", {"greenhouse": fetch})
+    _liveness(monkeypatch, {"greenhouse": fetch})
     cands = [
         {"ats": "greenhouse", "slug": s}
         for s in ("refuser", "gone", "throttled", "good")
@@ -325,7 +338,7 @@ def test_probe_distinguishes_a_refusal_from_a_miss(monkeypatch):
 
 
 def test_probe_reports_a_wrong_owner_distinctly(monkeypatch):
-    monkeypatch.setattr(discover, "DEPTH_ALL", {"greenhouse": lambda s, **k: [{"t": 1}]})
+    _liveness(monkeypatch, {"greenhouse": lambda s, **k: 1})
     monkeypatch.setattr(discover, "verify_identity", lambda *a: False)
     outcomes = []
     discover.probe(
@@ -402,7 +415,7 @@ def test_throttling_is_never_terminal(monkeypatch):
             "u", {"a": 429, "b": 403, "c": 404}[slug], "no", None, None
         )
 
-    monkeypatch.setattr(discover, "DEPTH_ALL", {"greenhouse": fetch})
+    _liveness(monkeypatch, {"greenhouse": fetch})
     outcomes = []
     discover.probe(
         [{"ats": "greenhouse", "slug": s} for s in ("a", "b", "c")], outcomes=outcomes
@@ -423,8 +436,185 @@ def test_ats_from_url_stops_at_the_query_string():
     assert ats_from_url(
         "https://boards.greenhouse.io/embed/job_app?for=gemini&token=774&gh_jid=774"
     ) == ("greenhouse", "gemini")
-    assert ats_from_url("https://jobs.lever.co/vaco?lever-source=x") == ("lever", "vaco")
+    assert ats_from_url("https://jobs.lever.co/vaco?lever-source=x") == (
+        "lever",
+        "vaco",
+    )
     assert ats_from_url("https://jobs.ashbyhq.com/runway-ml/28e1") == (
         "ashby",
         "runway-ml",
     )
+
+
+# ── 0.4.0: liveness (answering "is this board real" without a full harvest) ───
+def test_liveness_workday_costs_one_request_not_two_hundred(monkeypatch):
+    """THE fix of 0.4.0. Proving a Workday board exists used to run the production
+    adapter: 10 list pages + one detail GET per role = 210 requests, measured
+    against a live tenant. Probing a few hundred tenants that way is what tripped
+    their rate limiter — the 429 handling in probe() existed to survive a storm the
+    over-fetch was itself causing."""
+    posts, gets = [], []
+    monkeypatch.setattr(
+        sources,
+        "post_json",
+        lambda url, payload: (posts.append(payload), {"total": 677})[1],
+    )
+    monkeypatch.setattr(sources, "get_json", lambda url: gets.append(url))
+    # details ON, to prove liveness does not touch the detail endpoint regardless
+    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+
+    n = sources.liveness_for("workday")("3m", host="wd1", site="Search")
+
+    assert n == 677, "the ATS's own total, not a page-capped count"
+    assert len(posts) == 1, f"expected exactly 1 request, got {len(posts)}"
+    assert gets == [], "liveness must never touch the per-job detail endpoint"
+    assert posts[0]["limit"] == 1
+
+
+def test_liveness_greenhouse_drops_the_job_bodies(monkeypatch):
+    """content=true is ~95% of the payload (4.4MB vs 244KB, measured). A liveness
+    check has no use for a single job description."""
+    seen = []
+    monkeypatch.setattr(
+        sources, "get_json", lambda url: (seen.append(url), {"jobs": [1, 2, 3]})[1]
+    )
+    assert sources.liveness_for("greenhouse")("cloudflare") == 3
+    assert "content=true" not in seen[0]
+
+
+def test_liveness_falls_back_for_an_ats_with_no_cheap_variant(monkeypatch):
+    """Ashby returns its whole board with or without includeCompensation (measured),
+    so there is nothing cheaper to call. The fallback keeps every caller uniform:
+    nobody has to know which ATSs are cheap."""
+    monkeypatch.setattr(sources, "fetch_ashby", lambda slug, **kw: [{"t": 1}] * 7)
+    monkeypatch.setitem(sources.DEPTH_ALL, "ashby", sources.fetch_ashby)
+    assert "ashby" not in sources.LIVENESS
+    assert sources.liveness_for("ashby")("ramp") == 7
+
+
+def test_liveness_is_none_for_an_unknown_ats():
+    """probe() relies on this to report `unsupported` rather than crashing."""
+    assert sources.liveness_for("myspace") is None
+
+
+def test_probe_uses_liveness_not_the_full_adapter(monkeypatch):
+    """The wiring test: probe must not reach for DEPTH_ALL any more."""
+    called = []
+    monkeypatch.setattr(
+        sources, "get_json", lambda url: (called.append(url), {"jobs": [1]})[1]
+    )
+    monkeypatch.setattr(
+        sources, "fetch_greenhouse", lambda *a, **k: pytest.fail("full adapter called")
+    )
+    got = discover.probe([{"ats": "greenhouse", "slug": "stripe"}])
+    assert [e["slug"] for e in got] == ["stripe"]
+    assert called and "content=true" not in called[0]
+
+
+# ── 0.4.0: a mid-pagination failure must not discard the pages already fetched ─
+def test_workday_keeps_the_pages_it_already_fetched(monkeypatch):
+    """A transient failure on page 3 used to throw away the 40 rows pages 1-2 had
+    already returned, so one dropped packet cost the whole employer for that run."""
+    fake, _ = _wd_pages(total=200, n_pages=10)
+
+    def flaky(url, payload):
+        if payload["offset"] >= 40:
+            raise TimeoutError("connection reset mid-walk")
+        return fake(url, payload)
+
+    monkeypatch.setattr(sources, "post_json", flaky)
+    rows = sources.fetch_workday("acme", host="wd1", site="Careers")
+    assert len(rows) == 40, "the two successful pages must survive"
+
+
+def test_workday_reraises_when_the_very_first_page_fails(monkeypatch):
+    """With nothing fetched there is no partial result to salvage, and swallowing it
+    would report a live employer as having zero jobs — a silent wrong answer."""
+
+    def dead(url, payload):
+        raise TimeoutError("down")
+
+    monkeypatch.setattr(sources, "post_json", dead)
+    with pytest.raises(TimeoutError):
+        sources.fetch_workday("acme", host="wd1", site="Careers")
+
+
+# ── 0.4.0: the consolidated miner ────────────────────────────────────────────
+def test_mine_covers_the_ats_seed_used_to_own(monkeypatch):
+    """REGRESSION GUARD: workable and smartrecruiters were minable only through
+    seed.py's own pattern table. Consolidating onto discover would have silently
+    dropped two working `job-radar seed` targets."""
+    _cdx(monkeypatch, ["https://apply.workable.com/acme/j/ABC123/"])
+    assert [e["slug"] for e in discover.mine("workable", collection="T")] == ["acme"]
+    _cdx(monkeypatch, ["https://jobs.smartrecruiters.com/BigCo/7415"])
+    assert [e["slug"] for e in discover.mine("smartrecruiters", collection="T")] == [
+        "bigco"
+    ]
+
+
+def test_mine_recovers_greenhouses_current_hosts(monkeypatch):
+    """discover carried its own narrower greenhouse regex matching only
+    boards.greenhouse.io, while dedup.ats_from_url already knew about the
+    job-boards. and boards.eu. hosts. Routing through the one parser fixes it."""
+    _cdx(
+        monkeypatch,
+        [
+            "https://job-boards.greenhouse.io/acme/jobs/1",
+            "https://boards.eu.greenhouse.io/eurocorp",
+            "https://boards.greenhouse.io/embed/job_app?for=gemini&token=774",
+        ],
+    )
+    got = {e["slug"] for e in discover.mine("greenhouse", collection="T")}
+    assert got == {"acme", "eurocorp", "gemini"}, got
+
+
+def test_mine_workday_accepts_a_lowercase_locale(monkeypatch):
+    """The locale group was [a-z]{2}-[A-Z]{2}, so `en-us` was captured AS the site
+    slug and then dropped by _NOT_SLUGS — losing the entire tenant, not just the
+    locale."""
+    _cdx(monkeypatch, ["https://3m.wd1.myworkdayjobs.com/en-us/Search/job/x"])
+    got = discover.mine("workday", collection="T")
+    assert [(e["slug"], e["host"], e["site"]) for e in got] == [("3m", "wd1", "Search")]
+
+
+def test_mine_wraps_a_dead_index_in_discoveryerror(monkeypatch):
+    """cli.cmd_seed catches this by name to exit cleanly instead of dumping a
+    traceback at someone whose only problem is that Common Crawl is down."""
+
+    def boom(*a, **k):
+        raise ConnectionResetError("peer hung up")
+
+    monkeypatch.setattr(discover.urllib.request, "urlopen", boom)
+    with pytest.raises(discover.DiscoveryError):
+        discover.mine("greenhouse", collection="T")
+
+
+# ── 0.4.0: match_known stays output-identical while getting 68x faster ───────
+def test_match_known_matches_a_bruteforce_reference():
+    """The optimisation reorders nothing: same entries, same order, same first-wins
+    behaviour on a duplicate (ats, slug). Pinned against the pre-0.4.0 algorithm
+    inlined here, because 'faster' is only acceptable if it is also identical."""
+
+    def brute(names, universe):
+        by_slug = {}
+        for e in universe:
+            by_slug.setdefault((e["ats"], e["slug"].lower()), e)
+        out, seen = [], set()
+        for name in names:
+            for v in discover.name_variants(name):
+                for (ats, slug), entry in by_slug.items():
+                    if slug == v and (ats, slug) not in seen:
+                        seen.add((ats, slug))
+                        out.append({**entry, "name": name, "source": "name-match"})
+                        break
+        return out
+
+    universe = [
+        {"ats": "greenhouse", "slug": "Stripe"},
+        {"ats": "lever", "slug": "stripe"},  # same slug, different ATS
+        {"ats": "greenhouse", "slug": "stripe"},  # duplicate key -> first wins
+        {"ats": "ashby", "slug": "first-resonance"},
+        {"ats": "greenhouse", "slug": "acmeco"},
+    ]
+    names = ["Stripe", "Stripe Inc.", "First Resonance", "ACME Co", "Nobody At All"]
+    assert discover.match_known(names, universe) == brute(names, universe)

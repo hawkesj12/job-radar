@@ -13,8 +13,10 @@ opt-in extra, off by default; see the README.)
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -35,10 +37,13 @@ from .util import (
 
 
 # ── DEPTH: per-company ATS feeds -- fetch_<ats>(slug) -> [posting] ───────────
+# One definition, two users: the full fetch below (with bodies) and live_greenhouse
+# (without them). Greenhouse also backs the board-ownership check in discover.
+GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
+
+
 def fetch_greenhouse(slug: str):
-    data = get_json(
-        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
-    )
+    data = get_json(f"{GREENHOUSE_API}/{slug}/jobs?content=true")
     out = []
     for j in data.get("jobs", []):
         text = clean(j.get("content", ""))
@@ -194,9 +199,10 @@ WORKDAY_PAGE = 20
 # them anyway: a body-less job is unrankable (jobfitr matches a user's boosts against
 # title+body) and unreadable (the UI renders its snippet from the body), so 13k
 # description-less jobs would be noise diluting the good results rather than coverage.
-# Measured 2026-07-22: 86ms/job at 8 threads, 100% success, median 7,476 chars —
-# ~19 min for the full Workday corpus at 8 workers, ~6 at 24. Off is an escape hatch
-# for a tight harvest window, not the normal state.
+# This is the expensive half of a Workday harvest by an order of magnitude, so it is
+# the first thing to turn off for a tight harvest window — but off is an escape
+# hatch, not the normal state. Discovery does NOT pay this cost: sources.LIVENESS
+# answers "is this board real" without touching the detail endpoint at all.
 WORKDAY_FETCH_DETAILS = os.environ.get("WORKDAY_FETCH_DETAILS", "1") not in (
     "0",
     "false",
@@ -245,15 +251,29 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
     base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
     out, offset, total = [], 0, None
     for _ in range(WORKDAY_MAX_PAGES):
-        data = post_json(
-            f"{base}/jobs",
-            {
-                "appliedFacets": {},
-                "limit": WORKDAY_PAGE,
-                "offset": offset,
-                "searchText": "",
-            },
-        )
+        try:
+            data = post_json(
+                f"{base}/jobs",
+                {
+                    "appliedFacets": {},
+                    "limit": WORKDAY_PAGE,
+                    "offset": offset,
+                    "searchText": "",
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # A page that fails mid-walk must not discard the pages that already
+            # succeeded -- the same best-effort discipline _workday_add_details
+            # uses one function below. Keep what we have and stop early; a 400-role
+            # employer returning its first 120 beats returning nothing.
+            #
+            # Page 1 is different: with `out` still empty there is no partial
+            # result to salvage, and swallowing it would report a live employer as
+            # having zero jobs. Re-raise so engine._fetch_company records a real
+            # error instead of a silent empty.
+            if not out:
+                raise
+            break
         # Workday reports `total` ONLY on the first page; every later page returns
         # total=0. Re-reading it per page made the loop exit after 2 pages (offset
         # >= 0), silently capping every employer at 40 roles. Latch it once.
@@ -301,6 +321,45 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
     return out
 
 
+# ONE detail pool for the whole process, not one per employer.
+#
+# This used to be a `with ThreadPoolExecutor(WORKDAY_DETAIL_WORKERS)` inside
+# _workday_add_details, i.e. inside a function the engine already calls from a
+# 12-thread pool. Twelve employers in flight each opened their own 8-thread pool:
+# a measured peak of 96 concurrent requests against a nominal cap of 12, and 12
+# pools spawned and torn down per harvest. Sharing one pool makes the real ceiling
+# `depth workers + WORKDAY_DETAIL_WORKERS` (~20) and makes the number mean what it
+# says.
+#
+# Deadlock invariant: detail tasks only fetch: they never submit further work to
+# this pool, so an outer worker blocking on `map` here cannot starve it.
+_DETAIL_POOL: ThreadPoolExecutor | None = None
+_DETAIL_POOL_SIZE: int | None = None
+_DETAIL_POOL_LOCK = threading.Lock()
+
+
+def _detail_pool() -> ThreadPoolExecutor:
+    """The shared detail-fetch pool, built on first use and rebuilt if the worker
+    count changes (tests do exactly that)."""
+    global _DETAIL_POOL, _DETAIL_POOL_SIZE
+    with _DETAIL_POOL_LOCK:
+        if _DETAIL_POOL is None or _DETAIL_POOL_SIZE != WORKDAY_DETAIL_WORKERS:
+            if _DETAIL_POOL is not None:
+                _DETAIL_POOL.shutdown(wait=False)
+            _DETAIL_POOL = ThreadPoolExecutor(
+                max_workers=WORKDAY_DETAIL_WORKERS,
+                thread_name_prefix="wd-detail",
+            )
+            _DETAIL_POOL_SIZE = WORKDAY_DETAIL_WORKERS
+        return _DETAIL_POOL
+
+
+@atexit.register
+def _shutdown_detail_pool() -> None:
+    if _DETAIL_POOL is not None:
+        _DETAIL_POOL.shutdown(wait=False)
+
+
 def _workday_add_details(base: str, rows: list[dict]) -> None:
     """Fill in `text` (and salary parsed from it) from Workday's per-job detail call.
 
@@ -330,8 +389,7 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
         if info.get("timeType"):
             r["employment_type"] = info["timeType"]
 
-    with ThreadPoolExecutor(max_workers=WORKDAY_DETAIL_WORKERS) as ex:
-        list(ex.map(_one, rows))
+    list(_detail_pool().map(_one, rows))
 
 
 DEPTH_ALL = {
@@ -347,6 +405,99 @@ DEPTH_ALL = {
 # watchlist fields through as kwargs; every other adapter keeps the fetch(slug)
 # contract the funnel's probe depends on.
 DEPTH_EXTRA_FIELDS = {"workday": ("host", "site")}
+
+
+# ── LIVENESS: does this board exist? -- live_<ats>(slug, **extra) -> int ─────
+#
+# Three callers -- discover.probe, funnel.funnel and seed.seed_universe -- only
+# ever needed a COUNT, but all three called the full production adapter to get
+# one. That is the most expensive possible way to answer a yes/no:
+#
+#   workday      210 requests (10 list pages + 200 per-job detail GETs) -> 1
+#   greenhouse   4.4 MB of job bodies -> 244 KB   (measured 2026-07-22)
+#   lever        379 KB -> 8 KB                   (measured 2026-07-22)
+#
+# The Workday case is the one that mattered: probing a few hundred tenants at 210
+# requests each is what tripped their rate limiter, so the 429 handling in
+# discover.probe existed to survive a storm this over-fetch was itself causing.
+#
+# Every variant below returns an EXACT count, never an approximation, because
+# discover.discover() and from_names() sort candidates by `-roles`; a capped or
+# estimated number would silently reorder the review queue.
+def live_greenhouse(slug: str) -> int:
+    # Same endpoint as fetch_greenhouse minus `content=true`: the job list without
+    # the descriptions, which is where ~95% of the bytes are.
+    return len(get_json(f"{GREENHOUSE_API}/{slug}/jobs").get("jobs") or ())
+
+
+def live_lever(slug: str) -> int:
+    # Lever honours ?limit= but reports no total, so this proves >=1 posting
+    # rather than counting them. probe only branches on zero/non-zero.
+    return len(get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json&limit=1"))
+
+
+def live_smartrecruiters(slug: str) -> int:
+    return int(
+        get_json(
+            f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
+        ).get("totalFound")
+        or 0
+    )
+
+
+def live_workable(slug: str) -> int:
+    # UNVERIFIED SAVING, deliberately noted: `details=false` is the documented
+    # lighter variant and returns the same {name, description, jobs} shape (checked
+    # 2026-07-22), but every Workable account reachable for testing had zero open
+    # roles, so the byte saving on a POPULATED board was never measured. It cannot
+    # be worse than details=true; it may simply be equal. Do not quote a number for
+    # this one until someone probes a real board.
+    return len(
+        get_json(
+            f"https://apply.workable.com/api/v1/widget/accounts/{slug}?details=false"
+        ).get("jobs")
+        or ()
+    )
+
+
+def live_workday(slug: str, host: str = "wd1", site: str = "") -> int:
+    # One POST, and crucially NO detail pass -- the detail pass is 200 of the 210
+    # requests the full adapter costs. `total` is authoritative on page 1 (it is
+    # reported as 0 on every later page, which is the trap fetch_workday latches).
+    data = post_json(
+        f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}/jobs",
+        {"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
+    )
+    return int(data.get("total") or 0)
+
+
+# Ashby is deliberately absent: measured 2026-07-22, its posting-api returns the
+# whole board (1.98 MB / 120 jobs) with or without includeCompensation, so there
+# is no cheaper variant to call. It falls back to the full adapter below.
+LIVENESS = {
+    "greenhouse": live_greenhouse,
+    "lever": live_lever,
+    "smartrecruiters": live_smartrecruiters,
+    "workable": live_workable,
+    "workday": live_workday,
+}
+
+
+def liveness_for(ats: str):
+    """A callable answering "how many live roles?" for one board, or None if this
+    build has no adapter for `ats` at all.
+
+    Callers never need to know which ATSs have a cheap variant: one lands on the
+    real thing, the rest transparently fall back to counting a full fetch. Adding
+    a cheap variant later is a one-line change here and touches no caller.
+    """
+    cheap = LIVENESS.get(ats)
+    if cheap:
+        return cheap
+    full = DEPTH_ALL.get(ats)
+    if not full:
+        return None
+    return lambda *a, **kw: len(full(*a, **kw) or ())
 
 
 # ── BREADTH: keyword aggregators -- search_<src>(queries) -> [posting] ───────

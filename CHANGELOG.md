@@ -4,6 +4,81 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-22
+
+Discovery stops using a full job harvest to answer a yes/no question. Confirming
+that one Workday board exists cost **210 HTTP requests** (10 list pages plus one
+detail call per role, measured against a live tenant); it now costs **1**. That
+over-fetch was itself what tripped Workday's rate limiter, so the 429 handling
+added in 0.3.0 was defending against a storm this code was causing.
+
+### Caller-visible contract changes (jobfitr)
+
+1. **`discover.probe`'s `roles` value changes meaning.** It is now the ATS's own
+   reported total from a cheap liveness call, not the length of a full fetch. For
+   Workday that means the true open-role count instead of the page-capped 200 — a
+   more accurate number, but a **different** one. Anything sorting or displaying
+   `roles` will see larger values.
+2. **`seed.ATS_PATTERNS` and `seed._JUNK` are gone.** Mining lives in
+   `discover._PATTERNS` only. `seed.SeedError` still exists and is still catchable
+   by that name — it is now an alias of the new `discover.DiscoveryError`.
+3. **`seed.enumerate_tokens` is superseded by `seed.enumerate_entries`**, which
+   returns full entry dicts rather than bare slugs (Workday needs its host and site
+   to be fetchable at all). `enumerate_tokens` remains for slug-only callers.
+
+### Added
+
+- **`sources.LIVENESS` + `sources.liveness_for(ats)`** — cheap per-ATS "is this
+  board real" probes returning an exact role count. Measured against live boards on
+  2026-07-22: Greenhouse without job bodies (244 KB vs 4.4 MB), Lever `?limit=1`
+  (8 KB vs 379 KB), Workday one POST with no detail pass (1 request vs 210),
+  SmartRecruiters `totalFound` (verified to agree with a full fetch). Workable uses
+  the documented `details=false` variant but its saving is **unverified** — no
+  reachable Workable account had open roles to measure against. Ashby is excluded
+  on purpose: measured, it returns its whole board either way, so there is nothing
+  cheaper to call. Ashby, and any future ATS without a variant, fall back to the
+  full adapter transparently — callers never need to know which are cheap.
+- **`job-radar seed workday`** — the miner already understood Workday's
+  tenant/host/site triple; the CLI just never offered it. The choice list is now
+  derived from the miner's own pattern table so the two cannot drift again.
+
+### Fixed
+
+- **A corrupt `watchlist.json` no longer discards a good scan.** `cli.cmd_scan`
+  caught `OSError`, but `json.JSONDecodeError` is a `ValueError` — so it escaped
+  _after_ the full network harvest and _before_ the shortlist write. Growing the
+  watchlist is a nice-to-have; the harvest is the point.
+- **A mid-pagination failure no longer loses the whole employer.** `fetch_workday`
+  now keeps the pages it already fetched and stops early, matching the best-effort
+  discipline the detail pass already used. A failure on page 1 still raises, since
+  there is nothing to salvage and a silent empty would look like a live board with
+  no jobs.
+- **Nested thread pools.** The Workday detail pass opened its own 8-worker pool per
+  employer inside the engine's 12-worker pool: a measured peak of **96** concurrent
+  requests against a nominal cap of 12. One shared, lazily-created pool now makes
+  the real ceiling ~20.
+- **Mining missed `job-boards.greenhouse.io`** (Greenhouse's current host) and
+  **dropped whole Workday tenants on a lowercase `en-us`** locale segment. Both
+  came from this module carrying its own narrower copies of regexes
+  `dedup.ats_from_url` already had right; the five single-key ATSs now route
+  through that one parser. The third copy, in `seed.py`, still cut a slug at `?`
+  rather than `&` — the bug 0.3.1 fixed elsewhere — and is deleted.
+- **`discover.match_known` was O(names × variants × universe)**, building a lookup
+  dict and then discarding it. 428.8 ms → 6.22 ms at 5k × 5k, with output pinned
+  byte-identical against the previous algorithm by a differential test.
+
+### Changed
+
+- `seed --verify` probes concurrently through `discover.probe` instead of one
+  board at a time with a full harvest fetch each, keeping the same early stop at
+  `--max`.
+- Removed every unsourced percentage from the discovery docstrings (mining yield
+  rates, "120 real store names", per-job timings). No artifact ever existed to
+  check them against, and `mine` caps CDX _rows_ rather than companies over a
+  SURT-sorted index — so any rate measured that way describes an alphabetically
+  truncated slice, not the population. The mechanisms they were attached to are
+  unchanged and still documented.
+
 ## [0.3.2] - 2026-07-22
 
 Documentation correctness. An independent panel review reproduced five claims in the

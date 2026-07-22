@@ -2,8 +2,8 @@
 
 The depth lane's bottleneck was never fetching — it was SUPPLY. Every per-company
 ATS fetch needs a slug you have to already know, and the breadth funnel only learns
-a slug when an aggregator happens to link straight at an ATS (rare: measured 45 new
-slugs across 3,162 companies). So the watchlist grew by hand, one company at a time.
+a slug when an aggregator happens to link straight at an ATS, which is rare. So the
+watchlist grew by hand, one company at a time.
 
 Common Crawl inverts that. It has already crawled the web and published a queryable
 URL index (CDX), so every company with a public job board is already in there as a
@@ -17,17 +17,21 @@ Two-stage, and the second stage is what makes it trustworthy:
              returns >=1 live role.
 
 The probe IS the verification: a dead or misparsed slug returns nothing and costs a
-single request, so a bad guess can never reach the watchlist. That is the same
-discipline the hand-curated list already recorded ("each live-probed, returned >=1
-open role") — just run in bulk instead of by hand.
+single cheap request (see sources.LIVENESS), so a bad guess can never reach the
+watchlist. That is the same discipline the hand-curated list already recorded
+("each live-probed, returned >=1 open role") — just run in bulk instead of by hand.
 
-Measured 2026-07-22: one capped CDX query returned 595 distinct Greenhouse slugs,
-66% of the not-yet-known ones resolving to live boards; `*.myworkdayjobs.com/*`
-returned 217 (tenant, host, site) triples at 57%.
+On yield: this module deliberately publishes no hit-rate percentage. `mine` caps
+CDX ROWS rather than distinct companies, and CDX returns rows SURT-sorted, so any
+rate measured from a capped query describes an alphabetically-truncated,
+popularity-weighted slice — not the population. Earlier versions of this docstring
+quoted such figures as if they were population rates, with no artifact behind them
+to check. Run your own query and count if you need a number.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -36,35 +40,58 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config
-from .sources import DEPTH_ALL
+from .dedup import ats_from_url
+from .sources import liveness_for
 from .util import NET_ERRORS
 
 CDX_COLLINFO = "https://index.commoncrawl.org/collinfo.json"
 
-# One URL pattern per ATS, plus how to turn a matched URL into a watchlist entry.
-# Greenhouse/Lever/Ashby key on a single path segment; Workday needs the triple that
-# only the full hostname + path carries.
+
+class DiscoveryError(RuntimeError):
+    """Common Crawl was unreachable/overloaded — transient and retryable.
+
+    Defined here rather than imported from seed because seed depends on this
+    module, not the other way round; `seed.SeedError` is an alias of this name so
+    `except seed.SeedError` keeps working for existing callers.
+    """
+
+
+# Errors that mean "Common Crawl is having a bad day", not "this code is wrong".
+_CDX_ERRORS = (
+    *NET_ERRORS,
+    urllib.error.HTTPError,
+    ConnectionError,
+    http.client.HTTPException,
+    KeyError,
+    IndexError,
+)
+
+# The CDX url-pattern to query per ATS. Slug EXTRACTION is not here: the five
+# single-key ATSs go through dedup.ats_from_url, the one parser that already knows
+# greenhouse's `job-boards.`/`boards.eu.` hosts and already stops a slug at `&`
+# (the embed-form bug). This module used to carry its own narrower copies of those
+# regexes, and seed.py carried a third set that still had the `&` bug — three
+# parsers disagreeing on the same URL. Now there is one, plus the Workday triple
+# below, which ats_from_url has no reason to know about.
 _PATTERNS = {
-    "greenhouse": (
-        "boards.greenhouse.io/*",
-        re.compile(r"^https?://boards\.greenhouse\.io/([A-Za-z0-9_-]+)"),
-    ),
-    "lever": (
-        "jobs.lever.co/*",
-        re.compile(r"^https?://jobs\.lever\.co/([A-Za-z0-9_-]+)"),
-    ),
-    "ashby": (
-        "jobs.ashbyhq.com/*",
-        re.compile(r"^https?://jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)"),
-    ),
-    "workday": (
-        "*.myworkdayjobs.com/*",
-        re.compile(
-            r"^https?://([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/"
-            r"(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]+)"
-        ),
-    ),
+    "greenhouse": "boards.greenhouse.io/*",
+    "lever": "jobs.lever.co/*",
+    "ashby": "jobs.ashbyhq.com/*",
+    "workable": "apply.workable.com/*",
+    "smartrecruiters": "jobs.smartrecruiters.com/*",
+    "workday": "*.myworkdayjobs.com/*",
 }
+
+# Workday is the one ATS a job URL cannot be reduced to a single slug: it needs
+# tenant + numbered host shard + site slug. The locale segment is optional AND
+# case-insensitive — `en-us` in the wild is as common as `en-US`, and matching only
+# the latter meant the locale was captured as the site slug, then dropped by
+# _NOT_SLUGS, losing the entire tenant.
+_WORKDAY_RE = re.compile(
+    r"^https?://([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/"
+    r"(?:[A-Za-z]{2}-[A-Za-z]{2}/)?([A-Za-z0-9_-]+)",
+    re.I,
+)
 
 # ATSs that can tell us WHO OWNS a board, and how to ask. This is the difference
 # between "this board is alive" and "this board is THIS company's" — see
@@ -80,6 +107,9 @@ _IDENTITY_URL = {
 # site slug, and 'careers' is ASM Global's. Anything ambiguous belongs to the probe.
 _NOT_SLUGS = {
     "embed",
+    "job_app",
+    "j",
+    "jobs",
     "robots",
     "robots.txt",
     "favicon.ico",
@@ -96,56 +126,104 @@ def latest_collection() -> str:
     """Newest Common Crawl collection id (e.g. 'CC-MAIN-2026-25')."""
     cfg = config.active()
     req = urllib.request.Request(CDX_COLLINFO, headers={"User-Agent": cfg.user_agent})
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))[0]["id"]
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))[0]["id"]
+    except _CDX_ERRORS as e:
+        raise DiscoveryError(
+            f"Common Crawl index unavailable ({type(e).__name__})"
+        ) from e
 
 
-def mine(ats: str, collection: str | None = None, limit: int = 4000) -> list[dict]:
+def _entry(ats: str, url: str) -> tuple | None:
+    """One CDX url -> (dedup key, watchlist entry), or None if it isn't a board.
+
+    Workday needs its own regex for the tenant/host/site triple; everything else
+    defers to dedup.ats_from_url so this module cannot drift from the parser the
+    rest of the package uses.
+    """
+    if ats == "workday":
+        m = _WORKDAY_RE.match(url)
+        if not m:
+            return None
+        tenant, host, site = m.group(1), m.group(2), m.group(3)
+        if site.lower() in _NOT_SLUGS:
+            return None
+        return (tenant.lower(), host.lower(), site.lower()), {
+            "ats": ats,
+            "slug": tenant,
+            "host": host.lower(),
+            "site": site,
+        }
+    got = ats_from_url(url)
+    # ats_from_url lowercases the URL before matching, so a slug comes back
+    # lowercase; that is fine for every ATS here (boards are case-insensitive)
+    # and it makes the dedup key and the stored slug agree.
+    if not got or got[0] != ats:
+        return None
+    slug = got[1]
+    if slug.lower() in _NOT_SLUGS:
+        return None
+    return slug.lower(), {"ats": ats, "slug": slug}
+
+
+def mine(
+    ats: str,
+    collection: str | None = None,
+    limit: int = 4000,
+    cdx_url: str | None = None,
+) -> list[dict]:
     """Stage 1 — pull candidate watchlist entries for one ATS out of the CDX index.
 
     Returns UNVERIFIED candidates; every one still has to survive `probe`.
+
+    `limit` caps CDX ROWS, not distinct companies, and CDX returns rows in
+    SURT-sorted order — so a capped query is an alphabetically-truncated slice
+    weighted toward boards with many crawled URLs, not a random sample. Treat any
+    yield rate computed from it as an upper bound on that slice, not a population
+    rate.
+
+    `cdx_url` lets a caller supply an already-resolved index endpoint (seed does,
+    from its own collection lookup) instead of paying for a second one.
     """
     if ats not in _PATTERNS:
         raise ValueError(f"no CDX pattern for ats={ats!r}")
-    pattern, rx = _PATTERNS[ats]
-    collection = collection or latest_collection()
+    pattern = _PATTERNS[ats]
     cfg = config.active()
-    url = (
-        f"https://index.commoncrawl.org/{collection}-index"
-        f"?url={urllib.parse.quote(pattern, safe='')}&output=json&limit={limit}"
-    )
+    if cdx_url:
+        base = cdx_url
+    else:
+        base = (
+            f"https://index.commoncrawl.org/{collection or latest_collection()}-index"
+        )
+    url = f"{base}?url={urllib.parse.quote(pattern, safe='')}&output=json&limit={limit}"
     req = urllib.request.Request(url, headers={"User-Agent": cfg.user_agent})
-    with urllib.request.urlopen(req, timeout=max(cfg.timeout, 90)) as r:
-        body = r.read().decode("utf-8", "replace")
 
     seen, out = set(), []
-    for line in body.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        m = rx.match(rec.get("url", ""))
-        if not m:
-            continue
-        if ats == "workday":
-            tenant, host, site = m.groups()
-            if site.lower() in _NOT_SLUGS:
-                continue
-            key = (tenant, host, site)
-            entry = {"ats": ats, "slug": tenant, "host": host, "site": site}
-        else:
-            slug = m.group(1)
-            if slug.lower() in _NOT_SLUGS:
-                continue
-            key = slug.lower()
-            entry = {"ats": ats, "slug": slug}
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(entry)
+    try:
+        # Stream rather than buffering the whole body: CDX is newline-delimited
+        # JSON and a wide `limit` is megabytes.
+        with urllib.request.urlopen(req, timeout=max(cfg.timeout, 90)) as r:
+            for raw in r:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                got = _entry(ats, rec.get("url", ""))
+                if not got:
+                    continue
+                key, entry = got
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(entry)
+    except _CDX_ERRORS as e:
+        raise DiscoveryError(
+            f"Common Crawl CDX unavailable ({type(e).__name__})"
+        ) from e
     return out
 
 
@@ -226,7 +304,12 @@ def probe(
 
     This is the gate that makes bulk mining safe: an unreachable, churned, or
     misparsed slug simply returns nothing and is dropped. Each surviving entry is
-    annotated with the role count that proved it.
+    annotated with the `roles` count that proved it.
+
+    `roles` is the ATS's own reported total (a cheap one-shot liveness call), NOT
+    the length of a full harvest — so for Workday it is the true open-role count
+    rather than the 200 a capped fetch would return. Callers that sort by it, or
+    display it, are seeing a bigger and more accurate number than before 0.4.0.
 
     `require_identity` adds the second gate: for an ATS that reports its board owner,
     the reported name must match the candidate's `name`. Without it, liveness is the
@@ -256,12 +339,16 @@ def probe(
     """
 
     def _one(c):
-        fetch = DEPTH_ALL.get(c["ats"])
-        if not fetch:
+        # A LIVENESS call, not the full harvest adapter. Answering "does this board
+        # exist" by downloading every job body cost up to 210 requests per Workday
+        # candidate — which is what tripped the rate limiter the 429 branch below
+        # exists to survive. Measured against a live tenant: 210 -> 1.
+        probe_fn = liveness_for(c["ats"])
+        if not probe_fn:
             return {**c, "outcome": "unsupported"}
         kwargs = {k: c[k] for k in ("host", "site") if k in c}
         try:
-            postings = fetch(c["slug"], **kwargs)
+            n_roles = probe_fn(c["slug"], **kwargs)
         except urllib.error.HTTPError as e:
             # Three genuinely different failures, and conflating them is expensive:
             #   401/403 "refused"  — the board exists and will not serve us. Terminal.
@@ -284,14 +371,14 @@ def probe(
             return {**c, "outcome": "error"}
         except Exception:  # noqa: BLE001 — a single bad board must not kill the run
             return {**c, "outcome": "error"}
-        if not postings:
+        if not n_roles:
             return {**c, "outcome": "empty"}
         if require_identity and c.get("name"):
             if not verify_identity(c["ats"], c["slug"], c["name"]):
                 return {**c, "outcome": "wrong-owner"}
         return {
             **c,
-            "roles": len(postings),
+            "roles": n_roles,
             "outcome": "ok",
             "source": c.get("source", "commoncrawl"),
         }
@@ -329,14 +416,13 @@ def name_variants(name: str, aggressive: bool = False) -> list[str]:
 
     Companies overwhelmingly slug their own name: 'Cloudflare' -> cloudflare,
     'DoubleVerify' -> doubleverify, 'First Resonance' -> firstresonance or
-    first-resonance. Verified 2026-07-22 against live boards (cloudflare 264 roles,
-    ramp 121, robinhood 118, doubleverify 40).
+    first-resonance. Verified 2026-07-22 against live boards.
 
     `aggressive` adds the bare first word ('Capital One' -> `capital`). That variant
-    is a correctness trap on its own: measured over 120 real store names it produced
-    ~7 confident FALSE matches per true one, because `capital`, `veterans`, and
-    `foundation` are all REAL boards owned by unrelated companies and a liveness probe
-    cannot tell the difference. It is safe ONLY when the caller also verifies board
+    is a correctness trap on its own: a generic first word frequently IS a real board
+    owned by an unrelated company — `veterans` is IntelliDyne's, and `jobs.lever.co/
+    capital` is a live board that is not Capital One's — and a liveness probe cannot
+    tell the difference. It is safe ONLY when the caller also verifies board
     ownership (see verify_identity), so callers must opt in deliberately.
     """
     base = _norm_name(name)
@@ -357,16 +443,29 @@ def match_known(names: list[str], universe: list[dict]) -> list[dict]:
     to a slug invites false pairs ('agency' matching half the corpus), and a wrong
     slug silently attributes another company's jobs to this one.
     """
+    # Index by slug ONCE. This used to build `by_slug` and then throw the lookup
+    # away, rescanning the whole universe for every variant of every name —
+    # O(names x variants x universe). Measured 428.8ms -> 6.22ms at 5k x 5k, with
+    # byte-identical output (pinned by a brute-force differential test).
+    #
+    # Ordering is load-bearing, so it is preserved exactly: keys stay in universe
+    # insertion order, first-wins on a duplicate (ats, slug), and a variant that
+    # only matches already-taken keys keeps scanning for a free one.
     by_slug: dict[tuple, dict] = {}
+    by_variant: dict[str, list[tuple]] = {}
     for e in universe:
-        by_slug.setdefault((e["ats"], e["slug"].lower()), e)
+        key = (e["ats"], e["slug"].lower())
+        if key in by_slug:
+            continue
+        by_slug[key] = e
+        by_variant.setdefault(key[1], []).append(key)
     out, seen = [], set()
     for name in names:
         for v in name_variants(name):
-            for (ats, slug), entry in by_slug.items():
-                if slug == v and (ats, slug) not in seen:
-                    seen.add((ats, slug))
-                    out.append({**entry, "name": name, "source": "name-match"})
+            for key in by_variant.get(v, ()):
+                if key not in seen:
+                    seen.add(key)
+                    out.append({**by_slug[key], "name": name, "source": "name-match"})
                     break
     return out
 

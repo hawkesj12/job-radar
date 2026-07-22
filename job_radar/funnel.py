@@ -1,6 +1,9 @@
 """The slug-discovery funnel: when a breadth hit's apply URL exposes an ATS slug
 for a company not yet on the watchlist, probe it to confirm it's real, then
-append it -- so the depth list grows itself over time."""
+append it -- so the depth list grows itself over time.
+
+Confirming costs ONE cheap request (sources.LIVENESS), not a full harvest of the
+board: this only ever needed to know whether the slug resolves to >=1 open role."""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import json
 from . import config
 from .dedup import ats_from_url, norm
 from .scoring import relevant
-from .sources import DEPTH_ALL
+from .sources import liveness_for
 from .util import NET_ERRORS, atomic_write_text
 
 
@@ -39,14 +42,14 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
                 {"name": name, "ats": ats, "slug": slug, "industry": "(discovered)"}
             )
             continue
-        fetch = DEPTH_ALL.get(ats)
-        if not fetch:
+        probe_fn = liveness_for(ats)
+        if not probe_fn:
             continue
         try:
-            ps = fetch(slug)
+            n_roles = probe_fn(slug)
         except NET_ERRORS:
             continue  # dead/unreachable slug — skip (a real bug would surface)
-        if ps:  # >=1 posting -> the slug is real
+        if n_roles:  # >=1 posting -> the slug is real
             added.append(
                 {
                     "name": name,

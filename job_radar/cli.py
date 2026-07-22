@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.resources as resources
+import json
 import sys
 from pathlib import Path
 
@@ -75,8 +76,16 @@ def cmd_scan(args, cfg):
     if discovered and wl:
         try:
             discovered = funnel.append_watchlist(Path(wl), discovered)
-        except OSError as e:
-            print(f"note: could not grow {wl} ({type(e).__name__})")
+        except (OSError, json.JSONDecodeError) as e:
+            # JSONDecodeError is a ValueError, not an OSError, so a corrupt
+            # watchlist.json used to escape this handler entirely — AFTER the whole
+            # network harvest above and BEFORE the shortlist write below, throwing
+            # away a good run over a file we only wanted to APPEND to. Growing the
+            # watchlist is a nice-to-have; the harvest is the point. engine.harvest
+            # already treats this same file the same way (a reported soft error).
+            msg = f"could not grow {wl} ({type(e).__name__})"
+            print(f"note: {msg}")
+            errors.append(msg)
             discovered = []
     # Total failure (nothing harvested, but sources errored) — do NOT let upsert
     # write an empty store: that would wipe "new" roles and reset first_seen,
@@ -251,8 +260,15 @@ def main(argv=None):
         parents=[common],
         help="bulk-add companies from Common Crawl (build the universe)",
     )
+    # Derived, never a literal: this list was hardcoded here while the miner's own
+    # pattern table said something different, so `workday` was minable but not
+    # selectable. One source of truth.
+    from .discover import _PATTERNS as _MINEABLE
+
     sd.add_argument(
-        "ats", choices=["greenhouse", "lever", "ashby", "workable", "smartrecruiters"]
+        "ats",
+        choices=sorted(_MINEABLE),
+        help="which ATS to enumerate (workday entries carry the host+site triple)",
     )
     sd.add_argument(
         "--max",

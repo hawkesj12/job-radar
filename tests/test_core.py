@@ -1,6 +1,7 @@
 """Core tests: config, deterministic scoring, dedup, the upsert store, and the
 LLM no-op guarantee. Run: pytest"""
 
+import json
 import types
 
 import pytest
@@ -230,7 +231,9 @@ def test_surface_hides_rejected(tmp_path):
         csvp, [_post("A", "AI Engineer", 90, "u1")], today="2026-07-12"
     )
     shortlist.mark_status(csvp, merged[0]["id"], "rejected")
-    assert shortlist.surface(shortlist.load_all(csvp), c) == []  # rejected never resurfaces
+    assert (
+        shortlist.surface(shortlist.load_all(csvp), c) == []
+    )  # rejected never resurfaces
 
 
 def test_csv_formula_injection_neutralized(tmp_path):
@@ -832,7 +835,9 @@ def test_harvest_still_reads_a_watchlist_file(tmp_path, monkeypatch):
     _depth_only(monkeypatch, got)
     wl = tmp_path / "watchlist.json"
     wl.write_text(
-        _json.dumps({"companies": [{"name": "Figma", "ats": "greenhouse", "slug": "figma"}]})
+        _json.dumps(
+            {"companies": [{"name": "Figma", "ats": "greenhouse", "slug": "figma"}]}
+        )
     )
     rows, _, errors = engine.harvest(c, str(wl))
     assert [s for s, _ in got] == ["figma"] and len(rows) == 1 and not errors
@@ -891,3 +896,100 @@ def test_cli_scan_persists_discovered_companies(tmp_path, monkeypatch):
     )
     cli.cmd_scan(args, _cfg())
     assert [c["slug"] for c in _json.loads(wl.read_text())["companies"]] == ["newco"]
+
+
+# ── 0.4.0: liveness, the corrupt-watchlist crash, seed consolidation ─────────
+def test_corrupt_watchlist_does_not_discard_a_good_harvest(tmp_path, monkeypatch):
+    """REGRESSION: json.JSONDecodeError is a ValueError, not an OSError, so a corrupt
+    watchlist.json escaped cmd_scan's handler — AFTER the whole network harvest and
+    BEFORE the shortlist write. A file we only wanted to APPEND to could throw away
+    the entire run's results."""
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": [], "trunc', encoding="utf-8")  # truncated mid-write
+    row = _post("Acme", "AI Engineer", 40, "https://x/1")
+    monkeypatch.setattr(
+        engine,
+        "harvest",
+        lambda cfg, w: ([row], [{"name": "New", "ats": "lever", "slug": "new"}], []),
+    )
+    cli.cmd_scan(
+        types.SimpleNamespace(
+            out=str(csvp), watchlist=str(wl), verbose=False, limit=25, strict=False
+        ),
+        c,
+    )
+    # The harvest survived the broken watchlist.
+    assert csvp.exists(), "the shortlist was never written"
+    assert "AI Engineer" in csvp.read_text(encoding="utf-8")
+
+
+def test_funnel_confirms_with_liveness_not_a_full_harvest(monkeypatch):
+    """The funnel only ever needed to know whether a discovered slug resolves to >=1
+    role. It was downloading the company's entire board to find out."""
+    c = _cfg()
+    seen = []
+    monkeypatch.setattr(
+        funnel, "liveness_for", lambda ats: lambda slug, **kw: seen.append(slug) or 3
+    )
+    monkeypatch.setattr(
+        sources, "fetch_lever", lambda *a, **k: pytest.fail("full adapter called")
+    )
+    posts = [_post("Newco", "AI Engineer", 40, "https://jobs.lever.co/newco/1")]
+    added = funnel.funnel(posts, set(), set(), c)
+    assert [e["slug"] for e in added] == ["newco"]
+    assert seen == ["newco"]
+
+
+def test_funnel_drops_a_slug_with_no_live_roles(monkeypatch):
+    c = _cfg()
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda slug, **kw: 0)
+    posts = [_post("Newco", "AI Engineer", 40, "https://jobs.lever.co/newco/1")]
+    assert funnel.funnel(posts, set(), set(), c) == []
+
+
+def test_seed_writes_the_workday_triple(tmp_path, monkeypatch):
+    """Workday needs tenant + host + site to be fetchable at all; seeding only the
+    slug would write a company the adapter can never resolve."""
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": []}', encoding="utf-8")
+    monkeypatch.setattr(
+        seed,
+        "enumerate_entries",
+        lambda ats, max_rows=20000: [
+            {"ats": "workday", "slug": "3m", "host": "wd1", "site": "Search"}
+        ],
+    )
+    assert seed.seed_universe("workday", wl, limit=5, verify=False) == 1
+    got = json.loads(wl.read_text(encoding="utf-8"))["companies"][0]
+    assert (got["ats"], got["slug"], got["host"], got["site"]) == (
+        "workday",
+        "3m",
+        "wd1",
+        "Search",
+    )
+
+
+def test_seed_verify_probes_concurrently_and_stops_at_the_limit(tmp_path, monkeypatch):
+    """The old --verify loop was serial AND used a full harvest fetch per board.
+    It now batches through discover.probe, keeping the same early stop."""
+    wl = tmp_path / "watchlist.json"
+    wl.write_text('{"companies": []}', encoding="utf-8")
+    entries = [{"ats": "greenhouse", "slug": f"co{i}"} for i in range(50)]
+    monkeypatch.setattr(seed, "enumerate_entries", lambda a, max_rows=20000: entries)
+    probed = []
+
+    def fake_probe(batch, workers=8):
+        probed.extend(e["slug"] for e in batch)
+        return [{**e, "roles": 1, "outcome": "ok"} for e in batch]
+
+    monkeypatch.setattr(seed.discover, "probe", fake_probe)
+    assert seed.seed_universe("greenhouse", wl, limit=3, verify=True) == 3
+    assert len(json.loads(wl.read_text(encoding="utf-8"))["companies"]) == 3
+    assert probed, "probe was never called — verify silently did nothing"
+
+
+def test_seed_rejects_an_ats_it_cannot_mine():
+    with pytest.raises(ValueError, match="seed not supported"):
+        seed.enumerate_entries("myspace")
