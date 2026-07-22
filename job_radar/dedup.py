@@ -97,15 +97,21 @@ def ats_from_url(url: str):
     if not url:
         return None
     u = url.lower()
+    # `&` is excluded alongside /?# — the greenhouse embed form consumes the '?'
+    # itself (embed/job_app?for=SLUG&token=...), so without it the capture ran on
+    # through the query string and produced slugs like
+    # 'gemini&token=7743177&gh_jid=7743177'. Those merely probe as 404s, so the
+    # symptom was a company quietly looking unresolvable rather than a wrong board —
+    # invisible until parsed slugs were compared against real resolutions.
     patterns = [
         (
-            r"(?:job-)?boards(?:\.eu)?\.greenhouse\.io/(?:embed/job_app\?for=)?([^/?#]+)",
+            r"(?:job-)?boards(?:\.eu)?\.greenhouse\.io/(?:embed/job_app\?for=)?([^/?#&]+)",
             "greenhouse",
         ),
-        (r"jobs\.lever\.co/([^/?#]+)", "lever"),
-        (r"jobs\.ashbyhq\.com/([^/?#]+)", "ashby"),
-        (r"apply\.workable\.com/([^/?#]+)", "workable"),
-        (r"jobs\.smartrecruiters\.com/([^/?#]+)", "smartrecruiters"),
+        (r"jobs\.lever\.co/([^/?#&]+)", "lever"),
+        (r"jobs\.ashbyhq\.com/([^/?#&]+)", "ashby"),
+        (r"apply\.workable\.com/([^/?#&]+)", "workable"),
+        (r"jobs\.smartrecruiters\.com/([^/?#&]+)", "smartrecruiters"),
     ]
     for rx, ats in patterns:
         m = re.search(rx, u)

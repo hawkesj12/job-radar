@@ -411,3 +411,20 @@ def test_throttling_is_never_terminal(monkeypatch):
     assert by["a"] == "throttled", "429 must be its own, retryable outcome"
     assert by["b"] == "refused"
     assert by["c"] == "missing"
+
+
+def test_ats_from_url_stops_at_the_query_string():
+    """REGRESSION: greenhouse's embed form consumes the '?' itself
+    (embed/job_app?for=SLUG&token=...), so a capture that excluded only /?# ran on
+    through the query and yielded 'gemini&token=7743177&gh_jid=7743177'. Those probe
+    as 404s, so a company just looked quietly unresolvable."""
+    from job_radar.dedup import ats_from_url
+
+    assert ats_from_url(
+        "https://boards.greenhouse.io/embed/job_app?for=gemini&token=774&gh_jid=774"
+    ) == ("greenhouse", "gemini")
+    assert ats_from_url("https://jobs.lever.co/vaco?lever-source=x") == ("lever", "vaco")
+    assert ats_from_url("https://jobs.ashbyhq.com/runway-ml/28e1") == (
+        "ashby",
+        "runway-ml",
+    )
