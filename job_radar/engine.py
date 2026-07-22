@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import config
 from .dedup import find_hit_key, norm
-from .funnel import append_watchlist, funnel
+from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
 from .sources import DEPTH_EXTRA_FIELDS, enabled_breadth, enabled_depth
 from .util import age_int
@@ -84,20 +84,32 @@ def _consume(postings, hits, blocks, cfg, meta):
             hits[match] = winner
 
 
-def harvest(cfg=None, watchlist_path=None):
-    """Run a full scan. Returns (rows, discovered, errors)."""
+def harvest(cfg=None, watchlist_path=None, companies=None):
+    """Run a full scan. Returns (rows, discovered, errors).
+
+    The company universe arrives one of two ways:
+      - `companies` — a list of entries, passed in by a caller that owns its own
+        store (jobfitr keeps its universe in SQLite, not a file).
+      - `watchlist_path` — a JSON file, which is how the standalone CLI works.
+
+    Taking DATA rather than a path is what keeps this a library: the engine no
+    longer needs to know where a caller's companies live, or be able to read disk
+    at all. `discovered` is likewise RETURNED, never written — persistence is the
+    caller's business (see cli.cmd_scan, which appends to its watchlist.json).
+    """
     cfg = cfg or config.active()
-    companies = []
     watchlist_err = None
-    if watchlist_path:
-        try:
-            with open(watchlist_path, encoding="utf-8") as f:
-                companies = json.loads(f.read()).get("companies", [])
-        except (OSError, json.JSONDecodeError) as e:
-            # A corrupt/unreadable watchlist must be LOUD -- silently dropping the
-            # entire depth harvest (all your companies) is the one place this tool
-            # would betray its own fail-fast rule. Surfaced via `errors` below.
-            watchlist_err = f"watchlist {watchlist_path}: {type(e).__name__}"
+    if companies is None:
+        companies = []
+        if watchlist_path:
+            try:
+                with open(watchlist_path, encoding="utf-8") as f:
+                    companies = json.loads(f.read()).get("companies", [])
+            except (OSError, json.JSONDecodeError) as e:
+                # A corrupt/unreadable watchlist must be LOUD -- silently dropping the
+                # entire depth harvest (all your companies) is the one place this tool
+                # would betray its own fail-fast rule. Surfaced via `errors` below.
+                watchlist_err = f"watchlist {watchlist_path}: {type(e).__name__}"
 
     meta, known_slugs = {}, set()
     for c in companies:
@@ -179,13 +191,14 @@ def harvest(cfg=None, watchlist_path=None):
                 breadth_postings += ps
                 _consume(ps, hits, blocks, cfg, meta)
 
+    # Slug discovery RETURNS candidates; it does not persist them. The engine used to
+    # append straight into the caller's watchlist.json from here, which made a library
+    # function silently write a file the caller owned — and left a store-backed caller
+    # (jobfitr) with nowhere to put them. Whoever owns the universe decides.
     discovered = []
-    if cfg.funnel_auto_grow and watchlist_path:
-        from pathlib import Path
-
+    if cfg.funnel_auto_grow:
         try:
-            found = funnel(breadth_postings, known_companies, known_slugs, cfg)
-            discovered = append_watchlist(Path(watchlist_path), found)
+            discovered = funnel(breadth_postings, known_companies, known_slugs, cfg)
         except Exception as e:  # noqa: BLE001 — discovery must never sink a scan
             errors.append(f"funnel: {type(e).__name__}")
 

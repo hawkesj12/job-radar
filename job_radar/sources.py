@@ -13,8 +13,10 @@ opt-in extra, off by default; see the README.)
 
 from __future__ import annotations
 
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -177,6 +179,20 @@ def fetch_workable(slug: str):
 # nightly harvest across ~100 enterprise tenants bounded at ~1k requests.
 WORKDAY_MAX_PAGES = 10
 WORKDAY_PAGE = 20
+# Workday's LIST endpoint returns no description at all — those live on a per-job
+# detail call, so bodies cost one request per role instead of one per twenty. Fetch
+# them anyway: a body-less job is unrankable (jobfitr matches a user's boosts against
+# title+body) and unreadable (the UI renders its snippet from the body), so 13k
+# description-less jobs would be noise diluting the good results rather than coverage.
+# Measured 2026-07-22: 86ms/job at 8 threads, 100% success, median 7,476 chars —
+# ~19 min for the full Workday corpus at 8 workers, ~6 at 24. Off is an escape hatch
+# for a tight harvest window, not the normal state.
+WORKDAY_FETCH_DETAILS = os.environ.get("WORKDAY_FETCH_DETAILS", "1") not in (
+    "0",
+    "false",
+    "no",
+)
+WORKDAY_DETAIL_WORKERS = int(os.environ.get("WORKDAY_DETAIL_WORKERS", "8"))
 _ET = ZoneInfo("America/New_York")  # every date in job-radar is Eastern
 _WD_POSTED = re.compile(r"Posting Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})")
 _WD_RELATIVE = re.compile(r"Posted\s+(\d+)\+?\s+(day|week|month)s?\s+ago", re.I)
@@ -255,12 +271,51 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
                     "employment_type": "",
                     "salary": "",
                     "text": "",
+                    "_wd_path": path,  # consumed by the detail pass, stripped after
                 }
             )
         offset += WORKDAY_PAGE
         if len(postings) < WORKDAY_PAGE or offset >= total:
             break
+
+    if WORKDAY_FETCH_DETAILS and out:
+        _workday_add_details(base, out)
+    for r in out:
+        r.pop("_wd_path", None)
     return out
+
+
+def _workday_add_details(base: str, rows: list[dict]) -> None:
+    """Fill in `text` (and salary parsed from it) from Workday's per-job detail call.
+
+    Mutates in place. Best-effort per row: one unreachable detail must not cost the
+    whole employer, so a failure leaves that row's body empty rather than raising.
+    """
+
+    def _one(r):
+        path = r.get("_wd_path")
+        if not path:
+            return
+        try:
+            data = get_json(f"{base}{path}")
+        except NET_ERRORS:
+            return
+        except Exception:  # noqa: BLE001
+            return
+        info = data.get("jobPostingInfo") or {}
+        text = clean(info.get("jobDescription", "") or "")
+        if text:
+            r["text"] = text
+            r["salary"] = r["salary"] or salary_from_text(text)
+        # startDate is a real ISO date; prefer it over anything derived from a
+        # relative string when the detail call gives us one.
+        if info.get("startDate"):
+            r["posted"] = to_date(info["startDate"])
+        if info.get("timeType"):
+            r["employment_type"] = info["timeType"]
+
+    with ThreadPoolExecutor(max_workers=WORKDAY_DETAIL_WORKERS) as ex:
+        list(ex.map(_one, rows))
 
 
 DEPTH_ALL = {

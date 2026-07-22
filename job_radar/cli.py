@@ -7,7 +7,7 @@ import importlib.resources as resources
 import sys
 from pathlib import Path
 
-from . import config, engine, llm, shortlist
+from . import config, engine, funnel, llm, shortlist
 from .dedup import dedup_key
 from .util import today_et
 
@@ -69,6 +69,15 @@ def cmd_scan(args, cfg):
 
     print("scanning…")
     rows, discovered, errors = engine.harvest(cfg, wl)
+    # The engine finds new companies but no longer persists them — it is a library and
+    # this file is the app that owns watchlist.json. Append here so the CLI keeps its
+    # self-growing behaviour, and never into the packaged *.example.json.
+    if discovered and wl:
+        try:
+            discovered = funnel.append_watchlist(Path(wl), discovered)
+        except OSError as e:
+            print(f"note: could not grow {wl} ({type(e).__name__})")
+            discovered = []
     # Total failure (nothing harvested, but sources errored) — do NOT let upsert
     # write an empty store: that would wipe "new" roles and reset first_seen,
     # corrupting the "remembers what you've seen" history. Keep the prior file.
@@ -174,7 +183,9 @@ def cmd_list(args, cfg):
         print(f"no shortlist yet — run `job-radar` first ({args.out} not found).")
         return
     if args.all:
-        rows = sorted(rows, key=lambda r: shortlist._safe_int(r.get("score")), reverse=True)
+        rows = sorted(
+            rows, key=lambda r: shortlist._safe_int(r.get("score")), reverse=True
+        )
     else:
         rows = shortlist.surface(rows, cfg)
     for r in rows[: args.limit]:

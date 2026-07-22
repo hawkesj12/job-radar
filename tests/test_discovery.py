@@ -9,7 +9,17 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from job_radar import discover, sources
+
+
+@pytest.fixture(autouse=True)
+def _no_workday_details(monkeypatch):
+    """Keep the per-job detail pass OFF unless a test opts in. Without this the
+    pagination tests fan out real HTTP for every stubbed row — the suite went from
+    1.1s to 21s and quietly depended on the network."""
+    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", False)
 
 
 # ── fetch_workday: pagination ────────────────────────────────────────────────
@@ -323,3 +333,57 @@ def test_probe_reports_a_wrong_owner_distinctly(monkeypatch):
         outcomes=outcomes,
     )
     assert outcomes[0]["outcome"] == "wrong-owner"
+
+
+# ── Workday descriptions ─────────────────────────────────────────────────────
+def test_workday_fetches_descriptions_when_enabled(monkeypatch):
+    """A body-less job is unrankable (boosts match title+body) AND unreadable (the UI
+    renders its snippet from the body), so descriptions are a precondition for Workday
+    being worth harvesting at all."""
+    fake, _ = _wd_pages(total=2, n_pages=1)
+    monkeypatch.setattr(sources, "post_json", fake)
+    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url: {
+            "jobPostingInfo": {
+                "jobDescription": "<p>Build things. Salary $120,000 - $150,000</p>",
+                "startDate": "2026-07-01",
+                "timeType": "Full time",
+            }
+        },
+    )
+    rows = sources.fetch_workday("acme", host="wd1", site="Careers")
+    assert all(r["text"] for r in rows), "every row should carry a body"
+    assert rows[0]["posted"] == "2026-07-01"  # detail's real date wins
+    assert rows[0]["employment_type"] == "Full time"
+    assert rows[0]["salary"], "salary should be parsed out of the fetched body"
+    assert "_wd_path" not in rows[0], "the internal key must not leak into a row"
+
+
+def test_workday_skips_descriptions_when_disabled(monkeypatch):
+    fake, _ = _wd_pages(total=2, n_pages=1)
+    monkeypatch.setattr(sources, "post_json", fake)
+    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", False)
+    monkeypatch.setattr(
+        sources, "get_json", lambda url: pytest.fail("must not fetch details")
+    )
+    rows = sources.fetch_workday("acme", host="wd1", site="Careers")
+    assert rows and all(r["text"] == "" for r in rows)
+
+
+def test_one_bad_detail_does_not_sink_the_employer(monkeypatch):
+    fake, _ = _wd_pages(total=3, n_pages=1)
+    monkeypatch.setattr(sources, "post_json", fake)
+    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+
+    def flaky(url):
+        if url.endswith("Role_1"):
+            raise TimeoutError("slow")
+        return {"jobPostingInfo": {"jobDescription": "ok"}}
+
+    monkeypatch.setattr(sources, "get_json", flaky)
+    rows = sources.fetch_workday("acme", host="wd1", site="Careers")
+    assert len(rows) == 3, "a failed detail must not drop the role"
+    assert sum(1 for r in rows if r["text"]) == 2

@@ -784,3 +784,110 @@ def test_invalid_slug_is_rejected(tmp_path, monkeypatch):
     assert any("invalid slug" in e for e in errors)
     assert "../../etc" not in called  # never reached the fetcher
     assert "anthropic" in called  # valid slug still fetched
+
+
+# ── harvest takes DATA, and writes nothing ───────────────────────────────────
+def _depth_only(monkeypatch, captured):
+    """Stub one depth adapter; disable breadth. captured collects the slugs fetched."""
+
+    def fake(slug, **kw):
+        captured.append((slug, kw))
+        return [
+            {
+                "title": "AI Engineer",
+                "location": "Remote",
+                "url": f"https://x/{slug}",
+                "posted": "2026-07-20",
+                "text": "python",
+                "salary": "",
+            }
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+
+
+def test_harvest_accepts_a_company_array(monkeypatch):
+    """jobfitr keeps its universe in SQLite, so the engine must take DATA, not a path."""
+    c = _cfg()
+    got = []
+    _depth_only(monkeypatch, got)
+    rows, discovered, errors = engine.harvest(
+        c,
+        companies=[
+            {"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"},
+            {"name": "Figma", "ats": "greenhouse", "slug": "figma"},
+        ],
+    )
+    assert sorted(s for s, _ in got) == ["anthropic", "figma"]
+    assert len(rows) == 2 and not errors
+
+
+def test_harvest_still_reads_a_watchlist_file(tmp_path, monkeypatch):
+    """The standalone CLI passes a path; that must keep working."""
+    import json as _json
+
+    c = _cfg()
+    got = []
+    _depth_only(monkeypatch, got)
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(
+        _json.dumps({"companies": [{"name": "Figma", "ats": "greenhouse", "slug": "figma"}]})
+    )
+    rows, _, errors = engine.harvest(c, str(wl))
+    assert [s for s, _ in got] == ["figma"] and len(rows) == 1 and not errors
+
+
+def test_an_explicit_empty_company_list_is_not_a_missing_one(monkeypatch):
+    """companies=[] must mean 'no depth companies', not 'fall back to the file'."""
+    c = _cfg()
+    got = []
+    _depth_only(monkeypatch, got)
+    rows, _, _ = engine.harvest(c, "/nonexistent/watchlist.json", companies=[])
+    assert got == [] and rows == []
+
+
+def test_harvest_writes_no_files(tmp_path, monkeypatch):
+    """REGRESSION: the engine used to append discovered companies straight into the
+    caller's watchlist.json. A library must not silently write a file the caller owns
+    — and a store-backed caller had nowhere for them to go."""
+    import json as _json
+
+    c = _cfg()
+    c.funnel_auto_grow = True
+    _depth_only(monkeypatch, [])
+    monkeypatch.setattr(
+        engine,
+        "funnel",
+        lambda *a, **k: [{"name": "New Co", "ats": "greenhouse", "slug": "newco"}],
+    )
+    wl = tmp_path / "watchlist.json"
+    original = _json.dumps({"companies": []})
+    wl.write_text(original)
+
+    rows, discovered, errors = engine.harvest(c, str(wl))
+    assert [d["slug"] for d in discovered] == ["newco"], "must RETURN what it found"
+    assert wl.read_text() == original, "engine must not have written the watchlist"
+
+
+def test_cli_scan_persists_discovered_companies(tmp_path, monkeypatch):
+    """The persistence the engine gave up has to land in the CLI, or the standalone
+    tool silently stops growing its own watchlist."""
+    import json as _json
+
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(_json.dumps({"companies": []}))
+    found = [{"name": "New Co", "ats": "greenhouse", "slug": "newco"}]
+    monkeypatch.setattr(engine, "harvest", lambda *a, **k: ([], found, []))
+    monkeypatch.setattr(cli.shortlist, "load_all", lambda p: [])
+
+    args = types.SimpleNamespace(
+        watchlist=str(wl),
+        out=str(tmp_path / "s.csv"),
+        limit=10,
+        config=None,
+        verbose=False,
+        strict=False,
+    )
+    cli.cmd_scan(args, _cfg())
+    assert [c["slug"] for c in _json.loads(wl.read_text())["companies"]] == ["newco"]
