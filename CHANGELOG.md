@@ -4,6 +4,54 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-22
+
+### Added
+
+- **Workday adapter** (`fetch_workday`) over the public CxS endpoint — the first
+  enterprise ATS in the set, reaching the manufacturers, insurers, municipalities and
+  national labs that never appear on the startup boards. Needs a three-part key
+  (tenant, `wdN` host, site slug) rather than a slug, so `DEPTH_EXTRA_FIELDS` lets an
+  adapter declare the extra watchlist fields it requires. Job descriptions are fetched
+  from the per-job detail endpoint behind `WORKDAY_FETCH_DETAILS` (default on) —
+  without a body a job cannot be ranked or read, so this is a precondition rather than
+  an enhancement.
+- **`job_radar.discover`** — bulk company discovery. Mines the Common Crawl CDX index
+  by ATS URL pattern to recover slugs (and Workday's full triple) in bulk instead of
+  one company at a time, and resolves a company NAME to a slug for employers the index
+  never saw. Every candidate is verified by a live probe before it is trusted.
+- **Board-ownership verification** (`verify_identity`). A probe proves a board is
+  LIVE; it cannot prove the board is the RIGHT one. `jobs.lever.co/capital` is a real
+  board with real jobs owned by someone other than Capital One. Greenhouse reports who
+  owns a board, so we now ask, and a mismatch is rejected.
+- `util.post_json` for POST-only read APIs.
+
+### Changed
+
+- **`engine.harvest` accepts a company array** (`companies=[...]`) as well as a
+  watchlist path, so a caller that keeps its universe somewhere other than a JSON file
+  can drive the engine.
+- **The engine no longer writes files.** Discovered companies are RETURNED instead of
+  being appended to the caller's watchlist; persistence belongs to whoever owns the
+  universe. `cli.py` does it for the standalone CLI, so its behaviour is unchanged.
+- Source defaults are now expressed as absence rather than a copied list of adapter
+  names. `config.ALL_DEPTH`/`ALL_BREADTH` are gone: they duplicated the registries in
+  `sources.py` and had already drifted, silently disabling a newly added adapter.
+- Rate-limiting (429) is distinguished from a hard refusal (401/403) and a miss (404).
+  Conflating them let a transient throttle be recorded as permanent.
+
+### Fixed
+
+- Workday pagination reported `total` only on the first page, which ended the loop
+  immediately and silently capped every employer at 40 roles.
+
+### BREAKING
+
+- `job_radar/store.py` is renamed to `job_radar/shortlist.py`. It is the CLI's
+  shortlist.csv store and was imported only by `cli.py`, but the name collided with
+  the store module of the app built on this library. Anyone importing
+  `job_radar.store` must update the import.
+
 ## [Unreleased]
 
 ### Added
