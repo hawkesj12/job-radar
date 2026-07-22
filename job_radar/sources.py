@@ -1,10 +1,10 @@
 """Job sources.
 
-DEPTH  -- per-company ATS feeds (Greenhouse/Lever/Ashby/SmartRecruiters/Workable),
-          polled for every company on the watchlist. All official public no-auth
-          JSON endpoints.
+DEPTH  -- per-company ATS feeds (Greenhouse/Lever/Ashby/SmartRecruiters/Workable/
+          Workday), polled for every company on the watchlist. All official public
+          no-auth JSON endpoints.
 BREADTH -- keyword aggregators + whole-board feeds searched across the whole
-          market (Remotive/Jobicy/Arbeitnow/RemoteOK/Himalayas/Adzuna/HN/
+          market (Remotive/USAJOBS/Jobicy/Arbeitnow/RemoteOK/Himalayas/Adzuna/HN/
           Braintrust/TechTree). All official public APIs.
 
 Every source is a documented public API -- no scraping. (Scraper sources are an

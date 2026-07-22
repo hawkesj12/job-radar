@@ -1,5 +1,5 @@
 {
-  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable), slug (the last path segment of the company's public job-board URL). The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
+  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable|workday), slug (the last path segment of the company's public job-board URL). Workday needs two more fields: host (wd1..wd105) and site (the career-site slug). The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
   "companies": [
     { "name": "Anthropic", "ats": "greenhouse", "slug": "anthropic", "frontier": true },
     { "name": "OpenAI", "ats": "ashby", "slug": "openai", "frontier": true },

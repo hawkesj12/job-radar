@@ -17,10 +17,10 @@ job-radar list                              # see your current shortlist
 
 ## What it does
 
-1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable), so you see roles the hour they post. _Breadth_ — queries free aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market.
+1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday), so you see roles the hour they post. Workday is the enterprise one: it reaches the manufacturers, insurers, hospitals, municipalities and national labs that never appear on the startup boards. _Breadth_ — queries free aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, USAJOBS, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market.
 2. **Scores every role on one comparable scale** — a transparent, weighted keyword model (BM25 length-normalized) you fully control in the config. It's tuned for _recall_ by design (catch everything that might fit); the optional LLM re-rank below is the _precision_ layer.
 3. **De-duplicates** the same role across sources into one entry.
-4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` does one Common Crawl pass to enumerate the companies hosting a public board on that ATS (the enumerable ceiling is ~1,700+ for Greenhouse alone) and bulk-adds them — up to `--max` per run (default 500). A couple of `seed` runs build out a several-hundred-company watchlist.
+4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` (also `lever`, `ashby`, `workable`, `smartrecruiters`) does one Common Crawl pass to enumerate the companies hosting a public board on that ATS (the enumerable ceiling is ~1,700+ for Greenhouse alone) and bulk-adds them — up to `--max` per run (default 500). Add `--verify` to probe each board and keep only the live ones. A couple of `seed` runs build out a several-hundred-company watchlist.
 5. **Remembers.** One upserted `shortlist.csv` tracks `first_seen`, `status`, and every role's score. `apply`/`dismiss` are sticky — applied roles persist and stop resurfacing.
 
 ## Optional: LLM semantic fit-ranking
@@ -52,6 +52,27 @@ Out of the box it's tuned for **remote software/AI** roles, because the shipped 
 - **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna** and **USAJOBS** (free keys; every field, any location, where the whole market lives).
 
 Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
+
+## Use it as a library
+
+The CLI is one caller; the engine underneath is importable, and it doesn't touch your disk. `harvest` takes your companies as **data** — either a `watchlist.json` path or a plain list — and _returns_ everything it produced, including the companies it discovered along the way. Persisting them is the caller's job (the CLI appends them to `watchlist.json`; an app might write them to its own database).
+
+```python
+from job_radar import config, engine
+
+config.set_active(config.load_config("job-radar.yaml"))   # optional; defaults apply otherwise
+
+rows, discovered, errors = engine.harvest(companies=[
+    {"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"},
+    # Workday needs a three-part key instead of a bare slug:
+    {"name": "Example Corp", "ats": "workday", "slug": "examplecorp",
+     "host": "wd1", "site": "External"},
+])
+```
+
+`job_radar.discover` builds the company universe in bulk: mine the Common Crawl index for every board on an ATS, or resolve a company **name** to its slug for employers the index never saw. Every candidate is proven by a live probe, and — where the ATS will tell us who owns a board — checked for **identity**, not just liveness. A probe proves `jobs.lever.co/capital` is a real board with real jobs; it does not prove it belongs to Capital One.
+
+> Upgrading from 0.2.x: `job_radar.store` is now `job_radar.shortlist`.
 
 ## Legal & etiquette
 
