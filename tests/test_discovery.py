@@ -319,7 +319,8 @@ def test_probe_distinguishes_a_refusal_from_a_miss(monkeypatch):
     ok = discover.probe(cands, outcomes=outcomes)
     by = {o["slug"]: o["outcome"] for o in outcomes}
     assert [e["slug"] for e in ok] == ["good"]
-    assert by["refuser"] == "refused" and by["throttled"] == "refused"
+    assert by["refuser"] == "refused"
+    assert by["throttled"] == "throttled"  # transient — see the 429 test below
     assert by["gone"] == "missing"
 
 
@@ -387,3 +388,26 @@ def test_one_bad_detail_does_not_sink_the_employer(monkeypatch):
     rows = sources.fetch_workday("acme", host="wd1", site="Careers")
     assert len(rows) == 3, "a failed detail must not drop the role"
     assert sum(1 for r in rows if r["text"]) == 2
+
+
+def test_throttling_is_never_terminal(monkeypatch):
+    """REGRESSION + near-miss: 429 means slow down, not go away. Sweeping a few
+    hundred Workday tenants reliably trips their rate limiter — measured 40/40 real
+    triples returning 429, including one that had served 200 roles minutes earlier.
+    Treating that as a permanent refusal would blacklist good employers wholesale."""
+    import urllib.error
+
+    def fetch(slug, **kw):
+        raise urllib.error.HTTPError(
+            "u", {"a": 429, "b": 403, "c": 404}[slug], "no", None, None
+        )
+
+    monkeypatch.setattr(discover, "DEPTH_ALL", {"greenhouse": fetch})
+    outcomes = []
+    discover.probe(
+        [{"ats": "greenhouse", "slug": s} for s in ("a", "b", "c")], outcomes=outcomes
+    )
+    by = {o["slug"]: o["outcome"] for o in outcomes}
+    assert by["a"] == "throttled", "429 must be its own, retryable outcome"
+    assert by["b"] == "refused"
+    assert by["c"] == "missing"

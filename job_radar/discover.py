@@ -236,14 +236,23 @@ def probe(
         try:
             postings = fetch(c["slug"], **kwargs)
         except urllib.error.HTTPError as e:
-            # A REFUSAL is not the same as a miss. 404 means "no such board" — worth
-            # retrying later, since a company may adopt one. 401/403/429 means the
-            # board exists and does not want us (some Workday tenants); asking again
-            # every night is both futile and impolite, so callers mark it dead.
-            return {
-                **c,
-                "outcome": "refused" if e.code in (401, 403, 429) else "missing",
-            }
+            # Three genuinely different failures, and conflating them is expensive:
+            #   401/403 "refused"  — the board exists and will not serve us. Terminal.
+            #   429     "throttled" — TRANSIENT. It means slow down, not go away. It
+            #             must never be terminal: probing a few hundred Workday
+            #             tenants reliably trips their rate limiter, and a caller
+            #             that treats that as permanent would blacklist hundreds of
+            #             perfectly good employers in one bad run. (Measured: after
+            #             heavy probing, 40/40 real triples returned 429 — including
+            #             3m/Search, which had served 200 roles minutes earlier.)
+            #   404     "missing"  — no such board; retryable, a company may adopt one.
+            if e.code in (401, 403):
+                outcome = "refused"
+            elif e.code == 429:
+                outcome = "throttled"
+            else:
+                outcome = "missing"
+            return {**c, "outcome": outcome}
         except NET_ERRORS:
             return {**c, "outcome": "error"}
         except Exception:  # noqa: BLE001 — a single bad board must not kill the run
