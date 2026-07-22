@@ -7,7 +7,7 @@ import importlib.resources as resources
 import sys
 from pathlib import Path
 
-from . import config, engine, llm, store
+from . import config, engine, llm, shortlist
 from .dedup import dedup_key
 from .util import today_et
 
@@ -38,7 +38,7 @@ def _fmt(r, cfg) -> str:
     tag = f"[{r.get('id')}]"
     head = f"  {tag} {str(sc):>3}  {r.get('title', '')[:52]:52}  {r.get('company', '')[:24]}"
     extra = []
-    tier = _tier(store._safe_int(sc), cfg)
+    tier = _tier(shortlist._safe_int(sc), cfg)
     if tier:
         extra.append(tier)
     if r.get("salary"):
@@ -73,7 +73,7 @@ def cmd_scan(args, cfg):
     # write an empty store: that would wipe "new" roles and reset first_seen,
     # corrupting the "remembers what you've seen" history. Keep the prior file.
     if not rows and errors:
-        existing = store.load_all(args.out)
+        existing = shortlist.load_all(args.out)
         print(
             f"⚠ all sources failed ({len(errors)} errors) — keeping your existing "
             f"shortlist ({len(existing)} roles). Nothing overwritten."
@@ -83,7 +83,7 @@ def cmd_scan(args, cfg):
                 print(f"    {e}")
         else:
             print("  (run with --verbose to see which sources failed)")
-        for r in store.surface(existing, cfg)[: args.limit]:
+        for r in shortlist.surface(existing, cfg)[: args.limit]:
             print(_fmt(r, cfg))
         # Nonzero so a scheduled/cron wrapper can detect a dead run.
         raise SystemExit(1)
@@ -92,9 +92,9 @@ def cmd_scan(args, cfg):
     # When the LLM re-rank runs we annotate in memory and write ONCE at the end;
     # otherwise upsert does the single write itself.
     llm_on = cfg.llm.enabled
-    merged = store.upsert(args.out, rows, today, write=not llm_on)
+    merged = shortlist.upsert(args.out, rows, today, write=not llm_on)
 
-    surfaced = store.surface(merged, cfg)
+    surfaced = shortlist.surface(merged, cfg)
     targets = surfaced[: cfg.llm.rerank_top_n]
 
     if llm_on:
@@ -112,8 +112,8 @@ def cmd_scan(args, cfg):
             a = ann.get(r.get("dedup_key"))
             if a:
                 r["llm_score"], r["llm_note"] = a["llm_score"], a["llm_note"]
-        store.write_all(args.out, merged)  # the single write for the LLM path
-        surfaced = store.surface(merged, cfg)
+        shortlist.write_all(args.out, merged)  # the single write for the LLM path
+        surfaced = shortlist.surface(merged, cfg)
 
     new_n = sum(1 for r in surfaced if r.get("_is_new"))
     err_tail = f"{len(errors)} feed errors"
@@ -160,7 +160,7 @@ def cmd_init(args, cfg):
 
 
 def cmd_status(args, cfg, status):
-    ok = store.mark_status(args.out, args.id, status)
+    ok = shortlist.mark_status(args.out, args.id, status)
     if ok:
         print(f"✓ {args.id} -> {status}")
     else:
@@ -169,14 +169,14 @@ def cmd_status(args, cfg, status):
 
 
 def cmd_list(args, cfg):
-    rows = store.load_all(args.out)
+    rows = shortlist.load_all(args.out)
     if not rows:
         print(f"no shortlist yet — run `job-radar` first ({args.out} not found).")
         return
     if args.all:
-        rows = sorted(rows, key=lambda r: store._safe_int(r.get("score")), reverse=True)
+        rows = sorted(rows, key=lambda r: shortlist._safe_int(r.get("score")), reverse=True)
     else:
-        rows = store.surface(rows, cfg)
+        rows = shortlist.surface(rows, cfg)
     for r in rows[: args.limit]:
         print(_fmt(r, cfg))
     print(f"\n{len(rows)} shown · full file: {args.out}")

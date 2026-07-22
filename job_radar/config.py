@@ -194,19 +194,12 @@ DEFAULT_NON_US = [
     "dubai",
     "uae",
 ]
-ALL_DEPTH = ["greenhouse", "lever", "ashby", "smartrecruiters", "workable"]
-ALL_BREADTH = [
-    "remotive",
-    "jobicy",
-    "arbeitnow",
-    "remoteok",
-    "himalayas",
-    "adzuna",
-    "usajobs",
-    "hn",
-    "braintrust",
-    "techtree",
-]
+# NOTE: there is deliberately no ALL_DEPTH / ALL_BREADTH name list here. This module
+# used to carry copies of the adapter names purely to seed the defaults below, which
+# made sources.py's registries and this file two sources of truth that had to be kept
+# in sync by hand — and they silently drifted the first time an adapter was added (a
+# new fetcher registered fine, then got filtered straight back out by the stale copy).
+# The registries in sources.py are now the ONLY list. See depth_sources below.
 
 
 @dataclass
@@ -259,8 +252,13 @@ class Config:
     stale_after_days: int = 30
     min_score: int = 22
     # sources
-    depth_sources: list = field(default_factory=lambda: list(ALL_DEPTH))
-    breadth_sources: list = field(default_factory=lambda: list(ALL_BREADTH))
+    # None = "every adapter this build registers" (resolved against sources.DEPTH_ALL /
+    # BREADTH_ALL at use time). Expressing the default as ABSENCE rather than a copied
+    # list is what removes the duplicate registry: adding a fetcher to sources.py is
+    # now sufficient to enable it, and there is no second list that can go stale.
+    # A YAML `sources.ats` / `sources.boards` key still sets an explicit subset.
+    depth_sources: list | None = None
+    breadth_sources: list | None = None
     adzuna_app_id_env: str = "ADZUNA_APP_ID"
     adzuna_app_key_env: str = "ADZUNA_APP_KEY"
     # Pages to pull per query. Adzuna caps a page at 50 results, so N pages ≈ N×50

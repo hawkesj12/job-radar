@@ -15,7 +15,7 @@ from job_radar import (
     scoring,
     seed,
     sources,
-    store,
+    shortlist,
     util,
 )
 
@@ -30,8 +30,26 @@ def _cfg():
 def test_config_defaults():
     c = config.load_config(None)
     assert c.max_age_days == 60 and c.min_score == 22
-    assert "greenhouse" in c.depth_sources and "adzuna" in c.breadth_sources
     assert c.llm.enabled is False
+
+
+def test_default_config_enables_every_registered_adapter():
+    """The defaults are 'whatever sources.py registers', not a second hand-kept list.
+    Asserting on the RESOLVED set (not the raw field) is what makes a newly added
+    fetcher enabled by construction — the old copy in config.py silently disabled one."""
+    c = config.load_config(None)
+    assert c.depth_sources is None and c.breadth_sources is None
+    assert set(sources.enabled_depth(c)) == set(sources.DEPTH_ALL)
+    assert {k for k, _ in sources.enabled_breadth(c)} == set(sources.BREADTH_ALL)
+    assert "workday" in sources.enabled_depth(c)  # the adapter the old copy dropped
+
+
+def test_an_explicit_subset_still_narrows():
+    c = config.load_config(None)
+    c.depth_sources = ["greenhouse"]
+    c.breadth_sources = ["adzuna", "nonexistent-source"]
+    assert set(sources.enabled_depth(c)) == {"greenhouse"}
+    assert {k for k, _ in sources.enabled_breadth(c)} == {"adzuna"}
 
 
 def test_config_override(tmp_path):
@@ -131,14 +149,14 @@ def test_upsert_preserves_status_across_runs(tmp_path):
     csvp = tmp_path / "shortlist.csv"
     p = _post("Acme", "AI Engineer", 40, "https://x/1")
     # run 1: new
-    merged = store.upsert(csvp, [p], today="2026-07-10")
+    merged = shortlist.upsert(csvp, [p], today="2026-07-10")
     assert merged[0]["status"] == "new" and merged[0]["_is_new"] is True
     rid = merged[0]["id"]
     # user applies
-    assert store.mark_status(csvp, rid, "applied") is True
+    assert shortlist.mark_status(csvp, rid, "applied") is True
     # run 2: same role reappears with a fresh score
     p2 = _post("Acme", "AI Engineer", 55, "https://x/1")
-    merged2 = store.upsert(csvp, [p2], today="2026-07-12")
+    merged2 = shortlist.upsert(csvp, [p2], today="2026-07-12")
     row = next(r for r in merged2 if r["id"] == rid)
     assert row["status"] == "applied"  # status PRESERVED
     assert row["first_seen"] == "2026-07-10"  # first_seen PRESERVED
@@ -148,12 +166,12 @@ def test_upsert_preserves_status_across_runs(tmp_path):
 
 def test_applied_is_sticky_when_role_leaves_feed(tmp_path):
     csvp = tmp_path / "shortlist.csv"
-    merged = store.upsert(
+    merged = shortlist.upsert(
         csvp, [_post("Acme", "AI Engineer", 40, "https://x/1")], today="2026-07-10"
     )
-    store.mark_status(csvp, merged[0]["id"], "applied")
+    shortlist.mark_status(csvp, merged[0]["id"], "applied")
     # next run: the role is gone from the market (empty postings)
-    merged2 = store.upsert(csvp, [], today="2026-07-12")
+    merged2 = shortlist.upsert(csvp, [], today="2026-07-12")
     assert any(r["status"] == "applied" for r in merged2)  # history persists
 
 
@@ -165,12 +183,12 @@ def test_surface_excludes_applied_and_low_score(tmp_path):
         _post("B", "AI Engineer", 5, "u2"),
         _post("C", "AI Engineer", 33, "u3"),
     ]
-    merged = store.upsert(csvp, ps, today="2026-07-12")
-    store.mark_status(
+    merged = shortlist.upsert(csvp, ps, today="2026-07-12")
+    shortlist.mark_status(
         csvp, next(r["id"] for r in merged if r["company"] == "A"), "applied"
     )
-    merged = store.load_all(csvp)
-    shown = store.surface(merged, c)
+    merged = shortlist.load_all(csvp)
+    shown = shortlist.surface(merged, c)
     names = {r["company"] for r in shown}
     assert names == {"C"}  # A applied (excluded), B below min_score (excluded)
 
@@ -208,26 +226,26 @@ def test_llm_profile_nonempty_without_remote():
 def test_surface_hides_rejected(tmp_path):
     c = _cfg()
     csvp = tmp_path / "s.csv"
-    merged = store.upsert(
+    merged = shortlist.upsert(
         csvp, [_post("A", "AI Engineer", 90, "u1")], today="2026-07-12"
     )
-    store.mark_status(csvp, merged[0]["id"], "rejected")
-    assert store.surface(store.load_all(csvp), c) == []  # rejected never resurfaces
+    shortlist.mark_status(csvp, merged[0]["id"], "rejected")
+    assert shortlist.surface(shortlist.load_all(csvp), c) == []  # rejected never resurfaces
 
 
 def test_csv_formula_injection_neutralized(tmp_path):
     csvp = tmp_path / "s.csv"
-    store.upsert(
+    shortlist.upsert(
         csvp, [_post("=cmd|'/c calc'!A1", "AI Engineer", 40, "u1")], today="2026-07-12"
     )
-    row = store.load_all(csvp)[0]
+    row = shortlist.load_all(csvp)[0]
     assert row["company"].startswith("'=")  # prefixed, inert in a spreadsheet
 
 
 def test_surface_tolerates_dirty_hand_edits(tmp_path):
     c = _cfg()
     csvp = tmp_path / "s.csv"
-    store.write_all(
+    shortlist.write_all(
         csvp,
         [
             {
@@ -240,7 +258,7 @@ def test_surface_tolerates_dirty_hand_edits(tmp_path):
             }
         ],
     )
-    store.surface(store.load_all(csvp), c)  # must not raise
+    shortlist.surface(shortlist.load_all(csvp), c)  # must not raise
 
 
 def test_rerank_tolerates_null_fit(monkeypatch):
@@ -422,13 +440,13 @@ def test_append_watchlist_refuses_template(tmp_path):
 # ── C3: a re-titled applied role keeps its status (matched on URL) ────────────
 def test_upsert_rematches_retitled_role_by_url(tmp_path):
     csvp = tmp_path / "s.csv"
-    merged = store.upsert(
+    merged = shortlist.upsert(
         csvp, [_post("Acme", "AI Engineer", 40, "https://x/1")], today="2026-07-10"
     )
-    store.mark_status(csvp, merged[0]["id"], "applied")
+    shortlist.mark_status(csvp, merged[0]["id"], "applied")
     # next run: the recruiter re-titled it (new dedup_key) but the URL is stable
     p2 = _post("Acme", "AI Engineer, Platform Team", 55, "https://x/1")
-    merged2 = store.upsert(csvp, [p2], today="2026-07-12")
+    merged2 = shortlist.upsert(csvp, [p2], today="2026-07-12")
     applied = [r for r in merged2 if r["status"] == "applied"]
     assert len(applied) == 1  # one row, status preserved (no duplicate 'new' row)
     assert applied[0]["first_seen"] == "2026-07-10"
@@ -439,11 +457,12 @@ def test_store_roundtrips_unicode(tmp_path):
     """Non-cp1252 titles (CJK/emoji) survive write+read — the Windows
     UnicodeEncodeError guard (encoding='utf-8' on every file open)."""
     csvp = tmp_path / "s.csv"
-    store.upsert(
-        csvp, [_post("Acme", "Senior AI Engineer 🚀 — 东京", 40, "https://x/1")],
+    shortlist.upsert(
+        csvp,
+        [_post("Acme", "Senior AI Engineer 🚀 — 东京", 40, "https://x/1")],
         today="2026-07-10",
     )
-    rows = store.load_all(csvp)
+    rows = shortlist.load_all(csvp)
     assert any("🚀" in r["title"] and "东京" in r["title"] for r in rows)
 
 
@@ -454,7 +473,7 @@ def test_total_outage_preserves_store(tmp_path, monkeypatch):
     csvp = tmp_path / "shortlist.csv"
     wl = tmp_path / "watchlist.json"
     wl.write_text('{"companies": []}', encoding="utf-8")
-    merged = store.upsert(
+    merged = shortlist.upsert(
         csvp,
         [
             _post("Acme", "AI Engineer", 40, "https://x/1"),
@@ -462,7 +481,7 @@ def test_total_outage_preserves_store(tmp_path, monkeypatch):
         ],
         today="2026-07-10",
     )
-    store.mark_status(csvp, merged[0]["id"], "applied")
+    shortlist.mark_status(csvp, merged[0]["id"], "applied")
     before = csvp.read_bytes()
     monkeypatch.setattr(
         engine, "harvest", lambda cfg, w: ([], [], ["breadth:x: URLError"])
@@ -483,7 +502,7 @@ def test_list_all_tolerates_garbage_score(tmp_path):
     c = _cfg()
     csvp = tmp_path / "s.csv"
     with open(csvp, "w", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=store.COLUMNS, extrasaction="ignore")
+        w = _csv.DictWriter(f, fieldnames=shortlist.COLUMNS, extrasaction="ignore")
         w.writeheader()
         w.writerow(
             {
@@ -534,7 +553,9 @@ def test_fuzzy_dedup_rejects_subset_keeps_reorder():
     n = dedup.normalize_title
     assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer - Remote"), c)
     assert not dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Payments"), c)
-    assert dedup.fuzzy_title_match(n("Senior AI Engineer"), n("AI Engineer (Senior)"), c)
+    assert dedup.fuzzy_title_match(
+        n("Senior AI Engineer"), n("AI Engineer (Senior)"), c
+    )
 
 
 def test_title_score_double_count_is_capped():
@@ -597,23 +618,38 @@ def test_scoring_matches_bruteforce_reference():
     fw = c.fit_weights
 
     def ref(p):
-        blob = f"{p.get('title','')} {p.get('location','')} {p.get('text','')}".lower()
+        blob = (
+            f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
+        )
         bh = [(w, kw) for kw, w in fw.items() if util.has(kw, blob)]
         raw = sum(w for w, _ in bh)
         dl = len(_re.findall(r"[a-z0-9]+", blob))
         norm = (1 - c.score_len_b) + c.score_len_b * (dl / c.avg_jd_tokens)
         body = min(raw / norm if norm > 0 else raw, c.blob_score_cap)
         tl = p.get("title", "").lower()
-        body += min(sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap)
+        body += min(
+            sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap
+        )
         body -= sum(w for kw, w in c.title_penalty.items() if util.has(kw, tl))
-        ab = f"{p.get('company','')} {p.get('text','')}".lower()
+        ab = f"{p.get('company', '')} {p.get('text', '')}".lower()
         body -= sum(w for kw, w in c.agency_penalty.items() if util.has(kw, ab))
         sig = ", ".join(kw for _, kw in sorted(bh, reverse=True)[:7])
         return round(body), sig
 
     vocab = list(fw) + [
-        "python", "remote", "the", "platform", "payments", "nurse", "staff",
-        "ai-first", "multi-agent", "ml/ai", "onsite", "systems", "team",
+        "python",
+        "remote",
+        "the",
+        "platform",
+        "payments",
+        "nurse",
+        "staff",
+        "ai-first",
+        "multi-agent",
+        "ml/ai",
+        "onsite",
+        "systems",
+        "team",
     ]
     rnd = random.Random(1234)
     for _ in range(2000):
@@ -651,7 +687,9 @@ def test_smartrecruiters_url_has_no_hardcoded_query(monkeypatch):
 
 def test_remote_negation_in_title_or_location():
     """Minor: a negated title/location ('Non-remote', 'Onsite only') is not remote."""
-    assert scoring.remote_posting("Non-remote AI Engineer", "United States", "") is False
+    assert (
+        scoring.remote_posting("Non-remote AI Engineer", "United States", "") is False
+    )
     assert scoring.remote_posting("AI Engineer", "Onsite only", "") is False
     assert scoring.remote_posting("Remote AI Engineer", "United States", "") is True
 
@@ -659,7 +697,7 @@ def test_remote_negation_in_title_or_location():
 def test_apply_bad_id_exits_nonzero(tmp_path):
     """Minor: apply/dismiss on a non-existent id exits nonzero (script-detectable)."""
     csvp = tmp_path / "s.csv"
-    store.upsert(csvp, [_post("Acme", "AI Engineer", 40, "u1")], today="2026-07-10")
+    shortlist.upsert(csvp, [_post("Acme", "AI Engineer", 40, "u1")], today="2026-07-10")
     args = types.SimpleNamespace(out=str(csvp), id="ZZZZZZZ")
     with pytest.raises(SystemExit) as ei:
         cli.cmd_status(args, _cfg(), "applied")
@@ -674,7 +712,9 @@ def test_fmt_shows_tier_tag():
     plain = {"id": "c", "score": "10", "title": "AI Engineer", "company": "Acme"}
     assert "strong" in cli._fmt(strong, c)
     assert "worth a look" in cli._fmt(look, c)
-    assert "strong" not in cli._fmt(plain, c) and "worth a look" not in cli._fmt(plain, c)
+    assert "strong" not in cli._fmt(plain, c) and "worth a look" not in cli._fmt(
+        plain, c
+    )
 
 
 # ── deferred minors (atomic writes, --strict, SSRF guards) ───────────────────

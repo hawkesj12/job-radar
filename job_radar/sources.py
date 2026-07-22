@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from . import config
 from .util import (
     NET_ERRORS,
     clean,
     get_json,
+    post_json,
     q,
     salary_from_text,
     salary_range,
@@ -169,13 +172,110 @@ def fetch_workable(slug: str):
     return out
 
 
+# Workday's list endpoint pages 20 at a time (limit>20 is a hard HTTP 400), so a
+# 400-req employer costs 20 calls. Cap it: 10 pages = 200 roles/employer keeps a
+# nightly harvest across ~100 enterprise tenants bounded at ~1k requests.
+WORKDAY_MAX_PAGES = 10
+WORKDAY_PAGE = 20
+_ET = ZoneInfo("America/New_York")  # every date in job-radar is Eastern
+_WD_POSTED = re.compile(r"Posting Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})")
+_WD_RELATIVE = re.compile(r"Posted\s+(\d+)\+?\s+(day|week|month)s?\s+ago", re.I)
+_WD_TODAY = re.compile(r"Posted\s+(today|yesterday)", re.I)
+
+
+def _relative_posted(text: str) -> str:
+    """'Posted 26 Days Ago' -> an absolute YYYY-MM-DD (Eastern, like every date here)."""
+    t = str(text or "")
+    m = _WD_TODAY.search(t)
+    if m:
+        days = 0 if m.group(1).lower() == "today" else 1
+        return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
+    m = _WD_RELATIVE.search(t)
+    if not m:
+        return ""
+    n, unit = int(m.group(1)), m.group(2).lower()
+    days = n * {"day": 1, "week": 7, "month": 30}[unit]
+    return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
+    """Workday CxS job feed. Unlike every other ATS here, Workday needs a THREE-part
+    key: tenant (`slug`), the numbered host shard (`wd1`..`wd103`), and the site slug
+    — `nvidia`+`wd5`+`NVIDIAExternalCareerSite`. The site slug is unguessable, which
+    is why the watchlist stores all three (discovery: `job_radar.discover`).
+
+    Reaches the enterprise/government/healthcare employers the startup ATSs never
+    see. Descriptions are deliberately NOT fetched: they live on a per-job detail
+    endpoint, so pulling them would cost one request per posting instead of one per
+    20. Title + location still carry the BM25 signal; the body is the trade for
+    covering ~200 employers a night instead of ~8.
+    """
+    base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
+    out, offset, total = [], 0, None
+    for _ in range(WORKDAY_MAX_PAGES):
+        data = post_json(
+            f"{base}/jobs",
+            {
+                "appliedFacets": {},
+                "limit": WORKDAY_PAGE,
+                "offset": offset,
+                "searchText": "",
+            },
+        )
+        # Workday reports `total` ONLY on the first page; every later page returns
+        # total=0. Re-reading it per page made the loop exit after 2 pages (offset
+        # >= 0), silently capping every employer at 40 roles. Latch it once.
+        if total is None:
+            total = data.get("total") or 0
+        postings = data.get("jobPostings") or []
+        for j in postings:
+            path = j.get("externalPath", "")
+            # bulletFields carries a real 'Posting Date: MM/DD/YYYY'; postedOn is a
+            # relative string ('Posted 26 Days Ago') that would rot in the cache.
+            posted = ""
+            for b in j.get("bulletFields") or []:
+                m = _WD_POSTED.search(str(b))
+                if m:
+                    mo, day, yr = m.groups()
+                    posted = f"{yr}-{int(mo):02d}-{int(day):02d}"
+                    break
+            if not posted:
+                # Only SOME tenants put an absolute date in bulletFields; the rest
+                # expose just 'Posted 26 Days Ago'. Derive the date from it rather
+                # than leaving posted empty — a blank date sinks the role in any
+                # freshness filter, which would silently bury whole employers.
+                posted = _relative_posted(j.get("postedOn", ""))
+            out.append(
+                {
+                    "title": j.get("title", ""),
+                    "location": j.get("locationsText", ""),
+                    "url": f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{path}",
+                    "posted": posted,
+                    "department": "",
+                    "employment_type": "",
+                    "salary": "",
+                    "text": "",
+                }
+            )
+        offset += WORKDAY_PAGE
+        if len(postings) < WORKDAY_PAGE or offset >= total:
+            break
+    return out
+
+
 DEPTH_ALL = {
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
     "ashby": fetch_ashby,
     "smartrecruiters": fetch_smartrecruiters,
     "workable": fetch_workable,
+    "workday": fetch_workday,
 }
+
+# Adapters needing more than a bare slug. engine._fetch_company passes these extra
+# watchlist fields through as kwargs; every other adapter keeps the fetch(slug)
+# contract the funnel's probe depends on.
+DEPTH_EXTRA_FIELDS = {"workday": ("host", "site")}
 
 
 # ── BREADTH: keyword aggregators -- search_<src>(queries) -> [posting] ───────
@@ -658,8 +758,16 @@ BREADTH_ALL = {
 
 
 def enabled_depth(cfg):
+    """Depth adapters to run. cfg.depth_sources None = all of them (the registry above
+    is the single source of truth); a list selects a subset and silently ignores names
+    this build doesn't have."""
+    if cfg.depth_sources is None:
+        return dict(DEPTH_ALL)
     return {k: DEPTH_ALL[k] for k in cfg.depth_sources if k in DEPTH_ALL}
 
 
 def enabled_breadth(cfg):
+    """Breadth sources to run. Same contract as enabled_depth: None = all registered."""
+    if cfg.breadth_sources is None:
+        return list(BREADTH_ALL.items())
     return [(k, BREADTH_ALL[k]) for k in cfg.breadth_sources if k in BREADTH_ALL]

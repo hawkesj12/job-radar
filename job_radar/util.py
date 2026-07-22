@@ -54,6 +54,29 @@ def get_json(url: str):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def post_json(url: str, payload: dict):
+    """POST a JSON body and decode the JSON response.
+
+    Needed because a few ATS read-APIs are POST-only — Workday's CxS job-search
+    endpoint takes its paging/facet parameters in the body rather than the query
+    string. Same UA and timeout policy as get_json: we identify ourselves honestly
+    (verified 2026-07-22 that Workday serves job-radar's own User-Agent exactly as
+    it serves a browser's, so there is never a reason to spoof one).
+    """
+    cfg = config.active()
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": cfg.user_agent,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
 def q(s: str) -> str:
     return urllib.parse.quote(s)
 

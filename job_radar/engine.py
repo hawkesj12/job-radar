@@ -13,7 +13,7 @@ from . import config
 from .dedup import find_hit_key, norm
 from .funnel import append_watchlist, funnel
 from .scoring import is_remote, relevant, score_and_signals
-from .sources import enabled_breadth, enabled_depth
+from .sources import DEPTH_EXTRA_FIELDS, enabled_breadth, enabled_depth
 from .util import age_int
 
 # A valid ATS slug is the last path segment of a board URL — alphanumerics plus
@@ -126,8 +126,17 @@ def harvest(cfg=None, watchlist_path=None):
             return (c, None, f"{name}: source '{ats}' not enabled")
         if not slug or not _SLUG_RE.match(slug):
             return (c, None, f"{name}: invalid slug {slug!r}")
+        # Most ATSs key on the slug alone; Workday needs host + site too. Pull only
+        # the fields that adapter declared, and fail LOUD on a missing one rather
+        # than fetching a wrong-but-valid URL.
+        extra = {}
+        for field in DEPTH_EXTRA_FIELDS.get(ats, ()):
+            val = c.get(field)
+            if not val or not _SLUG_RE.match(str(val)):
+                return (c, None, f"{name} ({ats}): missing/invalid {field}={val!r}")
+            extra[field] = val
         try:
-            return (c, fetch(slug), None)
+            return (c, fetch(slug, **extra), None)
         except urllib.error.HTTPError as e:
             return (c, None, f"{name} ({ats}:{slug}): HTTP {e.code}")
         except Exception as e:  # noqa: BLE001
