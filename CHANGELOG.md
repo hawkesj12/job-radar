@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-22
+
+### Fixed
+
+- `dedup.ats_from_url` stopped at `/ ? #` but not `&`. Greenhouse's embed form puts
+  the slug inside the query string (`embed/job_app?for=SLUG&token=...`), so the
+  pattern consumed the `?` itself and the capture ran on through, yielding slugs like
+  `gemini&token=7743177&gh_jid=7743177`. Harmless on its own — a malformed slug just
+  probes as a 404 — but it corrupts any consumer that compares parsed slugs against
+  known boards, which is exactly what apply-URL ownership auditing does.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added
