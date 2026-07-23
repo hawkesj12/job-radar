@@ -618,3 +618,35 @@ def test_match_known_matches_a_bruteforce_reference():
     ]
     names = ["Stripe", "Stripe Inc.", "First Resonance", "ACME Co", "Nobody At All"]
     assert discover.match_known(names, universe) == brute(names, universe)
+
+
+def test_stopword_collapse_does_not_leak_a_bare_word():
+    """REGRESSION (panel B4): _norm_name strips 'group'/'company'/'holdings', so
+    'Capital Group' collapsed to the single token 'capital' and the "conservative"
+    variants WERE a bare generic word — producing a real false binding
+    (Capital Group -> lever/capital, Capital.com's board). A multi-word name that
+    collapses to one token is now gated exactly like the bare-first-word variant."""
+    assert discover.name_variants("Capital Group") == []
+    assert discover.name_variants("Delta Company LLC") == []
+    # the Greenhouse-verifiable lane may still try it (identity check backstops it)
+    assert "capital" in discover.name_variants("Capital Group", aggressive=True)
+    # genuinely single-word and genuinely multi-token names are unaffected
+    assert discover.name_variants("Cloudflare") == ["cloudflare"]
+    assert discover.name_variants("LevelTen Energy") == [
+        "leveltenenergy",
+        "levelten-energy",
+    ]
+
+
+def test_from_names_produces_no_false_binding_for_a_collapsing_name(monkeypatch):
+    """End-to-end: the unverifiable Ashby/Lever lane must generate NO candidate for a
+    name that collapses to a bare word, so it can never bind a stranger's board."""
+    seen = []
+
+    def _capture(candidates, workers=8, require_identity=False, outcomes=None):
+        seen.extend(candidates)
+        return []
+
+    monkeypatch.setattr(discover, "probe", _capture)
+    discover.from_names(["Capital Group"], ats_list=["lever", "ashby"])
+    assert seen == [], f"a collapsing name leaked candidates: {seen}"

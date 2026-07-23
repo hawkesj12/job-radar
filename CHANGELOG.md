@@ -122,6 +122,18 @@ the one place a caller looks. No behaviour changed except the one item noted bel
   Workday knob that could not be tuned, and documenting an unadjustable cap is half
   a fix.
 
+## [0.4.1] - 2026-07-23
+
+### Fixed
+
+- `discover.name_variants` leaked a bare generic word when normalization collapsed a
+  multi-word name to one token. `_norm_name` strips trade words (`group`, `company`,
+  `holdings`, `the`), so `Capital Group` reduced to `capital` and the "conservative"
+  variants WERE that bare word — no `aggressive` opt-in, no ownership check — producing
+  a real false binding (`Capital Group` -> `lever/capital`, Capital.com's board). The
+  gate now fires only when a TRADE word caused the collapse; a legal-suffix-only
+  collapse (`ACME LLC` -> `acme`) is still a valid slug and is preserved.
+
 ## [0.3.1] - 2026-07-22
 
 ### Fixed

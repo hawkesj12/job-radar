@@ -397,6 +397,16 @@ _STOPWORDS = re.compile(
     re.I,
 )
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
+# The LEGAL-entity subset of the stopwords above. Removing one of these and collapsing
+# to a single token is SAFE — 'ACME LLC' -> 'acme' IS Acme's real slug, because a legal
+# suffix is not part of the trade name. Collapsing after removing a TRADE word instead
+# (`company`/`the`/`group`/`holdings`) is what's risky: 'Capital Group' -> 'capital' is
+# a fragment, not the company. name_variants() uses this to tell the two apart.
+_LEGAL_SUFFIX = re.compile(
+    r"\b(inc|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh|sa|nv|ag"
+    r"|pte|pty|llp|lp)\b",
+    re.I,
+)
 
 
 def _norm_name(name: str) -> str:
@@ -424,13 +434,30 @@ def name_variants(name: str, aggressive: bool = False) -> list[str]:
     capital` is a live board that is not Capital One's — and a liveness probe cannot
     tell the difference. It is safe ONLY when the caller also verifies board
     ownership (see verify_identity), so callers must opt in deliberately.
+
+    The same trap hides inside NORMALIZATION. _norm_name strips both legal suffixes
+    AND trade words (`group`, `company`, `holdings`, `the`), so 'Capital Group'
+    collapses to the single token 'capital' — and then the "conservative" flat and
+    dashed variants ARE that bare generic word, with no `aggressive` opt-in. That
+    produced a real false binding (Capital Group -> lever/capital, Capital.com's
+    board). But collapsing after only a LEGAL suffix is removed is fine — 'ACME LLC'
+    -> 'acme' is Acme's real slug. So the gate fires only when a TRADE word caused the
+    collapse (removing just legal suffixes still leaves >1 word), treating that token
+    like the bare-first-word variant: withheld unless `aggressive`.
     """
+    depunct = _PUNCT.sub(" ", (name or "").lower())
     base = _norm_name(name)
     if not base:
         return []
+    tokens = base.split(" ")
+    sans_legal = _LEGAL_SUFFIX.sub(" ", depunct).split()
+    # a TRADE word collapsed a multi-word name to one token (legal-only collapse is safe)
+    risky_collapse = len(tokens) == 1 and len(sans_legal) > 1
+    if risky_collapse and not aggressive:
+        return []
     cands = [base.replace(" ", ""), base.replace(" ", "-")]
     if aggressive:
-        cands.append(base.split(" ")[0])
+        cands.append(tokens[0])
     return [v for v in dict.fromkeys(cands) if 2 < len(v) < 40]
 
 
