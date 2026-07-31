@@ -4,6 +4,52 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-31
+
+Adds the meta-aggregator. Every existing breadth source is one publisher's own
+index; Google for Jobs is Google's index OF those publishers plus the company
+career pages and enterprise ATSs (Workday, iCIMS) that no single feed exposes —
+reachable by title and location, with no per-tenant polling.
+
+### Caller-visible contract change (jobfitr)
+
+**A deduped role's `url` can now differ from what an earlier version returned.**
+When the same role arrives from several sources at an equal fit score, the merged
+row keeps the higher-preference source's copy, and `google_jobs` outranks
+everything else — because its `apply_options` resolve to direct-to-employer links
+rather than an aggregator redirect. The fit **score** is unchanged and remains
+source-agnostic: `score_and_signals` reads only a posting's content. Source
+preference breaks ties, it never contributes points.
+
+### Added
+
+- **`sources.search_google_jobs`** — Google for Jobs through SerpApi, queried by
+  title + location exactly like `search_adzuna`/`search_usajobs`. Off unless
+  `SERPAPI_KEY` is set, and skipped with a one-line note when it isn't, matching
+  how Adzuna already behaves. Metered on purpose: SerpApi's free tier is 250
+  searches a month and each PAGE is one search, so `google_jobs_pages` defaults
+  to 1 (~10 roles per query).
+- **`_best_apply_link`** prefers the first non-aggregator host from Google's
+  ordered `apply_options`, so a listing routes to the employer's own careers page
+  or ATS instead of LinkedIn/Indeed/ZipRecruiter. Direct-to-company links are the
+  product promise; an aggregator redirect is a worse version of the same role.
+- **`_google_posted`** resolves Google's relative recency strings ("16 hours ago",
+  "30+ days ago", "today") to an absolute Eastern date at fetch time — the same
+  rot-in-the-cache trap Workday's `postedOn` has, where a stored relative string
+  silently ages into a lie.
+- **`sources.google_jobs.{key_env,pages}`** in the config file, with a loader, so
+  the knob the example config documents is one the code actually reads.
+
+### Fixed
+
+- **`job-radar init` silently disabled Workday.** The shipped starter config
+  listed five of the six ATS adapters under `sources.ats`, and an explicit list is
+  a SUBSET filter — so every user who ran `init` since 0.3.0 had the enterprise
+  tier switched off while the README described it as the reason to use this tool
+  for non-tech work. Both copies of the example config now list every adapter, and
+  a test asserts the config enables everything in `DEPTH_ALL`/`BREADTH_ALL` so the
+  two cannot drift apart again.
+
 ## [0.4.2] - 2026-07-31
 
 job-radar did not work on Windows. Not "had rough edges" — `import job_radar`

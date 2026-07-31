@@ -22,6 +22,19 @@ from .util import age_int
 # traversal (`../`) or a query into the fixed API URLs the slug is spliced into.
 _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# Source preference — NOT a fit-score input (the score stays source-agnostic:
+# score_and_signals reads only the posting's content). It breaks TIES: when the
+# same role is seen from several sources, prefer the higher-ranked source's copy
+# for its apply link + data, and among equal-score DIFFERENT roles, surface it
+# first. Google for Jobs wins because its apply_options resolve to direct-to-company
+# / ATS links (jobfitr's product promise); everything else is neutral. Higher = more
+# preferred.
+_SRC_PREF = {"google_jobs": 1}
+
+
+def _src_pref(p) -> int:
+    return _SRC_PREF.get(p.get("source", ""), 0)
+
 
 def _consume(postings, hits, blocks, cfg, meta):
     for p in postings:
@@ -68,8 +81,12 @@ def _consume(postings, hits, blocks, cfg, meta):
         else:
             cur = hits[match]
             srcs = cur["sources"] | p["sources"]
-            if (p["score"], len(p.get("text", ""))) > (
+            # Score first (source-agnostic — a better-fit copy always wins), then
+            # source preference (Google's direct-to-company link beats an equal-fit
+            # aggregator copy), then completeness of the body.
+            if (p["score"], _src_pref(p), len(p.get("text", ""))) > (
                 cur["score"],
+                _src_pref(cur),
                 len(cur.get("text", "")),
             ):
                 winner = p
@@ -203,5 +220,7 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
         except Exception as e:  # noqa: BLE001 — discovery must never sink a scan
             errors.append(f"funnel: {type(e).__name__}")
 
-    rows = sorted(hits.values(), key=lambda p: p["score"], reverse=True)
+    # Score desc, with source preference breaking exact-score ties (Google's
+    # lower-noise, direct-link results edge out an equal-scoring aggregator row).
+    rows = sorted(hits.values(), key=lambda p: (p["score"], _src_pref(p)), reverse=True)
     return rows, discovered, errors

@@ -14,9 +14,9 @@ are credited in the [CHANGELOG](CHANGELOG.md) unless you ask otherwise.
 ## Scope
 
 job-radar is a local, single-user CLI. It reads public job-board APIs and writes
-local files (`shortlist.csv`, `watchlist.json`). API keys (Adzuna, USAJOBS, the
-optional LLM) are read from environment variables only — never logged or written
-to disk. The most relevant surface is untrusted job-posting text flowing into the
+local files (`shortlist.csv`, `watchlist.json`). API keys (Adzuna, USAJOBS,
+SerpApi, the optional LLM) are read from environment variables only — never
+logged or written to disk. The most relevant surface is untrusted job-posting text flowing into the
 CSV store; that text is neutralized against spreadsheet formula injection on write.
 
 ## Supported versions

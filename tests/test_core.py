@@ -61,6 +61,28 @@ def test_config_override(tmp_path):
     assert c.fit_weights  # untouched sections keep defaults
 
 
+def test_google_jobs_config_block_is_actually_read(tmp_path):
+    """A documented knob that no loader reads is worse than an undocumented one.
+    The shipped example config advertises sources.google_jobs.{key_env,pages}."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("sources:\n  google_jobs:\n    key_env: MY_SERP_KEY\n    pages: 3\n")
+    c = config.load_config(p)
+    assert c.serpapi_key_env == "MY_SERP_KEY"
+    assert c.google_jobs_pages == 3
+
+
+def test_shipped_example_config_enables_every_adapter():
+    """`job-radar init` writes this file verbatim, and an explicit list is a SUBSET
+    filter — so anything missing here is silently off for every new user. Workday
+    was omitted from `ats` for three releases while the README called it the
+    enterprise tier."""
+    from pathlib import Path
+
+    c = config.load_config(Path(__file__).parent.parent / "job-radar.example.yaml")
+    assert set(sources.DEPTH_ALL) == set(c.depth_sources)
+    assert set(sources.BREADTH_ALL) == set(c.breadth_sources)
+
+
 # ── deterministic scoring + gates ────────────────────────────────────────────
 def test_score_is_deterministic_and_discriminates():
     c = _cfg()
@@ -406,6 +428,45 @@ def test_harvest_end_to_end(monkeypatch):
     ai = [r for r in rows if "AI Engineer" in r["title"]]
     assert len(ai) == 1  # the two AI rows deduped into one
     assert errors == []
+
+
+def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
+    """When the SAME role is seen from google_jobs and another source at an equal
+    fit score, the merged row keeps google_jobs' direct-to-company link — the score
+    itself stays source-agnostic; source preference only breaks the tie."""
+    cfg = config.Config(remote_only=True, min_score=0)
+    config.set_active(cfg)
+    body = "Build RAG agentic LLM systems."
+
+    def fake_breadth(queries):
+        return [
+            {  # aggregator copy — consumed first
+                "title": "AI Engineer",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://adzuna.example/redirect/1",
+                "posted": "2026-07-12",
+                "text": body,
+                "source": "adzuna",
+            },
+            {  # google copy, direct-to-company link, same role + same body/score
+                "title": "AI Engineer - Remote",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://acme.wd5.myworkdayjobs.com/job/AI-Engineer",
+                "posted": "2026-07-12",
+                "text": body,
+                "source": "google_jobs",
+            },
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+    rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+    ai = [r for r in rows if "AI Engineer" in r["title"]]
+    assert len(ai) == 1  # deduped into one
+    assert ai[0]["url"] == "https://acme.wd5.myworkdayjobs.com/job/AI-Engineer"
+    assert ai[0]["sources"] == {"adzuna", "google_jobs"}  # both credited
 
 
 def test_harvest_surfaces_broken_source(monkeypatch):
