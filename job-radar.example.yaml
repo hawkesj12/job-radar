@@ -40,7 +40,8 @@ scoring:
   title_penalties: { research scientist: 8, ai researcher: 6 }
   agency_penalties: { staffing: 8, our client: 12, consultancy: 10 }
   length_norm_b: 0.75      # BM25 length penalty (0.75 = default)
-  avg_jd_tokens: 400       # reference "normal" JD length
+  avg_jd_tokens: 1600      # reference "normal" JD length (a full ATS description;
+                           # measured median ~1590 tokens -- NOT a job-board summary)
   body_cap: 60             # ceiling on the body keyword score
   tiers: { strong: 30, worth_a_look: 22 }
 

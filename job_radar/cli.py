@@ -18,10 +18,30 @@ def _packaged(name: str) -> str:
     return (resources.files("job_radar") / "data" / name).read_text(encoding="utf-8")
 
 
+# Keys that decide WHERE a request goes and WHICH secret rides along on it. A
+# config file is data, not a credential store -- but these two turn it into one:
+# `base_url` picks the host and `*_key_env` picks the environment variable to send.
+# Together they are enough to make job-radar mail your ANTHROPIC_API_KEY to a
+# stranger's server.
+_TRUSTED_ONLY_KEYS = ("llm.base_url", "llm.api_key_env", "sources.*.key_env")
+
+
 def _resolve_config(path_arg):
+    """Load the config, honoring the redirect keys ONLY from an explicit --config.
+
+    `./job-radar.yaml` is picked up automatically, which is the documented workflow
+    and worth keeping -- but it means a config file you did not write is loaded
+    just because you `cd`'d into a directory containing one. That is fine for
+    scoring knobs and fatal for the keys above, so an auto-discovered file gets its
+    redirect keys reset to the defaults and says so. Pass --config to opt in.
+    """
+    explicit = bool(path_arg and Path(path_arg).exists())
     for cand in (path_arg, "job-radar.yaml", "job-radar.example.yaml"):
         if cand and Path(cand).exists():
-            return config.load_config(cand)
+            cfg = config.load_config(cand)
+            if not explicit:
+                cfg = config.without_redirects(cfg, source=str(cand))
+            return cfg
     return config.load_config(None)  # generic defaults
 
 

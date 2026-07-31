@@ -9,6 +9,7 @@ defaults -- copy job-radar.example.yaml and make it yours.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -231,7 +232,17 @@ class Config:
     frontier_penalty: int = 10
     local_bonus: int = 10
     score_len_b: float = 0.75
-    avg_jd_tokens: int = 400
+    # The "normal" JD length the BM25 length penalty divides by. Was 400, which is
+    # roughly a job-board SUMMARY -- but this tool reads full ATS descriptions, and
+    # the real median measured across a live Greenhouse board is ~1590 tokens, 4x
+    # that. Every thorough description was therefore treated as abnormally long and
+    # had its keyword score divided by ~3.2, which inverted the intent: BM25 length
+    # normalization exists to stop an UNUSUALLY long document accruing score by
+    # sheer size, not to penalize the standard length of the corpus. Employers write
+    # the longest descriptions, so the setting penalized precisely the
+    # direct-from-employer roles this tool exists to surface -- on one real board,
+    # 0 of 20 relevant remote roles cleared min_score; at 1600, 7 of 20 do.
+    avg_jd_tokens: int = 1600
     blob_score_cap: int = 60
     # Cap the title-keyword double-count too, so a keyword-stuffed TITLE can't
     # outrank a thorough JD (the body already caps at blob_score_cap). Keyword
@@ -315,6 +326,48 @@ class Config:
         so stripping here fixes all of them at once.
         """
         return (os.environ.get(key, "") or "").strip()
+
+
+def without_redirects(cfg: Config, source: str = "") -> Config:
+    """Return `cfg` with the request-redirecting keys reset to their defaults.
+
+    Storing credentials in environment variables only protects you if something
+    else decides where they are sent. These keys decide exactly that: `base_url`
+    picks the host a request goes to, and the `*_key_env` names pick which
+    environment variable rides along with it. A config file that sets both can make
+    job-radar POST your ANTHROPIC_API_KEY to a server of its choosing -- no network
+    attacker needed, just a `job-radar.yaml` you did not write in a directory you
+    happened to run from.
+
+    So the CLI applies this to any config it DISCOVERED rather than one you named
+    with --config. Everything else in the file still applies; only the redirect
+    keys revert, and the caller is told.
+    """
+    d = Config()
+    changed = []
+    if cfg.llm.base_url != d.llm.base_url:
+        changed.append(f"llm.base_url={cfg.llm.base_url!r}")
+    if cfg.llm.api_key_env != d.llm.api_key_env:
+        changed.append(f"llm.api_key_env={cfg.llm.api_key_env!r}")
+    if cfg.serpapi_key_env != d.serpapi_key_env:
+        changed.append(f"sources.google_jobs.key_env={cfg.serpapi_key_env!r}")
+    if cfg.adzuna_app_key_env != d.adzuna_app_key_env:
+        changed.append(f"sources.adzuna.app_key_env={cfg.adzuna_app_key_env!r}")
+    if not changed:
+        return cfg
+    print(
+        f"note: ignoring {', '.join(changed)} from {source} — it was found in this "
+        "directory rather than passed with --config. Those keys choose where a "
+        "request goes and which secret it carries. Re-run with "
+        f"--config {source} if you meant it.",
+        file=sys.stderr,
+    )
+    return replace(
+        cfg,
+        llm=replace(cfg.llm, base_url=d.llm.base_url, api_key_env=d.llm.api_key_env),
+        serpapi_key_env=d.serpapi_key_env,
+        adzuna_app_key_env=d.adzuna_app_key_env,
+    )
 
 
 def load_config(path: str | os.PathLike | None) -> Config:
