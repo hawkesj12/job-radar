@@ -108,7 +108,13 @@ def rerank(items: list[dict], cfg=None) -> dict:
     try:
         parsed = _parse(_call(cfg, user))
     except Exception as e:  # keep the tool working if the API hiccups
-        print(f"  llm: skipped ({type(e).__name__}: {e})")
+        # TYPE ONLY -- never the message. This carries an API key: the key rides in
+        # a request header, and http.client raises ValueError("Invalid header value
+        # b'sk-ant-...'") for a key with a trailing newline (a .env file, $(cat key),
+        # CRLF on Windows). Printing `e` put that key on stdout, which a scheduled
+        # run redirects into a log file. Every other error path in this codebase
+        # already reports only the type -- see engine._fetch_breadth.
+        print(f"  llm: skipped ({type(e).__name__})")
         return {}
     out = {}
     for obj in parsed:

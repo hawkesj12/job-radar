@@ -48,21 +48,13 @@ STICKY = {"applied", "dismissed", "interviewing", "screen", "offer", "rejected"}
 # Statuses hidden from the surfaced shortlist (you don't want these resurfacing).
 # interviewing/offer stay VISIBLE -- those are live and worth seeing.
 HIDDEN = {"applied", "dismissed", "rejected"}
-# Free-text columns fed by untrusted job-API data -- guarded against CSV/formula
-# injection so a hostile title like `=cmd|...` can't execute in Excel/Sheets.
-TEXT_COLS = {
-    "salary",
-    "company",
-    "industry",
-    "title",
-    "department",
-    "employment_type",
-    "location",
-    "source",
-    "url",
-    "signals",
-    "llm_note",
-}
+# There is deliberately NO "untrusted columns" list here any more. There was one --
+# TEXT_COLS -- and `posted` was missing from it while being fed straight from vendor
+# data through `to_date`, so a hostile board could land a live formula in the sheet.
+# Curating which columns are dangerous is a judgement that has to be re-made every
+# time a column is added, and it was already wrong. write_all now sanitizes every
+# column unconditionally; the cost is a leading apostrophe on a value that could
+# never have been a formula anyway.
 
 
 def _safe_int(v, default: int = 0) -> int:
@@ -101,7 +93,11 @@ def write_all(path, rows: list[dict]) -> None:
     for r in rows:
         w.writerow(
             {
-                c: (_csv_safe(r.get(c, "")) if c in TEXT_COLS else r.get(c, ""))
+                # Sanitize EVERY column, not a curated subset. The subset was the
+                # bug: `posted` was left out, and it is fed from vendor data, so a
+                # board could land a live formula in the sheet. A maintained list of
+                # "the untrusted ones" is a list that will be wrong again.
+                c: _csv_safe(r.get(c, ""))
                 for c in COLUMNS
             }
         )

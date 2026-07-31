@@ -2,7 +2,10 @@
 LLM no-op guarantee. Run: pytest"""
 
 import json
+import os
 import types
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -265,6 +268,66 @@ def test_csv_formula_injection_neutralized(tmp_path):
     )
     row = shortlist.load_all(csvp)[0]
     assert row["company"].startswith("'=")  # prefixed, inert in a spreadsheet
+
+
+def test_no_column_can_carry_a_live_formula(tmp_path):
+    """Asserting ONE column proved `_csv_safe` works while never proving TEXT_COLS
+    was complete -- and it wasn't: `posted` bypassed it, fed straight from vendor
+    data via `to_date`, so any of ~500 boards could put a formula in the sheet.
+    Loop every column an adapter can populate, so the next omission fails here."""
+    csvp = tmp_path / "s.csv"
+    hostile = "=cmd|'/c calc'!A1"
+    p = _post(hostile, hostile, 40, "u1")
+    # every field an adapter controls, all hostile at once
+    p.update(
+        {
+            "location": hostile,
+            "department": hostile,
+            "employment_type": hostile,
+            "salary": hostile,
+            "industry": hostile,
+            "posted": util.to_date(hostile),
+        }
+    )
+    shortlist.upsert(csvp, [p], today="2026-07-12")
+    raw = Path(csvp).read_text(encoding="utf-8")
+    for line in raw.splitlines()[1:]:
+        for cell in line.split(","):
+            assert not cell.lstrip('"').startswith(("=", "+", "@")), (
+                f"live formula reached the CSV: {cell!r}"
+            )
+
+
+def test_env_strips_whitespace_so_a_key_never_carries_a_newline():
+    """A key with a trailing newline is the ordinary accident (.env, $(cat key),
+    CRLF). Unstripped it reaches an HTTP header, http.client raises with the key
+    in the message, and the old llm.py printed that message to stdout."""
+    c = config.Config()
+    os.environ["JR_TEST_KEY"] = "sk-ant-secret\n"
+    try:
+        assert c.env("JR_TEST_KEY") == "sk-ant-secret"
+    finally:
+        del os.environ["JR_TEST_KEY"]
+
+
+def test_llm_failure_never_prints_the_key(capsys):
+    """The regression: llm.py printed `{e}`, and the exception carries the header
+    value. Report the exception TYPE only, as every other error path here does."""
+    secret = "sk-ant-DO-NOT-LEAK"
+    c = config.Config()
+    c.llm = replace(
+        c.llm, enabled=True, provider="anthropic", api_key_env="JR_TEST_KEY"
+    )
+    config.set_active(c)
+    os.environ["JR_TEST_KEY"] = secret + "\n"
+    try:
+        llm.rerank(
+            [{"key": "k", "title": "AI Engineer", "company": "A", "text": "x"}], c
+        )
+    finally:
+        del os.environ["JR_TEST_KEY"]
+    out = capsys.readouterr().out
+    assert secret not in out, f"API KEY LEAKED TO STDOUT: {out!r}"
 
 
 def test_surface_tolerates_dirty_hand_edits(tmp_path):
