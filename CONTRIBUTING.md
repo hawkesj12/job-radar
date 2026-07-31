@@ -34,7 +34,9 @@ every language. If you touch anything that prints or writes a file, expect Windo
 to be the cell that catches you.
 
 - Keep the tool **stdlib-first** — a new runtime dependency needs a real
-  justification (the two we have, `pyyaml` and `rapidfuzz`, earn their place).
+  justification. The three we have earn their place: `pyyaml` and `rapidfuzz`
+  unconditionally, and `tzdata` on Windows only, because Windows ships no system
+  time-zone database and `zoneinfo` has nothing to read without it.
 - **Adding a job source?** Use the provider's documented public API — no scraping.
   Add a parser test with a captured sample response (see the `sources` tests).
 - Match the existing style; `ruff` enforces formatting and imports.

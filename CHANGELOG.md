@@ -49,6 +49,12 @@ preference breaks ties, it never contributes points.
   for non-tech work. Both copies of the example config now list every adapter, and
   a test asserts the config enables everything in `DEPTH_ALL`/`BREADTH_ALL` so the
   two cannot drift apart again.
+- **The README told people to install from Git.** It had said a PyPI release was
+  "coming" since before 0.2.0 went up on 2026-07-19, so the headline install
+  command was wrong for twelve days and five releases. It now says
+  `pipx install job-radar`, and states the supported platforms.
+- `CONTRIBUTING.md` counted two runtime dependencies; 0.4.2 added a third
+  (`tzdata`, Windows only).
 
 ## [0.4.2] - 2026-07-31
 

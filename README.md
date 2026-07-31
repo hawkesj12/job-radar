@@ -5,7 +5,7 @@
 Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
 
 ```
-pipx install git+https://github.com/hawkesj12/job-radar   # or: pip install git+…
+pipx install job-radar                      # or: pip install job-radar
 job-radar init                              # write a starter job-radar.yaml + watchlist.json here
 # edit job-radar.yaml to make it yours
 job-radar                                   # scan → ranked shortlist.csv
@@ -13,7 +13,7 @@ job-radar apply <id>                        # mark a role applied (it stops resu
 job-radar list                              # see your current shortlist
 ```
 
-> A PyPI release (`pip install job-radar`) is coming; until then install from Git as above.
+Runs on Linux, macOS, and Windows, Python 3.10 or newer.
 
 ## What it does
 
