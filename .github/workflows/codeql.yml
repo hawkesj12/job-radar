@@ -19,9 +19,9 @@ jobs:
       # SHA-pinned like every other action here: a tag can be repointed by whoever
       # controls the upstream repo, which is the vector behind real supply-chain
       # compromises. Dependabot's github-actions ecosystem bumps these, so the pins
-      # reconcile rather than rot. Held at CodeQL v3 (still maintained — v3.37.4
-      # shipped the same day as v4.37.4); a major bump is its own change, not a
-      # side effect of pinning.
+      # reconcile rather than rot — including across a major version, which is how
+      # this reached CodeQL v4: it landed as a reviewable PR that had to pass the
+      # full matrix, rather than by silently following a mutable @v3 tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
