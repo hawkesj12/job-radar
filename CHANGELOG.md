@@ -68,6 +68,11 @@ preference breaks ties, it never contributes points.
   command was wrong for twelve days and five releases. It now says
   `pipx install job-radar`, and states the supported platforms.
 - `CONTRIBUTING.md` counted two runtime dependencies; there are now three.
+- **Jobicy roles carried a Python list in the `department` column.** Jobicy returns
+  `jobIndustry` as an array, and the adapter normalized `jobType` but not this one,
+  so `department` reached `shortlist.csv` as the literal text `['Engineering']`
+  instead of a value you could filter on. Found by the new registry contract test
+  on its first run, which is the argument for that test existing.
 
 ### Changed
 
@@ -87,6 +92,18 @@ preference breaks ties, it never contributes points.
   otherwise) is now documented rather than implied. No behaviour change.
 - The version sections in this file were out of chronological order — 0.4.1 sat
   between 0.3.2 and 0.3.1. Reordered, content untouched.
+- **Adapter test coverage.** Six of the eleven breadth sources — Remotive, Jobicy,
+  Arbeitnow, Himalayas, USAJOBS and TechTree — had no test at all, despite
+  `CONTRIBUTING.md` requiring one for every source. All six now have parser tests
+  built from their real response shapes, plus a **registry contract test** that
+  iterates `DEPTH_ALL`/`BREADTH_ALL` and asserts the posting contract, so a
+  non-conforming adapter cannot be added even if nobody writes a test for it.
+  134 tests, up from 105.
+- **A weekly live canary** (`canary.yml`) asks the real APIs whether they still
+  return the shape the parsers read. Fixture tests freeze a vendor's shape as of
+  the day they were written and cannot detect drift; this can. It is scheduled, not
+  part of CI, so a third party's outage never blocks a pull request, and it
+  separates "unreachable" (skip) from "reachable but unparseable" (fail).
 
 ### Known issues
 

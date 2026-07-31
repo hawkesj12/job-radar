@@ -666,12 +666,21 @@ def search_remotive(queries):
     return out
 
 
+def _joined(v) -> str:
+    """Jobicy returns several fields as EITHER a string or a list of strings, and
+    which one is not documented. A posting's values must all be `str` — the CSV
+    writer stringifies whatever it is given, so a list reaches the file as a Python
+    repr (`['Engineering']`) rather than a value anyone can filter on."""
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v if x)
+    return str(v) if v else ""
+
+
 def search_jobicy(queries):
     data = get_json("https://jobicy.com/api/v2/remote-jobs?count=100")
     out = []
     for j in data.get("jobs", []):
         text = clean(j.get("jobDescription") or j.get("jobExcerpt", ""))
-        jt = j.get("jobType")
         out.append(
             {
                 "title": j.get("jobTitle", ""),
@@ -679,10 +688,8 @@ def search_jobicy(queries):
                 "location": (j.get("jobGeo") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("pubDate")),
-                "department": j.get("jobIndustry", ""),
-                "employment_type": ", ".join(jt)
-                if isinstance(jt, list)
-                else (jt or ""),
+                "department": _joined(j.get("jobIndustry")),
+                "employment_type": _joined(j.get("jobType")),
                 "salary": salary_from_text(text),
                 "text": text,
                 "source": "jobicy",

@@ -1,0 +1,55 @@
+name: Canary
+
+# Asks the real job APIs whether they still return the shape our parsers read.
+#
+# This is the check CI structurally cannot perform. The unit tests in
+# tests/test_sources.py assert each adapter against a CAPTURED payload, which
+# freezes the vendor's shape as it was the day the fixture was written. If Jobicy
+# renames `jobTitle` tomorrow, every fixture test still passes and the live harvest
+# silently returns blank titles. The failure is invisible in a hermetic suite
+# because the thing that changed is outside this repo.
+#
+# It runs on a SCHEDULE and never on a pull request, on purpose. These tests depend
+# on other people's uptime, so wiring them into CI would block merges whenever
+# someone else has a bad morning. A failure here is a notification, not a gate.
+#
+# The tests themselves distinguish "unreachable" (skip — their outage) from
+# "reachable but unparseable" (fail — real drift), so a red run means something
+# actually changed rather than something was briefly down.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1" # Mondays 09:00 ET (cron is UTC; 13:00 UTC = 09:00 EDT)
+  workflow_dispatch: # run it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # A hung request does not go RED, it goes QUIET — and quiet is
+    # indistinguishable from healthy. Without this the job inherits GitHub's
+    # 360-minute default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # `-m live` overrides the `-m 'not live'` default in pyproject.toml, so this
+      # runs ONLY the canary and none of the hermetic suite. -rs prints the skip
+      # reasons, which is where "X was unreachable" is reported — a run that is all
+      # skips is not a healthy run, and the log should make that obvious.
+      - name: Ask the real APIs
+        run: pytest -m live -v -rs
