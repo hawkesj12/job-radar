@@ -30,7 +30,12 @@ jobs:
     # was last pushed there, and you find out from a failure email rather than a
     # diff. Dependabot's github-actions ecosystem covers reusable-workflow refs, so
     # this pin reconciles instead of rotting.
-    uses: hawkesj12/workflows/.github/workflows/audit.yml@5df64d38f54a0548ff444f48ff994cc4eaa37050 # v1.2.5
+    uses: hawkesj12/workflows/.github/workflows/audit.yml@31301b02c63e34963bdbaf3b48529682a69f2714 # v1.2.5
+    #      ^ the COMMIT v1.2.5 points to, not the tag object. v1.2.5 is an
+    # ANNOTATED tag, so `git/ref/tags/v1.2.5` returns the tag OBJECT's sha
+    # (5df64d38...). Pinning that is unresolvable for a reusable workflow and
+    # fails as startup_failure -- no jobs, no log, nothing to read. Peel it:
+    #   gh api repos/OWNER/REPO/git/tags/<tag-object-sha> --jq .object.sha
     permissions:
       # The UNION of what every job in the called workflow needs. Permissions only
       # narrow down a reusable-workflow chain, so granting less than a called
