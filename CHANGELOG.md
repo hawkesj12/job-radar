@@ -6,10 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0] - 2026-07-31
 
-Adds the meta-aggregator. Every existing breadth source is one publisher's own
-index; Google for Jobs is Google's index OF those publishers plus the company
-career pages and enterprise ATSs (Workday, iCIMS) that no single feed exposes —
-reachable by title and location, with no per-tenant polling.
+Two things, and the smaller headline is the more important one.
+
+**job-radar did not work on Windows.** Not "had rough edges" — `import job_radar`
+raised, so every command failed on every released version, 0.2.0 through 0.4.1.
+CI had only ever run on Linux, so nothing contradicted the 0.2.0 entry claiming
+Windows was supported.
+
+**And it gains the meta-aggregator.** Every existing breadth source is one
+publisher's own index; Google for Jobs is Google's index OF those publishers,
+plus the company career pages and enterprise ATSs (Workday, iCIMS) that no single
+feed exposes — reachable by title and location, with no per-tenant polling.
 
 ### Caller-visible contract change (jobfitr)
 
@@ -42,6 +49,13 @@ preference breaks ties, it never contributes points.
 
 ### Fixed
 
+- **`tzdata` is now a dependency on Windows** (`sys_platform == 'win32'`). Windows
+  ships no system time-zone database, so `zoneinfo` has nothing to read and
+  `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError`. Both `util.py` and
+  `sources.py` construct that object at **module level**, so the failure landed on
+  import rather than on a date calculation — the package was unusable, not merely
+  wrong about times. Linux and macOS have a system tzdb and are unaffected, hence
+  the environment marker instead of an unconditional dependency.
 - **`job-radar init` silently disabled Workday.** The shipped starter config
   listed five of the six ATS adapters under `sources.ats`, and an explicit list is
   a SUBSET filter — so every user who ran `init` since 0.3.0 had the enterprise
@@ -53,25 +67,7 @@ preference breaks ties, it never contributes points.
   "coming" since before 0.2.0 went up on 2026-07-19, so the headline install
   command was wrong for twelve days and five releases. It now says
   `pipx install job-radar`, and states the supported platforms.
-- `CONTRIBUTING.md` counted two runtime dependencies; 0.4.2 added a third
-  (`tzdata`, Windows only).
-
-## [0.4.2] - 2026-07-31
-
-job-radar did not work on Windows. Not "had rough edges" — `import job_radar`
-raised, so every command failed on every released version, 0.2.0 through 0.4.1.
-CI had only ever run on Linux, so nothing contradicted the 0.2.0 entry below
-claiming Windows was supported.
-
-### Fixed
-
-- **`tzdata` is now a dependency on Windows** (`sys_platform == 'win32'`). Windows
-  ships no system time-zone database, so `zoneinfo` has nothing to read and
-  `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError`. Both `util.py` and
-  `sources.py` construct that object at **module level**, so the failure landed on
-  import rather than on a date calculation — the package was unusable, not merely
-  wrong about times. Linux and macOS have a system tzdb and are unaffected, hence
-  the environment marker instead of an unconditional dependency.
+- `CONTRIBUTING.md` counted two runtime dependencies; there are now three.
 
 ### Changed
 
@@ -80,6 +76,10 @@ claiming Windows was supported.
   their first execution. A wheel end-to-end step also builds the artifact, installs
   it into a clean virtualenv, and runs `job-radar init` from outside the repo —
   the editable install the tests use cannot prove `package-data` shipped.
+- **Releases are cut by pushing a `v*` tag**, which re-runs the full matrix on the
+  released commit, refuses to publish if the tag and the packaged version disagree,
+  and creates the GitHub Release from this file. The previous workflow published on
+  a manually-created Release without running any tests, and had never once run.
 - Dependabot now tracks GitHub Actions and pip, with the workflow actions pinned by
   commit SHA rather than a mutable tag.
 - Type annotations on the `DEPTH_ALL`/`LIVENESS` registries and `discover.known_keys`,
