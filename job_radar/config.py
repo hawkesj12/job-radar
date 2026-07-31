@@ -328,7 +328,7 @@ class Config:
         return (os.environ.get(key, "") or "").strip()
 
 
-def without_redirects(cfg: Config, source: str = "") -> Config:
+def without_redirects(cfg: Config) -> Config:
     """Return `cfg` with the request-redirecting keys reset to their defaults.
 
     Storing credentials in environment variables only protects you if something
@@ -344,22 +344,29 @@ def without_redirects(cfg: Config, source: str = "") -> Config:
     keys revert, and the caller is told.
     """
     d = Config()
+    # Report the key NAMES that were ignored, never their values. Two reasons, and
+    # the first one is not hypothetical: `api_key_env` is free text, and writing the
+    # key itself there instead of the variable's NAME is a common mix-up
+    # (`api_key_env: sk-ant-...`), so echoing the value would print a live secret --
+    # exactly the bug this release fixed in llm.py. The second: these values come
+    # from a file we have just decided not to trust, and untrusted text printed to a
+    # terminal carries ANSI escapes that can rewrite what the user sees.
     changed = []
     if cfg.llm.base_url != d.llm.base_url:
-        changed.append(f"llm.base_url={cfg.llm.base_url!r}")
+        changed.append("llm.base_url")
     if cfg.llm.api_key_env != d.llm.api_key_env:
-        changed.append(f"llm.api_key_env={cfg.llm.api_key_env!r}")
+        changed.append("llm.api_key_env")
     if cfg.serpapi_key_env != d.serpapi_key_env:
-        changed.append(f"sources.google_jobs.key_env={cfg.serpapi_key_env!r}")
+        changed.append("sources.google_jobs.key_env")
     if cfg.adzuna_app_key_env != d.adzuna_app_key_env:
-        changed.append(f"sources.adzuna.app_key_env={cfg.adzuna_app_key_env!r}")
+        changed.append("sources.adzuna.app_key_env")
     if not changed:
         return cfg
     print(
-        f"note: ignoring {', '.join(changed)} from {source} — it was found in this "
+        f"note: ignoring {', '.join(changed)} from a job-radar.yaml found in this "
         "directory rather than passed with --config. Those keys choose where a "
-        "request goes and which secret it carries. Re-run with "
-        f"--config {source} if you meant it.",
+        "request goes and which secret it carries. Re-run with an explicit "
+        "--config if you meant it.",
         file=sys.stderr,
     )
     return replace(
