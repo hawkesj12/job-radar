@@ -28,6 +28,13 @@ classifiers = [
 dependencies = [
   "pyyaml>=6.0",
   "rapidfuzz>=3.0",
+  # Windows ships NO system time-zone database, so zoneinfo has nothing to read
+  # and ZoneInfo("America/New_York") raises ZoneInfoNotFoundError. Both util.py
+  # and sources.py build that object at MODULE level, so the failure lands on
+  # `import job_radar` — the package was unusable on Windows, not merely wrong
+  # about dates. Linux and macOS have a system tzdb and need no extra package,
+  # hence the marker rather than an unconditional dependency.
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
