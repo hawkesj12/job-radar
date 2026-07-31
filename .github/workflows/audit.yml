@@ -1,0 +1,42 @@
+name: Audit
+
+# Weekly, not on push. These four checks find problems that appear WITHOUT this
+# repo changing — a CVE published against a dependency nobody touched, a README
+# link that rotted because someone else moved a page, an action tag repointed
+# upstream. A commit-triggered check can never catch those: there is no commit to
+# trigger on. A failure emails you, and that is the whole notification mechanism.
+#
+# The checks themselves live in hawkesj12/workflows so every repo shares one copy.
+#
+# The CVE check reads a LOCKFILE, which is why uv.lock is committed even though
+# this is a library that ships loose version ranges. Without one, osv-scanner finds
+# no package sources and the job passes having examined nothing — a green check
+# that reads as "no CVEs" when it means "nothing was scanned". The lock pins the
+# resolution CI audits, NOT what a user gets from `pip install job-radar`.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1" # Mondays 09:00 ET (cron is UTC; 13:00 UTC = 09:00 EDT)
+  workflow_dispatch: # run it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    # Pinned to a SHA, and to a RELEASE rather than @main — not for the usual
+    # supply-chain reason (this is Justin's own repo), but for blast radius: @main
+    # has no staging channel, so every caller's next scheduled run executes whatever
+    # was last pushed there, and you find out from a failure email rather than a
+    # diff. Dependabot's github-actions ecosystem covers reusable-workflow refs, so
+    # this pin reconciles instead of rotting.
+    uses: hawkesj12/workflows/.github/workflows/audit.yml@5df64d38f54a0548ff444f48ff994cc4eaa37050 # v1.2.5
+    permissions:
+      # The UNION of what every job in the called workflow needs. Permissions only
+      # narrow down a reusable-workflow chain, so granting less than a called
+      # workflow declares is a startup_failure — no jobs, no log, no annotation.
+      contents: read
+      id-token: write # Scorecard's OIDC
+    with:
+      docs: "README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md"
+      scorecard: true # job-radar is public, so Scorecard can publish

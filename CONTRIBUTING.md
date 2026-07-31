@@ -12,6 +12,12 @@ cd job-radar
 pip install -e ".[dev]"
 ```
 
+`uv.lock` is committed but is **not** what you install. job-radar is a library and
+ships loose version ranges, so `pip install job-radar` resolves fresh — the lockfile
+exists so the weekly CVE scan has an exact dependency set to check, which it cannot
+do from ranges alone. Regenerate it with `uv lock` if you change a dependency in
+`pyproject.toml`; otherwise leave it to Dependabot.
+
 ## Before you open a PR
 
 All three must pass. CI runs them on **Linux, macOS, and Windows** across Python

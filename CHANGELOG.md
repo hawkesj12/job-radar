@@ -183,6 +183,14 @@ the old inflated scale, lower it. No CSV schema change.
   a manually-created Release without running any tests, and had never once run.
 - Dependabot now tracks GitHub Actions and pip, with the workflow actions pinned by
   commit SHA rather than a mutable tag.
+- **A weekly audit** (`audit.yml`) runs four checks that catch problems appearing
+  without this repo changing: a CVE published against a dependency, a rotted README
+  link, an action tag repointed upstream, and the repo's OpenSSF Scorecard. A
+  commit-triggered check cannot catch any of them — there is no commit to trigger
+  on. `uv.lock` is committed to feed the CVE scan an exact dependency set; without
+  one the scanner finds no package sources and passes having examined nothing. It
+  does **not** change what `pip install job-radar` resolves, and it is not shipped
+  in the wheel.
 - Type annotations on the `DEPTH_ALL`/`LIVENESS` registries and `discover.known_keys`,
   whose deliberately non-uniform key shape (a 3-tuple for Workday, a 2-tuple
   otherwise) is now documented rather than implied. No behaviour change.
