@@ -1,11 +1,15 @@
 name: Release
 
-# TWO ways in, by design:
-#   • push a v* TAG   → publish to REAL PyPI + cut a GitHub Release (production).
-#   • run manually    → publish to TestPyPI only, no GitHub Release (a rehearsal).
-# A manual run can NEVER reach real PyPI — production is tag-only — so the
-# rehearsal is safe to fire anytime, and it exercises the same build → version →
-# twine → publish spine the tag path uses.
+# ONE production path, several rehearsal paths:
+#   • push a v* TAG → REAL PyPI + a GitHub Release. Nothing else reaches real PyPI.
+#   • anything else → TestPyPI only, no Release. Safe to fire anytime.
+#
+# The discriminator is `startsWith(github.ref, 'refs/tags/')`, NOT
+# `github.event_name == 'push'`. That distinction is load-bearing: this workflow
+# now also triggers on push-to-main, and event_name is 'push' for BOTH a tag and a
+# branch — so the old test would have routed every merge to main straight at real
+# PyPI. Anything added to the trigger list above must keep the tag check as the
+# only thing that opens the production path.
 #
 # This replaces an `on: release: [published]` trigger that published whatever was
 # on the tag WITHOUT running a single test (a tag push fires neither push-to-main
@@ -18,9 +22,25 @@ name: Release
 #                   workflow "release.yml", environment "pypi"
 #   test.pypi.org → pending publisher, same repo/workflow, environment "testpypi"
 
+# WHY THIS RUNS WHEN NOTHING IS BEING RELEASED
+#
+# Count the executions: CI has run ~30 times, this workflow 3. Every defect found
+# in it was found by finally running it — it had never executed at all (five
+# releases were uploaded by hand), its version guard was unverified until someone
+# forced a mismatch, and its rehearsal could only be used once per version. A path
+# that runs twice a year rots between uses, and it rots in the one place where a
+# mistake cannot be undone. So it now runs on a cadence, like CI does.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*"] # production: real PyPI + a GitHub Release
+    branches: [main] # rehearsal, but only when the release machinery itself moves
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/ci.yml"
+      - "pyproject.toml"
+      - "job_radar/__init__.py"
+  schedule:
+    - cron: "0 14 * * 1" # Mondays 10:00 ET — proves the path still works
   workflow_dispatch: {}
 
 permissions:
@@ -62,7 +82,7 @@ jobs:
         # manual rehearsal has no tag, so this check is skipped there.
         # The version is dynamic (setuptools reads job_radar.__version__), so ask
         # the built metadata rather than parsing pyproject.toml.
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
@@ -84,10 +104,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # The GitHub environment gates which trusted publisher the OIDC token maps to:
-    #   push (tag) → 'pypi'      → the real-PyPI publisher
-    #   dispatch   → 'testpypi'  → the TestPyPI publisher
+    #   a v* TAG    → 'pypi'      → the real-PyPI publisher
+    #   anything else → 'testpypi' → the TestPyPI publisher
     # Safe from the ternary trap below because BOTH values are non-empty (truthy).
-    environment: ${{ github.event_name == 'push' && 'pypi' || 'testpypi' }}
+    environment: ${{ startsWith(github.ref, 'refs/tags/') && 'pypi' || 'testpypi' }}
     permissions:
       # REQUIRED for Trusted Publishing: mints the short-lived OIDC token the index
       # exchanges for a 15-minute, project-scoped upload token. No stored secret.
@@ -100,17 +120,22 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
           # GitHub Actions has no real ternary — `A && B || C` only works when B is
-          # TRUTHY. An empty string is FALSY, so `event=='push' && '' || testpypi`
-          # would ALWAYS fall through to TestPyPI, even on a tag. Fix: put the
-          # non-empty value on the true side. On a tag push this is false → falls
-          # through to '' → the action's default (real PyPI); a manual rehearsal is
-          # true → TestPyPI.
-          repository-url: ${{ github.event_name != 'push' && 'https://test.pypi.org/legacy/' || '' }}
+          # TRUTHY. An empty string is FALSY, so putting '' on the true side would
+          # ALWAYS fall through to the other branch. Hence the negation: on a tag
+          # this is false → falls through to '' → the action's default (real PyPI);
+          # on every other trigger it is true → TestPyPI's URL.
+          repository-url: ${{ !startsWith(github.ref, 'refs/tags/') && 'https://test.pypi.org/legacy/' || '' }}
+          # Re-uploading a version is an ERROR on real PyPI and must stay one --
+          # it means the tag/version guard let a duplicate through. On TestPyPI it
+          # is just a rehearsal of a version already rehearsed, and refusing it is
+          # what made this path unusable for re-validating the SAME unreleased
+          # version, which is exactly when you most want to run it.
+          skip-existing: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
   # Tag runs only — a rehearsal must not cut a public Release.
   github-release:
     needs: publish
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write # creating a Release writes to the repo
