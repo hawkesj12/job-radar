@@ -2,8 +2,17 @@
 
 The deterministic engine harvests + first-pass-scores the whole market for free.
 This layer -- only if you configure an API key -- reads the *top-N* shortlist and
-scores each role for SEMANTIC fit (0-100) plus a one-line why/gaps note, catching
-the great-fit roles keyword counting undervalues.
+scores each role for SEMANTIC fit (0-100) plus a one-line why/gaps note, so the
+roles that already cleared the bar are ORDERED by meaning rather than by keyword
+count.
+
+What it does NOT do, despite an earlier version of this docstring claiming it:
+rescue a great-fit role the keyword model undervalued. It cannot. `cli.cmd_scan`
+feeds it `shortlist.surface(...)[:rerank_top_n]`, and `surface()` filters on
+`score >= cfg.min_score` BEFORE that slice -- so anything the keyword model scored
+below the threshold is already gone when this layer runs. Re-ranking the survivors
+is a precision layer, not a recall one. Widening it would mean feeding it pre-gate
+rows, which costs tokens on roles that will mostly be discarded.
 
 Off by default. A true no-op when disabled or keyless, so the tool always runs
 free. Cost-bounded to `rerank_top_n` roles, one request per run. Stdlib only --

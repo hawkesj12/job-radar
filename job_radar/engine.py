@@ -14,7 +14,7 @@ from . import config
 from .dedup import find_hit_key, norm
 from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
-from .sources import DEPTH_EXTRA_FIELDS, enabled_breadth, enabled_depth
+from .sources import DEPTH_ALL, DEPTH_EXTRA_FIELDS, enabled_breadth, enabled_depth
 from .util import age_int
 
 # A valid ATS slug is the last path segment of a board URL — alphanumerics plus
@@ -23,17 +23,25 @@ from .util import age_int
 _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Source preference — NOT a fit-score input (the score stays source-agnostic:
-# score_and_signals reads only the posting's content). It breaks TIES: when the
-# same role is seen from several sources, prefer the higher-ranked source's copy
-# for its apply link + data, and among equal-score DIFFERENT roles, surface it
-# first. Google for Jobs wins because its apply_options resolve to direct-to-company
-# / ATS links (jobfitr's product promise); everything else is neutral. Higher = more
-# preferred.
-_SRC_PREF = {"google_jobs": 1}
+# score_and_signals reads only the posting's content). It decides WHICH COPY of one
+# role to keep, and among equal-score DIFFERENT roles which to surface first.
+# Higher = more preferred.
+#
+# This used to be `{"google_jobs": 1}` and nothing else, which meant a company's own
+# Greenhouse board ranked EQUAL to a RemoteOK redirect — the one distinction the
+# product is built on, absent from the table that exists to express it. A DEPTH
+# source IS the employer's applicant-tracking system, so its copy is the canonical
+# record: the real apply URL, the full description, the accurate department. Google
+# for Jobs sits in the middle because its apply_options resolve to direct-to-company
+# links. Everything else is an aggregator serving a redirect.
+_DEPTH_PREF, _GOOGLE_PREF, _AGGREGATOR_PREF = 2, 1, 0
 
 
 def _src_pref(p) -> int:
-    return _SRC_PREF.get(p.get("source", ""), 0)
+    src = p.get("source", "")
+    if src in DEPTH_ALL:
+        return _DEPTH_PREF
+    return _GOOGLE_PREF if src == "google_jobs" else _AGGREGATOR_PREF
 
 
 def _consume(postings, hits, blocks, cfg, meta):
@@ -81,13 +89,22 @@ def _consume(postings, hits, blocks, cfg, meta):
         else:
             cur = hits[match]
             srcs = cur["sources"] | p["sources"]
-            # Score first (source-agnostic — a better-fit copy always wins), then
-            # source preference (Google's direct-to-company link beats an equal-fit
-            # aggregator copy), then completeness of the body.
-            if (p["score"], _src_pref(p), len(p.get("text", ""))) > (
-                cur["score"],
+            # PROVENANCE first, then completeness, and score only as a last resort.
+            #
+            # Score used to lead here, and that inverted the product. These two rows
+            # are the SAME JOB, so "which fits better" is not a meaningful question
+            # between them — the only question is which record is the better copy of
+            # it. Score-first answered it with a number that rewards brevity, so an
+            # 80-word aggregator stub beat the employer's own 15,000-character
+            # posting and the user got a RemoteOK redirect instead of the company's
+            # ATS link. Measured on a live board: 14 of 20 merged roles.
+            #
+            # Score stays as the final key purely so the choice is deterministic when
+            # provenance and length are identical.
+            if (_src_pref(p), len(p.get("text", "")), p["score"]) > (
                 _src_pref(cur),
                 len(cur.get("text", "")),
+                cur["score"],
             ):
                 winner = p
             else:

@@ -47,6 +47,35 @@ preference breaks ties, it never contributes points.
 - **`sources.google_jobs.{key_env,pages}`** in the config file, with a loader, so
   the knob the example config documents is one the code actually reads.
 
+### Caller-visible: the fit score changed
+
+**Every score moves, and merged roles may now carry a different URL.** Two fixes to
+the scorer, found by an independent review after the rest of this release landed:
+
+- **The score rewarded brevity, and it inverted the product.** `raw / norm` is the
+  k1→∞ limit of BM25 — term-frequency saturation switched off — and because `norm`
+  bottoms out at `1 − length_norm_b` = 0.25, a very short posting had its score
+  multiplied by up to **4×**. That floor is independent of `avg_jd_tokens`, so
+  raising it from 400 to 1600 (below) could not fix this and did not. The
+  consequence: an 80-word aggregator stub outscored the same role's full employer
+  description, and since the merge tiebreak led with score, **14 of 20 merged roles
+  on a live board handed the user a RemoteOK redirect instead of the company's own
+  ATS link** — the opposite of "routes you to the source." Scoring here is
+  presence-based (a keyword counts once), so BM25 collapses to
+  `raw·(k1+1)/(1+k1·norm)`; that is now what runs, with `score_k1` (1.2) exposed in
+  the config. The README's "BM25 length-normalized" claim is true for the first time.
+- **The merge tiebreak now leads with provenance, not score.** Two copies of one job
+  are the same job, so "which fits better" was never the right question between
+  them — only "which is the better record." `_SRC_PREF` also ranked a company's own
+  Greenhouse board **equal to** a RemoteOK redirect; depth sources (the employer's
+  ATS) now outrank Google-for-Jobs, which outranks aggregators. Measured across
+  three live boards in both arrival orders: aggregator retention **70–88% → 0%**.
+
+Expect an existing `shortlist.csv` to re-rank on the next run, some short aggregator
+stubs to fall below `min_score` (they were clearing on inflation), and merged roles
+to carry employer URLs where they carried redirects. If you tuned `min_score` against
+the old inflated scale, lower it. No CSV schema change.
+
 ### Security
 
 - **The LLM API key could be printed to stdout.** `llm.rerank` reported failures as
@@ -84,11 +113,31 @@ preference breaks ties, it never contributes points.
      treated as abnormally long and had its score divided by ~3.2. That inverts what
      BM25 length normalization is for. Now 1600.
 
-  Measured on one live board: **0 of 20 relevant remote roles surfaced before, 7 of
-  20 after.** Existing shortlists will re-rank on the next run and previously buried
-  employer roles will appear as new — that is the fix working, not a dedup
-  regression.
+  Measured on one live board: 0 of 20 relevant remote roles surfaced before, 7 of 20
+  after. **Read that as a smoke test, not as validation.** n=20, one board, no
+  labelled ground truth, and the success metric is output volume — which is exactly
+  what the tuned parameter controls. It does reproduce across five boards, and 400
+  was measurably wrong, so the direction is right; but a defensible calibration needs
+  a few dozen hand-labelled roles and a precision@k number, and that has not been
+  done. (A reviewer's claim that simply lowering `min_score` would produce the same
+  result was tested and is **false**: matching the surfaced count needs
+  `min_score=9`, and the resulting sets differ at Jaccard 57%, with ~10% of ordered
+  pairs re-ranking. A length-dependent transform genuinely re-orders; a threshold
+  cannot.)
 
+- **The discovery funnel spent up to a minute per scan to add nothing.**
+  `funnel_max_new_per_run` caps companies ADDED, and a dead slug is never an "add" —
+  so on a run where candidates were dead the cap never fired and every one of them
+  got probed, serially. Measured: 150 dead candidates, ~60 s, 0 added, on every scan,
+  with `auto_grow` on by default. New `funnel_max_probes_per_run` (50) bounds
+  attempts. Not parallelized on purpose: probing concurrently would make the healthy
+  case worse by hitting every candidate every run, which is more load on other
+  people's ATS endpoints from a tool strangers install.
+- **The agency penalty scored keywords found in a role's title or location.** It is
+  meant to read company + description only. Introduced earlier in this same release
+  when that penalty was routed through the keyword prefilter with the wrong token
+  set, so a role titled "Staffing Engineer" was penalised as a staffing agency.
+  Caught by the equivalence gate below, on its first honest run.
 - **`search_usajobs` had no politeness delay** while five sibling sources pause
   between queries, and it requests the largest page in the codebase.
 - The repo-root and packaged copies of `watchlist.example.json` had **already
@@ -173,6 +222,19 @@ preference breaks ties, it never contributes points.
     indistinguishable to the canary; they take `strict=True` from it now.
   - `search_google_jobs`, this release's headline feature, had **no executed
     coverage** of its parsing path. Now covered end to end.
+  - **The scoring equivalence gate guarded nothing** — and this one is the reason
+    the agency-penalty bug above shipped. `test_scoring_matches_bruteforce_reference`
+    declares itself the gate that must fail if the scoring optimization changes
+    results. Its reference still subtracted the agency penalty _uncapped_ after
+    production started capping it, and it passed regardless, because its generated
+    vocabulary contained not one agency keyword — so that branch was never compared
+    in any of its 2,000 cases. Forced to one: production 49, reference −44. The
+    reference now matches production and the corpus reaches every branch, verified by
+    reverting each fix in turn and confirming the gate goes red.
+  - A test now pins an **absolute** score for a fixed posting. Every other scoring
+    test asserted a relative property (A > B), which survives any global rescale —
+    which is how `avg_jd_tokens` stayed wrong by 4× for three releases with a green
+    suite.
 
 ### Known issues
 

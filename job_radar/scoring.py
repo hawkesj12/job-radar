@@ -113,7 +113,16 @@ def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
     # length factor so a long JD can't accrue score just by being long, then cap.
     dl = len(blob_tokens)
     norm = (1 - cfg.score_len_b) + cfg.score_len_b * (dl / cfg.avg_jd_tokens)
-    body = min(raw / norm if norm > 0 else raw, cfg.blob_score_cap)
+    # Real BM25, not `raw / norm`. That earlier form is the k1 -> infinity limit,
+    # which removes term-frequency saturation and lets `norm`'s 0.25 floor multiply a
+    # short document's score by up to 4x. Since every keyword here contributes at
+    # most once (presence-based, tf == 1), BM25's tf*(k1+1)/(tf + k1*norm) collapses
+    # to the expression below, which damps the same length effect without the
+    # runaway multiplier. See Config.score_k1 for the measurement that motivated it.
+    k1 = cfg.score_k1
+    body = min(
+        raw * (k1 + 1) / (1 + k1 * norm) if norm > 0 else raw, cfg.blob_score_cap
+    )
     tl = p.get("title", "").lower()
     # Title double-count, but CAPPED so a keyword-stuffed title can't run away.
     title_hits = _present(tl, set(_TOKEN_RE.findall(tl)), fw, singles, multis)
@@ -122,13 +131,16 @@ def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
     # The agency penalty runs over company + the FULL description, so it was the
     # most expensive line in the program: 13 whole-word regex searches across ~4 KB
     # per posting, measured at 68% of total scoring CPU. `_present` above solves
-    # exactly this for fit_weights and was never extended here. Reuse the blob's
-    # tokens (already computed for the length norm) plus the company's, so a
-    # keyword is only regex-searched when its first token is actually present.
+    # exactly this for fit_weights and was never extended here.
+    #
+    # The token set MUST come from agency_blob itself, not from the display blob.
+    # `_present` resolves a single-token keyword by pure set membership, so passing
+    # the wider title+location+text tokens made an agency keyword in the TITLE or
+    # LOCATION score as though it were in the body: a role called "Staffing
+    # Engineer" was penalised as a staffing agency. Tokenizing agency_blob costs one
+    # more pass over the text and is still far cheaper than 13 regex searches.
     agency_blob = f"{p.get('company', '')} {p.get('text', '')}".lower()
-    agency_tokens = set(blob_tokens) | set(
-        _TOKEN_RE.findall(p.get("company", "").lower())
-    )
+    agency_tokens = set(_TOKEN_RE.findall(agency_blob))
     ap_singles, ap_multis = _kw_index(tuple(cfg.agency_penalty))
     agency_hits = _present(
         agency_blob, agency_tokens, cfg.agency_penalty, ap_singles, ap_multis

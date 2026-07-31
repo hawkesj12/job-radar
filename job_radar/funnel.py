@@ -33,10 +33,20 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
             continue
         candidates[key] = comp
 
-    added = []
+    added: list = []
+    # TWO budgets, because they bound different things and only one of them was here.
+    # `max_new_per_run` counts SUCCESSES, so a dead slug never incremented it: the
+    # break below could not fire on a run where nothing was live, and the loop probed
+    # every candidate serially. 150 dead candidates measured at ~60 seconds of
+    # third-party requests to add zero companies -- on every scan, on by default.
+    # `probes` counts ATTEMPTS, which is the thing that actually costs time and
+    # someone else's rate limit.
+    probes = 0
     for (ats, slug), name in candidates.items():
         if len(added) >= cfg.funnel_max_new_per_run:
             break
+        if probes >= cfg.funnel_max_probes_per_run:
+            break  # deferred, not lost — discovery runs again next scan
         if dry:
             added.append(
                 {"name": name, "ats": ats, "slug": slug, "industry": "(discovered)"}
@@ -45,6 +55,7 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
         probe_fn = liveness_for(ats)
         if not probe_fn:
             continue
+        probes += 1  # count the ATTEMPT, before it can fail
         try:
             n_roles = probe_fn(slug)
         except NET_ERRORS:

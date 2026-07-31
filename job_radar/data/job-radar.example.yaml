@@ -39,7 +39,10 @@ scoring:
     # your-industry: 4
   title_penalties: { research scientist: 8, ai researcher: 6 }
   agency_penalties: { staffing: 8, our client: 12, consultancy: 10 }
-  length_norm_b: 0.75      # BM25 length penalty (0.75 = default)
+  length_norm_b: 0.75      # BM25 length penalty b (0.75 = default)
+  score_k1: 1.2            # BM25 term-frequency saturation. Without it the
+                           # length penalty has no ceiling and a short stub
+                           # outscores a full job description.
   avg_jd_tokens: 1600      # reference "normal" JD length (a full ATS description;
                            # measured median ~1590 tokens -- NOT a job-board summary)
   body_cap: 60             # ceiling on the body keyword score
@@ -79,7 +82,11 @@ sources:
     pages: 1              # or set GOOGLE_JOBS_PAGES
   funnel:
     auto_grow: true        # discover + add new companies from breadth hits
-    max_new_per_run: 25
+    max_new_per_run: 25    # cap on companies ADDED per run
+    max_probes_per_run: 50 # cap on liveness probes ATTEMPTED per run.
+                           # Separate on purpose: a dead slug is never an
+                           # "add", so max_new_per_run alone let a run of
+                           # dead candidates probe every one of them.
 
 # ── ai: optional LLM semantic fit-ranking (off by default) ──────────────────
 # Uncomment + set an api key env var to have an LLM re-rank the top of the list
