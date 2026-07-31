@@ -89,8 +89,22 @@ def clean(raw: str) -> str:
     return re.sub(r"\s+", " ", txt).strip()
 
 
+# A date is the ONLY thing to_date may return. Sixteen adapters route third-party
+# strings through it into the `posted` column, so an unvalidated passthrough is a
+# direct channel from any of ~500 job boards into the user's spreadsheet.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
 def to_date(val) -> str:
-    """Normalize an ISO string / epoch-seconds / epoch-ms to YYYY-MM-DD."""
+    """Normalize an ISO string / epoch-seconds / epoch-ms to YYYY-MM-DD.
+
+    Anything that is not date-shaped returns "" rather than being passed through.
+    This used to `return str(val)[:10]` for any string, which meant a board could
+    put its own 10 characters in `posted` -- and `posted` is not a free-text column,
+    so it bypassed the CSV formula-injection guard entirely. Blanking an unparseable
+    date is also the safer failure: a blank sinks the role in the freshness filter
+    instead of quietly presenting a vendor's arbitrary text as a date.
+    """
     if not val:
         return ""
     if isinstance(val, (int, float)):
@@ -99,7 +113,8 @@ def to_date(val) -> str:
             return datetime.fromtimestamp(ts, tz=_ET).strftime("%Y-%m-%d")
         except Exception:
             return ""
-    return str(val)[:10]
+    s = str(val)[:10]
+    return s if _ISO_DATE_RE.match(s) else ""
 
 
 _SAL_RE = re.compile(

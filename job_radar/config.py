@@ -288,7 +288,18 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
 
     def env(self, key: str) -> str:
-        return os.environ.get(key, "") or ""
+        """Read a credential from the environment.
+
+        STRIPPED on the way out, and that is load-bearing rather than tidiness.
+        Keys arrive with trailing newlines constantly -- a .env file, `$(cat key)`,
+        a CI secret, CRLF on Windows -- and a newline in a credential is not inert:
+        it makes http.client raise `ValueError: Invalid header value b'sk-ant-...'`
+        with the whole key in the message, and it corrupts the query string for the
+        sources that pass their key as a URL parameter. This is the single
+        chokepoint every credential passes through (Adzuna, USAJOBS, SerpApi, LLM),
+        so stripping here fixes all of them at once.
+        """
+        return (os.environ.get(key, "") or "").strip()
 
 
 def load_config(path: str | os.PathLike | None) -> Config:
