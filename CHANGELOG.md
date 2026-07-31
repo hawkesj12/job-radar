@@ -47,8 +47,54 @@ preference breaks ties, it never contributes points.
 - **`sources.google_jobs.{key_env,pages}`** in the config file, with a loader, so
   the knob the example config documents is one the code actually reads.
 
+### Security
+
+- **The LLM API key could be printed to stdout.** `llm.rerank` reported failures as
+  `({type}: {e})`, and the exception carries the request header: a key with a
+  trailing newline — a `.env` file, `$(cat key)`, CRLF on Windows — made
+  `http.client` raise `ValueError: Invalid header value b'sk-ant-…'`. A scheduled
+  run redirects stdout to a log file, so the key landed on disk. It now reports the
+  exception **type only**, matching the eight other error paths that already did.
+  `Config.env()` also strips whitespace now, removing the trigger for every
+  credential at the one chokepoint they all cross.
+- **Formula injection via the `posted` column.** `_csv_safe` was applied only to a
+  curated `TEXT_COLS` set that omitted `posted`, which is fed from vendor data by
+  `to_date` — and `to_date` returned `str(val)[:10]` for any string, so any of ~500
+  boards could put a live formula in your spreadsheet. `to_date` now returns `""`
+  for anything not date-shaped, and every column is sanitized. `TEXT_COLS` is
+  deleted rather than corrected: curating "the untrusted columns" is a judgement
+  that must be re-made on every new column, and it was already wrong once.
+
 ### Fixed
 
+- **The depth lane was buried.** On a clean install, company ATS feeds — what this
+  tool leads with — harvested 436 roles and surfaced **1**, while aggregators
+  surfaced 14 from 168. Three compounding causes, all fixed:
+  1. `"on behalf of"` scored −10 as an agency signal. It is generic English, and it
+     appears verbatim in employers' own anti-recruitment-fraud boilerplate ("we may
+     partner with vetted recruiting agencies who will identify themselves as
+     working on behalf of X") — present on **20 of 20** relevant roles on one live
+     board. Removed.
+  2. `agency_penalty` was the only uncapped score component and the only one that
+     goes negative, so a long thorough JD accrued penalty without limit while its
+     body score was normalized down. Now capped by `agency_penalty_cap` (15), like
+     `blob_score_cap` and `title_score_cap`.
+  3. `avg_jd_tokens` was 400 — roughly a job-board _summary_. Real full ATS
+     descriptions measure a median of ~1590 tokens, so every thorough posting was
+     treated as abnormally long and had its score divided by ~3.2. That inverts what
+     BM25 length normalization is for. Now 1600.
+
+  Measured on one live board: **0 of 20 relevant remote roles surfaced before, 7 of
+  20 after.** Existing shortlists will re-rank on the next run and previously buried
+  employer roles will appear as new — that is the fix working, not a dedup
+  regression.
+
+- **`search_usajobs` had no politeness delay** while five sibling sources pause
+  between queries, and it requests the largest page in the codebase.
+- The repo-root and packaged copies of `watchlist.example.json` had **already
+  drifted**: a 2026-07-18 fix corrected the packaged copy and left the root one —
+  the file a GitHub visitor reads — pointing at five boards that now 404. Synced,
+  and a byte-equality test now pins both copies of both example files.
 - **`tzdata` is now a dependency on Windows** (`sys_platform == 'win32'`). Windows
   ships no system time-zone database, so `zoneinfo` has nothing to read and
   `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError`. Both `util.py` and
@@ -71,8 +117,9 @@ preference breaks ties, it never contributes points.
 - **Jobicy roles carried a Python list in the `department` column.** Jobicy returns
   `jobIndustry` as an array, and the adapter normalized `jobType` but not this one,
   so `department` reached `shortlist.csv` as the literal text `['Engineering']`
-  instead of a value you could filter on. Found by the new registry contract test
-  on its first run, which is the argument for that test existing.
+  instead of a value you could filter on. Found by the hand-written Jobicy parser
+  test built from that vendor's real response shape — which is the argument for
+  building fixtures from real payloads rather than from the code.
 
 ### Changed
 
@@ -96,14 +143,36 @@ preference breaks ties, it never contributes points.
   Arbeitnow, Himalayas, USAJOBS and TechTree — had no test at all, despite
   `CONTRIBUTING.md` requiring one for every source. All six now have parser tests
   built from their real response shapes, plus a **registry contract test** that
-  iterates `DEPTH_ALL`/`BREADTH_ALL` and asserts the posting contract, so a
-  non-conforming adapter cannot be added even if nobody writes a test for it.
-  134 tests, up from 105.
+  iterates `DEPTH_ALL`/`BREADTH_ALL` and asserts the posting contract.
+  134 tests, up from 107.
 - **A weekly live canary** (`canary.yml`) asks the real APIs whether they still
   return the shape the parsers read. Fixture tests freeze a vendor's shape as of
   the day they were written and cannot detect drift; this can. It is scheduled, not
   part of CI, so a third party's outage never blocks a pull request, and it
   separates "unreachable" (skip) from "reachable but unparseable" (fail).
+- **Scoring is 2.5x faster** — 961 to 388 µs per posting. The agency penalty ran 13
+  whole-word regexes over the full description for every posting (68% of scoring
+  CPU) while the `_present` prefilter twenty lines above solved exactly that for
+  `fit_weights` and had never been extended to it. Output verified identical over
+  4,000 adversarial postings.
+- **The test guards added earlier in this release did not guard.** An independent
+  review broke three of them, and they are rebuilt here:
+  - The registry contract test stubbed the transport with `{}`; every adapter
+    returns `[]` from that, so its per-key assertions iterated an empty list and a
+    deliberately non-conforming adapter passed. Each adapter now has a sample
+    payload of its own real response shape, and the test asserts a row was actually
+    produced before judging it.
+  - The example-config parity test read the repo-root copy while `init` ships the
+    packaged one, so deleting `workday` from the file users receive left the suite
+    green — the very bug this release fixed, reachable again.
+  - The canary asserted non-blank only on `url` and `title`, so a vendor blanking
+    every description kept it green while all scores went to zero; and because
+    pytest exits 0 on an all-skip run, an aggregator blocking CI's IP range
+    produced a green run that checked nothing. Both now fail. `search_remotive` and
+    `search_himalayas` swallowed network errors internally, making outage and drift
+    indistinguishable to the canary; they take `strict=True` from it now.
+  - `search_google_jobs`, this release's headline feature, had **no executed
+    coverage** of its parsing path. Now covered end to end.
 
 ### Known issues
 
@@ -359,9 +428,14 @@ the one place a caller looks. No behaviour changed except the one item noted bel
 
 ### Changed
 
-- **De-duplication is now linear instead of O(n²)** — a company-block index plus
-  block/title precomputed on insert. Output is byte-identical to before; a run over
-  ~8k postings drops from ~31s to ~3s of CPU.
+- **De-duplication costs a factor of the company count less** — a company-block
+  index plus block/title precomputed on insert, so the fuzzy pass compares only
+  same-company candidates. Output is byte-identical to before; a run over ~8k
+  postings drops from ~31s to ~3s of CPU. (This entry originally called the result
+  "linear instead of O(n²)". Measured later, it is not: blocking divides the
+  constant, not the asymptotic, so cost is still quadratic in postings for a fixed
+  company universe — per-posting time rises ~1.5x per doubling. The speed-up is
+  real; the label was wrong, and nothing measured the growth curve to catch it.)
 - Breadth sources are fetched **in parallel** (like the depth sources); removed the
   pointless cross-host delay between independent providers.
 - Keyword scoring scans the fit-weights **once** per posting (was twice).

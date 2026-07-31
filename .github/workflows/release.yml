@@ -26,6 +26,13 @@ on:
 permissions:
   contents: read
 
+# Two tag pushes in quick succession must not race through build and publish.
+# NOT cancel-in-progress: a half-finished release is worse than a queued one, and
+# a cancelled publish could leave the index and the GitHub Release disagreeing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   # Re-run the full 12-cell suite on the commit being released. Without this a
   # release publishes having run no tests at all — the gap that let a package
