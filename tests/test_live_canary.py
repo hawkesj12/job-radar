@@ -66,6 +66,23 @@ def _check_shape(rows, name, expect_company=True):
     bad_title = [r for r in rows if not (r.get("title") or "").strip()]
     assert not bad_url, f"{name}: {len(bad_url)}/{len(rows)} rows have no usable url"
     assert not bad_title, f"{name}: {len(bad_title)}/{len(rows)} rows have no title"
+
+    # `text` and `posted` were NOT checked in the first version of this file, and
+    # that was the hole: a vendor renaming its description field leaves url and
+    # title intact, so the canary stayed green while every role scored zero on an
+    # empty body — the exact "quieter shortlist that looks like a slow job market"
+    # this file exists to catch. Judge on a MAJORITY rather than every row: some
+    # boards genuinely post a role with no body, but most of them doing so is drift.
+    blank_text = sum(1 for r in rows if not (r.get("text") or "").strip())
+    blank_posted = sum(1 for r in rows if not (r.get("posted") or "").strip())
+    assert blank_text <= len(rows) // 2, (
+        f"{name}: {blank_text}/{len(rows)} rows have an empty body — "
+        "text is the entire input to the fit score"
+    )
+    assert blank_posted <= len(rows) // 2, (
+        f"{name}: {blank_posted}/{len(rows)} rows have no date — "
+        "a blank date sinks a role in the freshness filter"
+    )
     required = {"title", "url", "posted", "text"} | (
         {"company"} if expect_company else set()
     )
@@ -86,13 +103,20 @@ def test_whole_board_source_still_parses(name):
 
 @pytest.mark.parametrize("name", QUERY_DRIVEN)
 def test_query_driven_source_still_parses(name):
+    """These two swallow network errors internally so a harvest fails soft, which
+    meant every failure — outage OR drift — reached this test as an empty list and
+    got reported as an ambiguous skip. So they could never go red on the one thing
+    they exist to detect. `strict=True` makes an outage raise, so the skip below now
+    means only "unreachable" and an empty list means only "drift"."""
     _cfg()
     try:
-        rows = sources.BREADTH_ALL[name](BROAD_QUERY)
+        rows = sources.BREADTH_ALL[name](BROAD_QUERY, strict=True)
     except NET_ERRORS as e:
         pytest.skip(f"{name} unreachable ({type(e).__name__}) — their outage, not ours")
-    if not rows:
-        pytest.skip(f"{name}: 0 rows for a query-driven source — ambiguous, not drift")
+    assert rows, (
+        f"{name}: reachable but parsed 0 rows for a broad query — that is drift, "
+        "not an empty market"
+    )
     _check_shape(rows, name)
 
 

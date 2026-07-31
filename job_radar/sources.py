@@ -638,12 +638,14 @@ def liveness_for(ats: str):
 
 
 # ── BREADTH: keyword aggregators -- search_<src>(queries) -> [posting] ───────
-def search_remotive(queries):
+def search_remotive(queries, strict: bool = False):
     out = []
     for qy in queries[:4]:  # Remotive: <=4 calls per run (be a polite API citizen)
         try:
             data = get_json(f"https://remotive.com/api/remote-jobs?search={q(qy)}")
         except NET_ERRORS:
+            if strict:  # see the note on `strict` in search_himalayas
+                raise
             continue
         for j in data.get("jobs", []):
             text = clean(j.get("description", ""))
@@ -749,12 +751,24 @@ def search_remoteok(queries):
     return out
 
 
-def search_himalayas(queries):
+def search_himalayas(queries, strict: bool = False):
+    """`strict` exists for the live canary, and only for it.
+
+    A harvest wants every source to fail soft: one dead aggregator must not sink a
+    scan, so a network error is swallowed and the query is skipped. But that makes
+    "the endpoint is down" and "the endpoint answered with a shape we can no longer
+    parse" both arrive as an empty list, and the canary cannot tell a real outage
+    from real drift — so it reports every failure as an ambiguous skip and can never
+    go red. `strict=True` re-raises instead, which is what lets the canary
+    distinguish the two. The engine never passes it.
+    """
     out = []
     for qy in queries:
         try:
             data = get_json(f"https://himalayas.app/jobs/api/search?q={q(qy)}&limit=20")
         except NET_ERRORS:
+            if strict:
+                raise
             continue
         for j in data.get("jobs", []):
             text = clean(j.get("description") or j.get("excerpt", ""))
@@ -1106,6 +1120,12 @@ def search_usajobs(queries):
                     "source": "usajobs",
                 }
             )
+        # Every other multi-call source pauses between queries (remotive 1.0s,
+        # himalayas/adzuna/google_jobs 0.5s, braintrust 0.4s); this one looped a
+        # federal API with no pause at all, while asking for the largest page in
+        # the codebase (ResultsPerPage up to 500). README's "it rate-limits itself"
+        # was true of every source except the heaviest one.
+        time.sleep(0.5)
     return out
 
 

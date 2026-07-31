@@ -49,7 +49,32 @@ jobs:
 
       # `-m live` overrides the `-m 'not live'` default in pyproject.toml, so this
       # runs ONLY the canary and none of the hermetic suite. -rs prints the skip
-      # reasons, which is where "X was unreachable" is reported — a run that is all
-      # skips is not a healthy run, and the log should make that obvious.
+      # reasons, which is where "X was unreachable" is reported.
       - name: Ask the real APIs
-        run: pytest -m live -v -rs
+        run: pytest -m live -v -rs --junitxml=canary.xml
+
+      # An all-skip run exits 0. Every canary test skips when its endpoint is
+      # unreachable, so a total outage — or an aggregator blocking GitHub's runner
+      # IP range, which is the realistic case — produces a GREEN run that checked
+      # nothing. A permanently dead canary is then indistinguishable from a healthy
+      # one, which is worse than having no canary, because it reads as assurance.
+      # `if: always()` so this still runs when the step above failed.
+      - name: A run that checked nothing is not a passing run
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          try:
+              s = ET.parse("canary.xml").getroot()
+          except Exception as e:
+              sys.exit(f"FAIL: no canary report to read ({type(e).__name__})")
+          suite = s if s.tag == "testsuite" else s.find("testsuite")
+          total = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          errors = int(suite.get("errors", 0)) + int(suite.get("failures", 0))
+          passed = total - skipped - errors
+          print(f"total={total} passed={passed} skipped={skipped} failed={errors}")
+          if passed == 0:
+              sys.exit("FAIL: every canary test skipped — the endpoints were never "
+                       "actually checked. Green here would mean nothing.")
+          PY

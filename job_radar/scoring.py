@@ -119,8 +119,23 @@ def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
     title_hits = _present(tl, set(_TOKEN_RE.findall(tl)), fw, singles, multis)
     body += min(sum(w for w, _ in title_hits), cfg.title_score_cap)
     body -= sum(w for kw, w in cfg.title_penalty.items() if has(kw, tl))
+    # The agency penalty runs over company + the FULL description, so it was the
+    # most expensive line in the program: 13 whole-word regex searches across ~4 KB
+    # per posting, measured at 68% of total scoring CPU. `_present` above solves
+    # exactly this for fit_weights and was never extended here. Reuse the blob's
+    # tokens (already computed for the length norm) plus the company's, so a
+    # keyword is only regex-searched when its first token is actually present.
     agency_blob = f"{p.get('company', '')} {p.get('text', '')}".lower()
-    body -= sum(w for kw, w in cfg.agency_penalty.items() if has(kw, agency_blob))
+    agency_tokens = set(blob_tokens) | set(
+        _TOKEN_RE.findall(p.get("company", "").lower())
+    )
+    ap_singles, ap_multis = _kw_index(tuple(cfg.agency_penalty))
+    agency_hits = _present(
+        agency_blob, agency_tokens, cfg.agency_penalty, ap_singles, ap_multis
+    )
+    # CAPPED, like the body and title scores above. Uncapped, a long JD accumulated
+    # penalty without limit while its body score was normalized down.
+    body -= min(sum(w for w, _ in agency_hits), cfg.agency_penalty_cap)
     sig = ", ".join(kw for _, kw in sorted(blob_hits, reverse=True)[:n])
     return round(body), sig
 
