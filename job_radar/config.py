@@ -78,7 +78,13 @@ DEFAULT_AGENCY_PENALTY = {
     "our client": 12,
     "multiple clients": 12,
     "talent solutions": 12,
-    "on behalf of": 10,
+    # "on behalf of" was here at 10 and has been REMOVED. It is generic English,
+    # not an agency signal, and it appears verbatim in employers' own
+    # anti-recruitment-fraud boilerplate: "we may partner with vetted recruiting
+    # agencies who will identify themselves as working on behalf of <company>."
+    # That paragraph is standard on first-party ATS boards, so this keyword fired
+    # on the direct-from-employer roles this tool exists to surface -- measured on
+    # 20 of 34 live Greenhouse postings.
     "consulting firm": 10,
     "consultancy": 10,
     "contract-to-hire": 10,
@@ -231,6 +237,15 @@ class Config:
     # outrank a thorough JD (the body already caps at blob_score_cap). Keyword
     # scoring favors recall by design; the optional LLM re-rank is the precision layer.
     title_score_cap: int = 12
+    # Cap the agency penalty the way the two scores above are capped. It was the
+    # only uncapped component, and the only one that goes NEGATIVE -- so a long,
+    # thorough job description had more chances to accumulate penalty while its
+    # body score was being length-normalized DOWN. The result was that
+    # direct-from-employer roles, whose descriptions are the longest, scored below
+    # the surfacing threshold: measured on a clean install, the depth lane
+    # harvested 436 roles and surfaced 1. A staffing post announces itself in a
+    # phrase or two; it does not need an unbounded budget to do so.
+    agency_penalty_cap: int = 15
     tier_strong: int = 30
     tier_look: int = 22
     fuzzy_title_threshold: int = 90

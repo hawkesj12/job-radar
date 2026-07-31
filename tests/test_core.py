@@ -74,16 +74,34 @@ def test_google_jobs_config_block_is_actually_read(tmp_path):
     assert c.google_jobs_pages == 3
 
 
-def test_shipped_example_config_enables_every_adapter():
+def test_shipped_example_config_enables_every_adapter(tmp_path):
     """`job-radar init` writes this file verbatim, and an explicit list is a SUBSET
     filter — so anything missing here is silently off for every new user. Workday
     was omitted from `ats` for three releases while the README called it the
-    enterprise tier."""
-    from pathlib import Path
+    enterprise tier.
 
-    c = config.load_config(Path(__file__).parent.parent / "job-radar.example.yaml")
+    Reads the PACKAGED copy, via the same `cli._packaged` path `init` itself uses.
+    The first version of this test read the repo-root copy instead — so deleting
+    `workday` from the file that actually ships left the suite green, and the guard
+    protected a file no user ever receives."""
+    p = tmp_path / "shipped.yaml"
+    p.write_text(cli._packaged("job-radar.example.yaml"), encoding="utf-8")
+    c = config.load_config(p)
     assert set(sources.DEPTH_ALL) == set(c.depth_sources)
     assert set(sources.BREADTH_ALL) == set(c.breadth_sources)
+
+
+@pytest.mark.parametrize("name", ["job-radar.example.yaml", "watchlist.example.json"])
+def test_root_and_packaged_examples_are_identical(name):
+    """Two copies of each example file exist: one at the repo root (what a GitHub
+    visitor reads) and one under job_radar/data/ (what the wheel ships). They have
+    already drifted once — a 2026-07-18 fix corrected the packaged watchlist and
+    left the root copy pointing at five boards that now 404. Byte-equality is the
+    only thing that keeps the file people READ and the file people GET in sync."""
+    root = (Path(__file__).parent.parent / name).read_text(encoding="utf-8")
+    assert root == cli._packaged(name), (
+        f"{name}: the repo-root copy and the packaged copy have drifted"
+    )
 
 
 # ── deterministic scoring + gates ────────────────────────────────────────────
