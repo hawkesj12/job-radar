@@ -32,7 +32,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # The optional LLM re-rank uses stdlib HTTP — it needs no extra packages.
-dev = ["pytest>=7.0"]
+# Ranges here are for contributors; CI pins exact versions so an upstream release
+# can't turn main red on a commit that changed nothing.
+dev = ["pytest>=7.0", "mypy>=1.11", "types-PyYAML>=6.0"]
 
 [project.scripts]
 job-radar = "job_radar.cli:main"
@@ -51,3 +53,22 @@ version = { attr = "job_radar.__version__" }
 
 [tool.setuptools.package-data]
 job_radar = ["data/*.yaml", "data/*.json"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["job_radar"]
+# Deliberately NOT strict. This codebase passes untyped dicts (postings, config
+# sections) between modules by design, so demanding annotations everywhere would
+# produce hundreds of findings nobody will act on — and a check nobody acts on is
+# noise that hides the real ones. These settings catch the errors that indicate a
+# genuine defect (a call that can't work, a container built two different ways)
+# and stay quiet otherwise.
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# rapidfuzz ships no type information and has no stub package on typeshed. Without
+# this, its import is a hard error that says nothing about our code. pyyaml IS
+# covered — types-PyYAML is a dev dependency above rather than an ignore here.
+[[tool.mypy.overrides]]
+module = ["rapidfuzz.*"]
+ignore_missing_imports = true

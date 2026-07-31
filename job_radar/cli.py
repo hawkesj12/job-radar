@@ -97,8 +97,8 @@ def cmd_scan(args, cfg):
             f"shortlist ({len(existing)} roles). Nothing overwritten."
         )
         if args.verbose:
-            for e in errors:
-                print(f"    {e}")
+            for err in errors:
+                print(f"    {err}")
         else:
             print("  (run with --verbose to see which sources failed)")
         for r in shortlist.surface(existing, cfg)[: args.limit]:
@@ -142,8 +142,8 @@ def cmd_scan(args, cfg):
         f"{new_n} new since last run · {err_tail}"
     )
     if args.verbose and errors:
-        for e in errors:
-            print(f"    {e}")
+        for err in errors:
+            print(f"    {err}")
     if discovered:
         print(
             f"+{len(discovered)} companies auto-discovered: "

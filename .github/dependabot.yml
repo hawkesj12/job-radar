@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # The workflows here pin actions by SHA. A SHA cannot be repointed by whoever
+  # controls the upstream repo — which is the vector behind real supply-chain
+  # compromises — but it also never picks up a security fix on its own. Dependabot
+  # is what makes the pin maintainable instead of just stale.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      # Don't take a brand-new release the instant it publishes. A compromised
+      # version is usually caught within days; waiting a week means the ecosystem
+      # notices before we adopt it.
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Runtime deps (pyyaml, rapidfuzz) plus the dev tools CI pins to exact versions.
+  # The pins are deliberate — they stop an upstream ruff/mypy release turning main
+  # red on a commit that changed nothing — but a pin nobody ever bumps becomes a
+  # stale pin. This surfaces each bump as a reviewable PR the full matrix must pass.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps"
+    groups:
+      python:
+        patterns: ["*"]

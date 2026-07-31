@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -249,7 +250,8 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
     truncated -- see the cap comment above.
     """
     base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
-    out, offset, total = [], 0, None
+    out: list[dict] = []
+    offset, total = 0, None
     for _ in range(WORKDAY_MAX_PAGES):
         try:
             data = post_json(
@@ -392,7 +394,7 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
     list(_detail_pool().map(_one, rows))
 
 
-DEPTH_ALL = {
+DEPTH_ALL: dict[str, Callable[..., list]] = {
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
     "ashby": fetch_ashby,
@@ -474,7 +476,7 @@ def live_workday(slug: str, host: str = "wd1", site: str = "") -> int:
 # Ashby is deliberately absent: measured 2026-07-22, its posting-api returns the
 # whole board (1.98 MB / 120 jobs) with or without includeCompensation, so there
 # is no cheaper variant to call. It falls back to the full adapter below.
-LIVENESS = {
+LIVENESS: dict[str, Callable[..., int]] = {
     "greenhouse": live_greenhouse,
     "lever": live_lever,
     "smartrecruiters": live_smartrecruiters,
