@@ -61,6 +61,15 @@ version = { attr = "job_radar.__version__" }
 [tool.setuptools.package-data]
 job_radar = ["data/*.yaml", "data/*.json"]
 
+[tool.pytest.ini_options]
+# The live canary hits third-party APIs, so it is OFF by default: a contributor
+# running `pytest` offline, or CI running it on twelve matrix cells, must never
+# depend on someone else's uptime. The scheduled canary opts in with `-m live`.
+addopts = "-m 'not live'"
+markers = [
+  "live: hits real third-party APIs; scheduled canary only, never CI",
+]
+
 [tool.mypy]
 python_version = "3.10"
 files = ["job_radar"]

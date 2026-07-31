@@ -33,6 +33,24 @@ to the system locale, and this tool prints `✓ ⚠ ↳ ★` and harvests job ti
 every language. If you touch anything that prints or writes a file, expect Windows
 to be the cell that catches you.
 
+### The live canary
+
+`pytest` never touches the network. The tests in `tests/test_live_canary.py` do,
+so they are marked `live` and deselected by default — a contributor working offline
+must not see failures caused by someone else's outage. They run weekly from
+`canary.yml`:
+
+```bash
+pytest -m live -rs      # ask the real APIs whether our parsers still fit
+```
+
+They exist because the fixture tests cannot catch vendor drift. A captured payload
+freezes an API's shape as it was the day it was written, so if a source renames a
+field tomorrow, every fixture test still passes while the live harvest silently
+returns blank rows. The canary distinguishes **unreachable** (skip — their outage)
+from **reachable but unparseable** (fail — real drift), so a red run means
+something actually changed.
+
 - Keep the tool **stdlib-first** — a new runtime dependency needs a real
   justification. The three we have earn their place: `pyyaml` and `rapidfuzz`
   unconditionally, and `tzdata` on Windows only, because Windows ships no system
