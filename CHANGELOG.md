@@ -8,6 +8,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.5.1] - 2026-07-31
+
+### Fixed
+
+- **One malformed posting could kill an entire harvest.** A JSON `null` from any of
+  the ~500 sources arrived as `None`, and `.get(k, "")` does not guard against that —
+  its default fires only when the key is ABSENT, so a present-but-null `title` yielded
+  `None` and the first `.lower()` raised `AttributeError`. The damage was
+  disproportionate: `engine._consume` runs OUTSIDE both of `harvest`'s try blocks, so
+  the crash escaped per-source error handling entirely, discarded a network harvest
+  that had already completed, and skipped the "keep your existing shortlist" guard on
+  the way out — a raw traceback and a lost run, caused by one bad row from one vendor.
+
+  Every text field is now coerced once at `_consume`'s boundary, which is the single
+  point every posting from every adapter must cross. A bad ROW is dropped; it is not
+  treated as a bad SOURCE. Wrong-typed values (a list, a dict, an int) are handled by
+  the same guard, since `null` and `123` fail identically downstream.
+
+  This was found during the 0.5.0 review and deferred as non-blocking. That was the
+  wrong call — it is a crash on the main path, reachable from any source, and it
+  should not have shipped.
+
 ## [0.5.0] - 2026-07-31
 
 Two things, and the smaller headline is the more important one.

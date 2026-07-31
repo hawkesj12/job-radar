@@ -44,8 +44,40 @@ def _src_pref(p) -> int:
     return _GOOGLE_PREF if src == "google_jobs" else _AGGREGATOR_PREF
 
 
+# Every text field the pipeline treats as a string. A JSON `null` from any of ~500
+# third parties arrives as None, and `.get(k, "")` does NOT protect against it — the
+# default only fires when the key is ABSENT, so a present-but-null title yields None
+# and the first `.lower()` raises. That crash escaped `harvest`'s per-source error
+# handling entirely, because `_consume` runs OUTSIDE both try blocks: one malformed
+# posting killed the whole run, discarded a completed network harvest, and skipped
+# the "keep your existing shortlist" guard on the way out. Coerce once, here, at the
+# only boundary every posting from every adapter has to cross.
+_TEXT_FIELDS = (
+    "title",
+    "company",
+    "location",
+    "url",
+    "posted",
+    "text",
+    "department",
+    "employment_type",
+    "salary",
+    "industry",
+    "source",
+)
+
+
+def _coerce(p: dict) -> dict:
+    for k in _TEXT_FIELDS:
+        v = p.get(k)
+        if not isinstance(v, str):
+            p[k] = "" if v is None else str(v)
+    return p
+
+
 def _consume(postings, hits, blocks, cfg, meta):
     for p in postings:
+        _coerce(p)
         if not relevant(p.get("title", ""), cfg):
             continue
         if not is_remote(p, cfg):

@@ -680,6 +680,58 @@ def test_scoring_knobs_are_pinned_to_an_absolute_score():
     )
 
 
+def test_one_malformed_posting_cannot_kill_the_whole_harvest(monkeypatch):
+    """A JSON `null` from any of ~500 third parties used to abort the entire run.
+
+    `.get(k, "")` does not protect against it — the default fires only when the key
+    is ABSENT, so a present-but-null title yields None and the first `.lower()`
+    raises. Worse, `_consume` runs OUTSIDE both of `harvest`'s try blocks, so the
+    crash escaped the per-source error handling, threw away a completed network
+    harvest, and skipped the keep-your-existing-shortlist guard on the way out."""
+    cfg = config.Config(remote_only=True, min_score=0)
+    config.set_active(cfg)
+
+    def hostile(queries):
+        return [
+            # every field null
+            {
+                "title": None,
+                "company": None,
+                "location": None,
+                "url": None,
+                "posted": None,
+                "text": None,
+                "source": "evil",
+            },
+            # present but the wrong TYPE — the other half of the same bug
+            {
+                "title": 123,
+                "company": ["a"],
+                "location": {"x": 1},
+                "url": "https://x/2",
+                "posted": 0,
+                "text": None,
+                "source": "evil",
+            },
+            # and a perfectly good role behind them, which must still arrive
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/3",
+                "posted": "2026-07-10",
+                "text": "Build RAG agentic LLM systems.",
+                "source": "evil",
+            },
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("evil", hostile)])
+    rows, _, errors = engine.harvest(cfg, watchlist_path=None)
+    assert [r["title"] for r in rows] == ["AI Engineer"]
+    assert errors == []  # a bad ROW is not a bad SOURCE
+
+
 def test_harvest_surfaces_broken_source(monkeypatch):
     cfg = config.Config()
     config.set_active(cfg)
