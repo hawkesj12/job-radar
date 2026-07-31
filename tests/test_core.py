@@ -74,6 +74,21 @@ def test_google_jobs_config_block_is_actually_read(tmp_path):
     assert c.google_jobs_pages == 3
 
 
+def test_new_scoring_and_funnel_knobs_are_actually_read(tmp_path):
+    """Both knobs added for the v0.5.0 blockers are documented in the shipped example
+    config, and a documented knob with no loader is worse than an undocumented one —
+    it reads as a supported setting and silently does nothing. `score_k1` shipped
+    exactly that way for the length of one commit."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(
+        "scoring:\n  score_k1: 2.5\nsources:\n  funnel:\n    max_probes_per_run: 7\n",
+        encoding="utf-8",
+    )
+    c = config.load_config(p)
+    assert c.score_k1 == 2.5
+    assert c.funnel_max_probes_per_run == 7
+
+
 def test_shipped_example_config_enables_every_adapter(tmp_path):
     """`job-radar init` writes this file verbatim, and an explicit list is a SUBSET
     filter — so anything missing here is silently off for every new user. Workday
@@ -573,6 +588,77 @@ def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
     assert ai[0]["sources"] == {"adzuna", "google_jobs"}  # both credited
 
 
+@pytest.mark.parametrize("employer_first", [True, False])
+def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer_first):
+    """The merged row must carry the EMPLOYER's ATS link, even though the aggregator's
+    stub scores higher.
+
+    This is the product promise ("routes you to the source") and it was inverted:
+    the tiebreak led with the fit score, and the score rewarded brevity, so an
+    80-word aggregator stub beat the company's own 15,000-character posting. Measured
+    on live boards, 70-88% of merged roles handed the user a redirect. Parametrized
+    over arrival order because a tiebreak that depends on which fetch finished first
+    is not a tiebreak."""
+    cfg = config.Config(remote_only=True, min_score=0)
+    config.set_active(cfg)
+    full = "Build RAG agentic LLM systems. " + ("responsibilities and detail. " * 200)
+    employer = {
+        "title": "AI Engineer",
+        "company": "Acme",
+        "location": "Remote",
+        "url": "https://boards.greenhouse.io/acme/jobs/1",
+        "posted": "2026-07-12",
+        "text": full,
+        "source": "greenhouse",
+    }
+    aggregator = {
+        "title": "AI Engineer",
+        "company": "Acme",
+        "location": "Remote",
+        "url": "https://remoteok.com/redirect/9999",
+        "posted": "2026-07-12",
+        "text": "Build RAG agentic LLM systems.",  # the short, score-inflated stub
+        "source": "remoteok",
+    }
+    order = [employer, aggregator] if employer_first else [aggregator, employer]
+    # The stub really does score higher — the point is that it must not decide.
+    assert (
+        scoring.score_and_signals(aggregator, cfg=cfg)[0]
+        > scoring.score_and_signals(employer, cfg=cfg)[0]
+    )
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(
+        engine, "enabled_breadth", lambda c: [("fake", lambda q: order)]
+    )
+    rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://boards.greenhouse.io/acme/jobs/1"
+    assert rows[0]["text"] == full  # and the complete body, not the stub
+    assert rows[0]["sources"] == {"greenhouse", "remoteok"}
+
+
+def test_scoring_knobs_are_pinned_to_an_absolute_score():
+    """A fixed posting must score a fixed number. Every other scoring test asserts a
+    RELATIVE property (A > B), which stays true under a global rescale — so
+    avg_jd_tokens could be 400 or 16000 and nothing went red. It was 400, wrong by
+    4x, for three releases. This is the tripwire for that class of drift."""
+    cfg = config.Config()
+    config.set_active(cfg)
+    p = {
+        "title": "AI Engineer",
+        "company": "Acme",
+        "location": "Remote",
+        "text": "Build RAG and agentic LLM systems with retrieval and evals. " * 20,
+    }
+    score, _ = scoring.score_and_signals(p, cfg=cfg)
+    assert score == 41, (
+        f"scoring output moved to {score}. If that was deliberate, update this "
+        "number and say why in the CHANGELOG — the knobs (avg_jd_tokens, score_k1, "
+        "score_len_b, the caps) all land here."
+    )
+
+
 def test_harvest_surfaces_broken_source(monkeypatch):
     cfg = config.Config()
     config.set_active(cfg)
@@ -793,17 +879,35 @@ def test_scoring_matches_bruteforce_reference():
         raw = sum(w for w, _ in bh)
         dl = len(_re.findall(r"[a-z0-9]+", blob))
         norm = (1 - c.score_len_b) + c.score_len_b * (dl / c.avg_jd_tokens)
-        body = min(raw / norm if norm > 0 else raw, c.blob_score_cap)
+        # BM25 with tf == 1 (presence-based scoring), matching production. Kept as
+        # the explicit closed form rather than calling into scoring.py — a reference
+        # that imports the thing it is checking proves nothing.
+        body = min(
+            raw * (c.score_k1 + 1) / (1 + c.score_k1 * norm) if norm > 0 else raw,
+            c.blob_score_cap,
+        )
         tl = p.get("title", "").lower()
         body += min(
             sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap
         )
         body -= sum(w for kw, w in c.title_penalty.items() if util.has(kw, tl))
         ab = f"{p.get('company', '')} {p.get('text', '')}".lower()
-        body -= sum(w for kw, w in c.agency_penalty.items() if util.has(kw, ab))
+        # CAPPED, matching production. This line read `body -= sum(...)` — uncapped —
+        # for the whole life of the agency_penalty_cap change, and the gate still
+        # passed, because the vocab below could not produce a single agency keyword.
+        # Forced to one, production scored 49 against this reference's -44.
+        body -= min(
+            sum(w for kw, w in c.agency_penalty.items() if util.has(kw, ab)),
+            c.agency_penalty_cap,
+        )
         sig = ", ".join(kw for _, kw in sorted(bh, reverse=True)[:7])
         return round(body), sig
 
+    # The corpus has to be able to REACH every branch the reference models. It could
+    # not: none of these words is an agency_penalty key ("staff" is not "staffing" —
+    # `has` matches whole words), so the agency term was 0 on both sides of every one
+    # of the 2000 comparisons and the branch was never compared at all. The agency
+    # phrases below are what make this an equivalence gate rather than a ritual.
     vocab = list(fw) + [
         "python",
         "remote",
@@ -818,6 +922,24 @@ def test_scoring_matches_bruteforce_reference():
         "onsite",
         "systems",
         "team",
+        # agency_penalty keys — singles and multi-word, so both the set-membership
+        # and the first-token-prefilter paths in `_present` are exercised.
+        "staffing",
+        "recruiter",
+        "c2c",
+        "consultancy",
+        "our client",
+        "staffing agency",
+        "staff augmentation",
+        "contract-to-hire",
+        "multiple clients",
+        "talent solutions",
+        "consulting firm",
+        "staffing firm",
+        # title_penalty keys, for the same reason.
+        "research scientist",
+        "ai researcher",
+        "member of technical staff",
     ]
     rnd = random.Random(1234)
     for _ in range(2000):
@@ -1112,6 +1234,46 @@ def test_funnel_drops_a_slug_with_no_live_roles(monkeypatch):
     monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda slug, **kw: 0)
     posts = [_post("Newco", "AI Engineer", 40, "https://jobs.lever.co/newco/1")]
     assert funnel.funnel(posts, set(), set(), c) == []
+
+
+def test_funnel_stops_at_the_probe_budget_not_the_candidate_count(monkeypatch):
+    """Dead candidates must stop costing requests once the probe budget is spent.
+
+    `max_new_per_run` counts SUCCESSES, so a run where every slug is dead never
+    incremented it and never hit its break — the funnel probed every candidate,
+    serially, on every scan, with auto_grow on by default. 150 dead candidates
+    measured at ~60 seconds of third-party traffic to add zero companies."""
+    c = config.Config(funnel_max_probes_per_run=10, funnel_max_new_per_run=25)
+    config.set_active(c)
+    probed = []
+
+    def dead(ats):
+        def probe(slug, **kw):
+            probed.append(slug)
+            return 0  # every slug is dead — nothing is ever "added"
+
+        return probe
+
+    monkeypatch.setattr(funnel, "liveness_for", dead)
+    posts = [
+        _post(f"Co{i}", "AI Engineer", 40, f"https://jobs.lever.co/co{i}/1")
+        for i in range(150)
+    ]
+    assert funnel.funnel(posts, set(), set(), c) == []
+    assert len(probed) == 10, f"probed {len(probed)} of 150 — budget not enforced"
+
+
+def test_funnel_probe_budget_does_not_cap_a_healthy_run_early(monkeypatch):
+    """The budget must bound WASTE, not discovery: with live slugs, the run should
+    still reach max_new_per_run rather than stopping at the probe budget."""
+    c = config.Config(funnel_max_probes_per_run=50, funnel_max_new_per_run=5)
+    config.set_active(c)
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda slug, **kw: 7)
+    posts = [
+        _post(f"Live{i}", "AI Engineer", 40, f"https://jobs.lever.co/live{i}/1")
+        for i in range(40)
+    ]
+    assert len(funnel.funnel(posts, set(), set(), c)) == 5
 
 
 def test_seed_writes_the_workday_triple(tmp_path, monkeypatch):

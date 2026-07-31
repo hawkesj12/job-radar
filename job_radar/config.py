@@ -232,6 +232,18 @@ class Config:
     frontier_penalty: int = 10
     local_bonus: int = 10
     score_len_b: float = 0.75
+    # BM25's term-frequency saturation parameter. It was MISSING, and its absence is
+    # not a detail: `raw / norm` is the k1 -> infinity limit of BM25, where
+    # saturation is switched off entirely. Because `norm` bottoms out at
+    # `1 - score_len_b` = 0.25, a very short document had its score MULTIPLIED by up
+    # to 4x -- a floor no value of avg_jd_tokens can move, since raising it shrinks
+    # the divisor for long and short documents alike. The measured consequence: an
+    # 80-word aggregator stub outscored the same role's full employer description,
+    # so 14 of 20 merged roles handed the user an aggregator redirect instead of the
+    # company's own ATS link. Scoring here is presence-based (tf is always 1), so
+    # BM25 reduces to raw*(k1+1)/(1+k1*norm). 1.2 is the literature default and
+    # measured best on a live board: aggregator-vs-employer wins 16/20 -> 7/20.
+    score_k1: float = 1.2
     # The "normal" JD length the BM25 length penalty divides by. Was 400, which is
     # roughly a job-board SUMMARY -- but this tool reads full ATS descriptions, and
     # the real median measured across a live Greenhouse board is ~1590 tokens, 4x
@@ -307,6 +319,13 @@ class Config:
     )
     funnel_auto_grow: bool = True
     funnel_max_new_per_run: int = 25
+    # A budget on PROBES ATTEMPTED, which max_new_per_run is not. That one counts
+    # successes, and a dead slug is not a success -- so it never incremented, the
+    # loop never hit its break, and every candidate got probed serially. Measured:
+    # 150 dead candidates = 150 requests, ~60 seconds, 0 companies added, on every
+    # scan, with auto_grow on by default. Discovery is incremental and runs each
+    # time, so a bounded budget defers work rather than losing it.
+    funnel_max_probes_per_run: int = 50
     # http
     timeout: int = 25
     user_agent: str = "job-radar/1.0 (https://github.com/hawkesj12/job-radar)"
@@ -414,6 +433,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("agency_penalties", "agency_penalty"),
         ("local_bonus", "local_bonus"),
         ("length_norm_b", "score_len_b"),
+        ("score_k1", "score_k1"),
         ("avg_jd_tokens", "avg_jd_tokens"),
         ("body_cap", "blob_score_cap"),
         ("title_cap", "title_score_cap"),
@@ -453,6 +473,9 @@ def load_config(path: str | os.PathLike | None) -> Config:
         )
     if isinstance(srcs.get("funnel"), dict):
         cfg.funnel_auto_grow = srcs["funnel"].get("auto_grow", cfg.funnel_auto_grow)
+        cfg.funnel_max_probes_per_run = srcs["funnel"].get(
+            "max_probes_per_run", cfg.funnel_max_probes_per_run
+        )
         cfg.funnel_max_new_per_run = srcs["funnel"].get(
             "max_new_per_run", cfg.funnel_max_new_per_run
         )
