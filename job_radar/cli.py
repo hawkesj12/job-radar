@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import config, engine, funnel, llm, shortlist
+from . import __version__, config, engine, funnel, llm, shortlist
 from .dedup import dedup_key
 from .util import today_et
 
@@ -256,6 +256,17 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(
         prog="job-radar", description="Find roles that fit you.", parents=[common]
+    )
+    # Top level only, deliberately NOT on `common`: attaching it to every subparser
+    # would make `job-radar list --version` print a version and exit, which reads
+    # like the subcommand did something. It also reports the INSTALLED package's
+    # version (job_radar.__version__ is what setuptools packages from), so running
+    # this from a clone and from a wheel answer the same question honestly.
+    ap.add_argument(
+        "--version",
+        action="version",
+        version=f"job-radar {__version__}",
+        help="print the installed version and exit",
     )
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser(

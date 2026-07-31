@@ -638,6 +638,27 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
     assert rows[0]["sources"] == {"greenhouse", "remoteok"}
 
 
+def test_version_flag_reports_the_installed_version(capsys):
+    """`--version` is the first thing anyone types at an unfamiliar CLI, and it is
+    what a packaging smoke test calls to prove the entry point works at all. It must
+    print job_radar.__version__ — the same string setuptools packages — and exit 0."""
+    from job_radar import __version__
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.strip() == f"job-radar {__version__}"
+
+
+def test_version_flag_does_not_short_circuit_a_subcommand():
+    """Attached to the top level only. On `common` it would ride along to every
+    subparser, so `job-radar list --version` would print a version and exit 0 —
+    looking like the subcommand ran."""
+    with pytest.raises(SystemExit) as e:
+        cli.main(["list", "--version"])
+    assert e.value.code == 2  # argparse: unrecognized argument
+
+
 def test_scoring_knobs_are_pinned_to_an_absolute_score():
     """A fixed posting must score a fixed number. Every other scoring test asserts a
     RELATIVE property (A > B), which stays true under a global rescale — so

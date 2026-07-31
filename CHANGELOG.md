@@ -46,6 +46,10 @@ preference breaks ties, it never contributes points.
   silently ages into a lie.
 - **`sources.google_jobs.{key_env,pages}`** in the config file, with a loader, so
   the knob the example config documents is one the code actually reads.
+- **`job-radar --version`.** It had none — the first thing anyone types at an
+  unfamiliar CLI, and what a packaging smoke test calls to prove the entry point
+  works. Top level only, so `job-radar list --version` is still an error rather than
+  quietly printing a version instead of running the subcommand.
 
 ### Caller-visible: the fit score changed
 

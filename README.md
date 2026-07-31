@@ -11,6 +11,7 @@ job-radar init                              # write a starter job-radar.yaml + w
 job-radar                                   # scan → ranked shortlist.csv
 job-radar apply <id>                        # mark a role applied (it stops resurfacing)
 job-radar list                              # see your current shortlist
+job-radar --version                         # which version am I running?
 ```
 
 Runs on Linux, macOS, and Windows, Python 3.10 or newer.
