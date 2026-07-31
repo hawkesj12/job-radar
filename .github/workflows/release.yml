@@ -1,28 +1,131 @@
 name: Release
 
-# Publishes to PyPI when you publish a GitHub Release (tag a version → Release).
-# Uses PyPI Trusted Publishing (OIDC) — no API token stored in the repo.
-# One-time setup: on pypi.org → the job-radar project → Publishing, add a trusted
-# publisher for repo hawkesj12/job-radar, workflow "release.yml", environment "pypi".
+# TWO ways in, by design:
+#   • push a v* TAG   → publish to REAL PyPI + cut a GitHub Release (production).
+#   • run manually    → publish to TestPyPI only, no GitHub Release (a rehearsal).
+# A manual run can NEVER reach real PyPI — production is tag-only — so the
+# rehearsal is safe to fire anytime, and it exercises the same build → version →
+# twine → publish spine the tag path uses.
+#
+# This replaces an `on: release: [published]` trigger that published whatever was
+# on the tag WITHOUT running a single test (a tag push fires neither push-to-main
+# nor pull_request) and without checking that the tag matched the packaged
+# version. It had never actually run: every release 0.2.0–0.4.1 was uploaded by
+# hand from a laptop.
+#
+# One-time setup, per index (Trusted Publishing, so no token is ever stored here):
+#   pypi.org      → job-radar → Publishing → GitHub, hawkesj12/job-radar,
+#                   workflow "release.yml", environment "pypi"
+#   test.pypi.org → pending publisher, same repo/workflow, environment "testpypi"
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
-  pypi:
+  # Re-run the full 12-cell suite on the commit being released. Without this a
+  # release publishes having run no tests at all — the gap that let a package
+  # broken on Windows ship five times.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write # OIDC token for Trusted Publishing
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # no push needed; keeps the token out of .git/config
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Build
+
+      - name: Build sdist + wheel
         run: |
-          python -m pip install --upgrade build
-          python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          python -m pip install --upgrade pip build
+          python -m build --sdist --wheel --outdir dist
+
+      - name: Verify the tag matches the packaged version
+        # Tag runs only. A tag of v0.4.2 that ships 0.4.1 is unrecoverable once
+        # published, because a PyPI version can never be replaced or reused. A
+        # manual rehearsal has no tag, so this check is skipped there.
+        # The version is dynamic (setuptools reads job_radar.__version__), so ask
+        # the built metadata rather than parsing pyproject.toml.
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('job_radar/__init__.py').read_text()).group(1))")"
+          echo "tag=$TAG  package=$PKG"
+          [ "$TAG" = "$PKG" ] || { echo "MISMATCH: tag $TAG != packaged $PKG"; exit 1; }
+
+      - name: Check metadata renders on the index
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # The GitHub environment gates which trusted publisher the OIDC token maps to:
+    #   push (tag) → 'pypi'      → the real-PyPI publisher
+    #   dispatch   → 'testpypi'  → the TestPyPI publisher
+    # Safe from the ternary trap below because BOTH values are non-empty (truthy).
+    environment: ${{ github.event_name == 'push' && 'pypi' || 'testpypi' }}
+    permissions:
+      # REQUIRED for Trusted Publishing: mints the short-lived OIDC token the index
+      # exchanges for a 15-minute, project-scoped upload token. No stored secret.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        with:
+          # GitHub Actions has no real ternary — `A && B || C` only works when B is
+          # TRUTHY. An empty string is FALSY, so `event=='push' && '' || testpypi`
+          # would ALWAYS fall through to TestPyPI, even on a tag. Fix: put the
+          # non-empty value on the true side. On a tag push this is false → falls
+          # through to '' → the action's default (real PyPI); a manual rehearsal is
+          # true → TestPyPI.
+          repository-url: ${{ github.event_name != 'push' && 'https://test.pypi.org/legacy/' || '' }}
+
+  # Tag runs only — a rehearsal must not cut a public Release.
+  github-release:
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creating a Release writes to the repo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - name: Create the GitHub Release from the changelog
+        # pypa/gh-action-pypi-publish publishes to the index and nothing else —
+        # creating a Release is explicitly outside its scope, so it happens here.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="$VER" '$0 ~ "^## \\["v"\\]"{f=1;next} /^## \[/{f=0} f' CHANGELOG.md \
+            | sed '/./,$!d' > notes.md
+          if [ -s notes.md ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          fi
