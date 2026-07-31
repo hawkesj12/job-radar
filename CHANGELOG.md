@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-07-31
+
+job-radar did not work on Windows. Not "had rough edges" — `import job_radar`
+raised, so every command failed on every released version, 0.2.0 through 0.4.1.
+CI had only ever run on Linux, so nothing contradicted the 0.2.0 entry below
+claiming Windows was supported.
+
+### Fixed
+
+- **`tzdata` is now a dependency on Windows** (`sys_platform == 'win32'`). Windows
+  ships no system time-zone database, so `zoneinfo` has nothing to read and
+  `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError`. Both `util.py` and
+  `sources.py` construct that object at **module level**, so the failure landed on
+  import rather than on a date calculation — the package was unusable, not merely
+  wrong about times. Linux and macOS have a system tzdb and are unaffected, hence
+  the environment marker instead of an unconditional dependency.
+
+### Changed
+
+- **CI now runs on Linux, macOS, and Windows** across Python 3.10–3.13 (12 cells,
+  was 4 on Linux only), and adds `mypy`. The Windows cells found the bug above on
+  their first execution. A wheel end-to-end step also builds the artifact, installs
+  it into a clean virtualenv, and runs `job-radar init` from outside the repo —
+  the editable install the tests use cannot prove `package-data` shipped.
+- Dependabot now tracks GitHub Actions and pip, with the workflow actions pinned by
+  commit SHA rather than a mutable tag.
+- Type annotations on the `DEPTH_ALL`/`LIVENESS` registries and `discover.known_keys`,
+  whose deliberately non-uniform key shape (a 3-tuple for Workday, a 2-tuple
+  otherwise) is now documented rather than implied. No behaviour change.
+- The version sections in this file were out of chronological order — 0.4.1 sat
+  between 0.3.2 and 0.3.1. Reordered, content untouched.
+
+### Known issues
+
+- The `[Unreleased]` section below is stale: its contents shipped with 0.3.0 and it
+  has not been folded into that entry.
+
+## [0.4.1] - 2026-07-23
+
+### Fixed
+
+- `discover.name_variants` leaked a bare generic word when normalization collapsed a
+  multi-word name to one token. `_norm_name` strips trade words (`group`, `company`,
+  `holdings`, `the`), so `Capital Group` reduced to `capital` and the "conservative"
+  variants WERE that bare word — no `aggressive` opt-in, no ownership check — producing
+  a real false binding (`Capital Group` -> `lever/capital`, Capital.com's board). The
+  gate now fires only when a TRADE word caused the collapse; a legal-suffix-only
+  collapse (`ACME LLC` -> `acme`) is still a valid slug and is preserved.
+
 ## [0.4.0] - 2026-07-22
 
 Discovery stops using a full job harvest to answer a yes/no question. Confirming
@@ -121,18 +170,6 @@ the one place a caller looks. No behaviour changed except the one item noted bel
   `WORKDAY_DETAIL_WORKERS` already did. Default unchanged at 10. It was the only
   Workday knob that could not be tuned, and documenting an unadjustable cap is half
   a fix.
-
-## [0.4.1] - 2026-07-23
-
-### Fixed
-
-- `discover.name_variants` leaked a bare generic word when normalization collapsed a
-  multi-word name to one token. `_norm_name` strips trade words (`group`, `company`,
-  `holdings`, `the`), so `Capital Group` reduced to `capital` and the "conservative"
-  variants WERE that bare word — no `aggressive` opt-in, no ownership check — producing
-  a real false binding (`Capital Group` -> `lever/capital`, Capital.com's board). The
-  gate now fires only when a TRADE word caused the collapse; a legal-suffix-only
-  collapse (`ACME LLC` -> `acme`) is still a valid slug and is preserved.
 
 ## [0.3.1] - 2026-07-22
 
