@@ -261,6 +261,15 @@ class Config:
     breadth_sources: list | None = None
     adzuna_app_id_env: str = "ADZUNA_APP_ID"
     adzuna_app_key_env: str = "ADZUNA_APP_KEY"
+    # Google for Jobs via SerpApi — the meta-aggregator that indexes company career
+    # sites + enterprise ATSs (Workday, iCIMS) Google crawled, queryable by title +
+    # location like Adzuna/USAJOBS (no per-tenant polling). Metered: SerpApi's free
+    # tier is 250 searches/mo, and each PAGE is one search, so default to a single
+    # page (~10 roles/query) and raise GOOGLE_JOBS_PAGES only when the quota allows.
+    serpapi_key_env: str = "SERPAPI_KEY"
+    google_jobs_pages: int = field(
+        default_factory=lambda: _env_int("GOOGLE_JOBS_PAGES", 1)
+    )
     # Pages to pull per query. Adzuna caps a page at 50 results, so N pages ≈ N×50
     # jobs/query before dedup; a selective filter (e.g. remote-only) then carves it
     # down, so fetch generously. Env-overridable for prod tuning without a redeploy.
@@ -349,6 +358,9 @@ def load_config(path: str | os.PathLike | None) -> Config:
             "app_key_env", cfg.adzuna_app_key_env
         )
         cfg.adzuna_pages = srcs["adzuna"].get("pages", cfg.adzuna_pages)
+    if isinstance(srcs.get("google_jobs"), dict):
+        cfg.serpapi_key_env = srcs["google_jobs"].get("key_env", cfg.serpapi_key_env)
+        cfg.google_jobs_pages = srcs["google_jobs"].get("pages", cfg.google_jobs_pages)
     if isinstance(srcs.get("usajobs"), dict):
         cfg.usajobs_results_per_page = srcs["usajobs"].get(
             "results_per_page", cfg.usajobs_results_per_page

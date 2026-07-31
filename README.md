@@ -1,6 +1,6 @@
 # job-radar
 
-**Scan the open job market in about a minute** — your watchlist of companies plus ten aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
+**Scan the open job market in about a minute** — your watchlist of companies plus eleven aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
 
 Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
 
@@ -17,7 +17,7 @@ job-radar list                              # see your current shortlist
 
 ## What it does
 
-1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday), so you see roles the hour they post. Workday is the enterprise one: it reaches the manufacturers, insurers, hospitals, municipalities and national labs that never appear on the startup boards. _Breadth_ — queries free aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, USAJOBS, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market.
+1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday), so you see roles the hour they post. Workday is the enterprise one: it reaches the manufacturers, insurers, hospitals, municipalities and national labs that never appear on the startup boards. _Breadth_ — queries aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, USAJOBS, Google for Jobs, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market. Google for Jobs is the meta-aggregator: it indexes company career sites and enterprise ATSs (Workday, iCIMS) that no single feed exposes, and job-radar keeps its **direct-to-employer** apply link rather than an aggregator redirect.
 2. **Scores every role on one comparable scale** — a transparent, weighted keyword model (BM25 length-normalized) you fully control in the config. It's tuned for _recall_ by design (catch everything that might fit); the optional LLM re-rank below is the _precision_ layer.
 3. **De-duplicates** the same role across sources into one entry.
 4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` (also `lever`, `ashby`, `workable`, `smartrecruiters`, `workday`) does one Common Crawl pass to enumerate the companies hosting a public board on that ATS and bulk-adds them — up to `--max` per run (default 500). Add `--verify` to probe each board and keep only the live ones. A couple of `seed` runs build out a several-hundred-company watchlist.
@@ -49,7 +49,7 @@ Out of the box it's tuned for **remote software/AI** roles, because the shipped 
 
 - **Any field:** change `signal_titles` + `fit_weights` in the config to your field's language (nursing, finance, trades…). No code.
 - **On-site / any location:** set `remote_only: false` and `location: "Your City, ST"`.
-- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna** and **USAJOBS** (free keys; every field, any location, where the whole market lives).
+- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna**, **USAJOBS**, and **Google for Jobs** (every field, any location, where the whole market lives). Adzuna and USAJOBS keys are free; Google for Jobs goes through SerpApi, whose free tier is 250 searches a month — each page of results is one search, so `GOOGLE_JOBS_PAGES` defaults to 1.
 
 Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
 
@@ -82,7 +82,8 @@ This is a **personal job-search tool**, not a data-resale product, and it's buil
 - **It rate-limits itself** to each provider's documented limits (e.g. Remotive is capped at 4 calls per run in code) and sends a self-identifying `User-Agent` so providers can see and contact the caller.
 - **It asks for the smallest thing that answers the question.** Checking whether a company's board exists costs **one** request, not a full download of every job on it — for a Workday employer that is 1 request instead of 210, and for Greenhouse 244 KB instead of 4.4 MB. Discovery is where a tool like this can be rude at scale, so that's where the restraint matters most.
 - **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
-- **API keys** (Adzuna, USAJOBS, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's key travels in the request URL per their API design.
+- **API keys** (Adzuna, USAJOBS, SerpApi, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's and SerpApi's keys travel in the request URL per their API designs.
+- **Google for Jobs is reached through SerpApi**, a commercial API that is licensed to query Google — job-radar does not scrape Google itself. It is off unless you set `SERPAPI_KEY`, and metered, so it stays a deliberate opt-in rather than a default cost.
 
 One honest exception to "used as documented": **Workday**. Its CxS endpoint is public and no-auth — it's the same one Workday's own hosted careers-site widget calls — but Workday doesn't publish third-party API documentation for it the way Greenhouse and Lever do. It's a public endpoint used as its own front end uses it, which is a weaker claim than the others on this list, and worth knowing before you point it at hundreds of employers.
 

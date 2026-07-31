@@ -4,8 +4,8 @@ DEPTH  -- per-company ATS feeds (Greenhouse/Lever/Ashby/SmartRecruiters/Workable
           Workday), polled for every company on the watchlist. All official public
           no-auth JSON endpoints.
 BREADTH -- keyword aggregators + whole-board feeds searched across the whole
-          market (Remotive/USAJOBS/Jobicy/Arbeitnow/RemoteOK/Himalayas/Adzuna/HN/
-          Braintrust/TechTree). All official public APIs.
+          market (Remotive/USAJOBS/Jobicy/Arbeitnow/RemoteOK/Himalayas/Adzuna/
+          Google for Jobs/HN/Braintrust/TechTree). All official public APIs.
 
 Every source is a documented public API -- no scraping. (Scraper sources are an
 opt-in extra, off by default; see the README.)
@@ -229,6 +229,141 @@ def _relative_posted(text: str) -> str:
     n, unit = int(m.group(1)), m.group(2).lower()
     days = n * {"day": 1, "week": 7, "month": 30}[unit]
     return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+# ── GOOGLE FOR JOBS (SerpApi) helpers ───────────────────────────────────────
+# Google reports recency as a relative string ('16 hours ago', '3 days ago',
+# '30+ days ago', 'today') — the same rot-in-the-cache trap as Workday's postedOn,
+# so resolve it to an absolute Eastern date at fetch time.
+_G_POSTED = re.compile(r"(\d+)\+?\s*(second|minute|hour|day|week|month)s?\s+ago", re.I)
+_G_UNIT_DAYS = {"second": 0, "minute": 0, "hour": 0, "day": 1, "week": 7, "month": 30}
+
+# Apply-route providers that are AGGREGATORS, not the employer. Google returns an
+# ordered `apply_options`; we prefer the direct-to-company / ATS link (Workday,
+# Greenhouse, a careers page) over these, because a direct link is jobfitr's whole
+# product promise. Matched as a substring of the apply link's host.
+_G_AGGREGATORS = (
+    "linkedin.",
+    "indeed.",
+    "ziprecruiter.",
+    "glassdoor.",
+    "monster.",
+    "bebee.",
+    "jobleads.",
+    "theladders.",
+    "lensa.",
+    "careerbuilder.",
+    "talent.com",
+    "jobrapido.",
+    "bandana.",
+    "snagajob.",
+    "simplyhired.",
+    "adzuna.",
+    "jooble.",
+    "trabajo.",
+)
+
+
+def _google_posted(text: str) -> str:
+    """'16 hours ago' / '3 days ago' / '30+ days ago' / 'today' -> YYYY-MM-DD (ET).
+
+    Sub-day units ('hours'/'minutes' ago) resolve to today; 'today'/'just now' to
+    today, 'yesterday' to yesterday. An unparseable string returns '' (a blank date
+    sinks the role in the freshness filter, which is the safe default for unknown)."""
+    t = str(text or "").strip().lower()
+    if not t:
+        return ""
+    if "today" in t or "just now" in t or "just posted" in t:
+        return datetime.now(_ET).strftime("%Y-%m-%d")
+    if "yesterday" in t:
+        return (datetime.now(_ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _G_POSTED.search(t)
+    if not m:
+        return ""
+    n, unit = int(m.group(1)), m.group(2).lower()
+    days = n * _G_UNIT_DAYS[unit]
+    return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _best_apply_link(apply_options: list, fallback: str = "") -> str:
+    """Pick the direct-to-employer apply link from Google's apply_options, else the
+    first option, else `fallback`. Google orders these by its own preference, so the
+    first non-aggregator link is the best direct-to-company URL available."""
+    links = [o.get("link", "") for o in (apply_options or []) if o.get("link")]
+    for link in links:
+        host = urlparse(link).netloc.lower()
+        if not any(agg in host for agg in _G_AGGREGATORS):
+            return link  # a direct careers/ATS link — jobfitr's preferred target
+    return links[0] if links else fallback
+
+
+def search_google_jobs(queries):
+    """Google for Jobs via SerpApi — keyed, queryable by title + location, exactly
+    like search_adzuna/search_usajobs. Reaches the company-careers + enterprise-ATS
+    roles (Workday, iCIMS) Google indexes that the ATS-specific adapters never see,
+    WITHOUT any per-tenant polling.
+
+    Metered: each page is one SerpApi search (free tier 250/mo), and Google returns
+    ~10 roles/page, so google_jobs_pages defaults to 1. The fit score stays
+    source-agnostic (engine scores by content); Google's edge is realized as the
+    preferred canonical apply link on dedup, not as a score bonus."""
+    cfg = config.active()
+    key = cfg.env(cfg.serpapi_key_env)
+    if not key:
+        print(
+            "  google_jobs: no SERPAPI_KEY set -- skipped (the free sources still run)"
+        )
+        return []
+    # Google for Jobs treats 'remote' as a filter, not a place; pass a real location
+    # through and drop the non-place words (mirrors jobfitr's live-path handling).
+    loc = cfg.location.strip()
+    where = "" if loc.lower() in ("", "remote", "anywhere", "any") else loc
+    pages = max(1, getattr(cfg, "google_jobs_pages", 1))
+    out = []
+    for qy in queries:
+        token = ""
+        for _ in range(pages):
+            url = (
+                f"https://serpapi.com/search.json?engine=google_jobs"
+                f"&q={q(qy)}&api_key={key}&hl=en"
+            )
+            if where:
+                url += f"&location={q(where)}"
+            if token:
+                url += f"&next_page_token={q(token)}"
+            try:
+                data = get_json(url)
+            except NET_ERRORS:
+                break  # a dead page ends this query; other queries still run
+            if data.get("error"):
+                # SerpApi reports quota-exhausted / bad-key as a JSON `error`, not an
+                # HTTP error. Surface it once and stop — retrying burns nothing useful.
+                print(f"  google_jobs: {data['error']}")
+                break
+            for j in data.get("jobs_results", []) or []:
+                ext = j.get("detected_extensions") or {}
+                text = clean(j.get("description", ""))
+                out.append(
+                    {
+                        "title": j.get("title", ""),
+                        "company": j.get("company_name", ""),
+                        "location": j.get("location", ""),
+                        "url": _best_apply_link(
+                            j.get("apply_options"), j.get("share_link", "")
+                        ),
+                        "posted": _google_posted(ext.get("posted_at", "")),
+                        "department": "",
+                        "employment_type": ext.get("schedule_type", ""),
+                        "salary": salary_from_text(text),
+                        "text": text,
+                        "source": "google_jobs",
+                    }
+                )
+            token = (data.get("serpapi_pagination") or {}).get("next_page_token", "")
+            if not token:
+                break  # no more pages for this query
+            time.sleep(0.5)  # be polite between pages of the same query
+    return out
 
 
 def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
@@ -975,6 +1110,7 @@ BREADTH_ALL = {
     "remoteok": search_remoteok,
     "himalayas": search_himalayas,
     "adzuna": search_adzuna,
+    "google_jobs": search_google_jobs,
     "hn": search_hn_whoishiring,
     "braintrust": search_braintrust,
     "techtree": search_techtree,

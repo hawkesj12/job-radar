@@ -61,13 +61,21 @@ filters:
 
 # ── sources: default = all official public APIs ─────────────────────────────
 sources:
-  ats:    [greenhouse, lever, ashby, smartrecruiters, workable]
+  ats:    [greenhouse, lever, ashby, smartrecruiters, workable, workday]
   # adzuna + usajobs are GENERAL (every field, any location) but need free keys —
   # set them and you can search any field / any city, not just remote tech.
-  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, usajobs, hn, braintrust, techtree]
+  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, usajobs, google_jobs, hn, braintrust, techtree]
   adzuna:                 # optional; set these env vars if you have free Adzuna keys
     app_id_env: ADZUNA_APP_ID
     app_key_env: ADZUNA_APP_KEY
+  # Google for Jobs via SerpApi -- the meta-aggregator. It reaches company career
+  # pages and enterprise ATSs (Workday, iCIMS) that Google indexed, and its apply
+  # links go DIRECT to the employer rather than through an aggregator. Metered:
+  # SerpApi's free tier is 250 searches/month and each PAGE is one search, so this
+  # defaults to a single page (~10 roles per query). Skipped silently if unset.
+  google_jobs:
+    key_env: SERPAPI_KEY  # env var holding your SerpApi key
+    pages: 1              # or set GOOGLE_JOBS_PAGES
   funnel:
     auto_grow: true        # discover + add new companies from breadth hits
     max_new_per_run: 25
