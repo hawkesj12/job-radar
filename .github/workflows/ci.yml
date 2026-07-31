@@ -4,24 +4,130 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets release.yml re-run this whole suite on a tagged commit. A tag push fires
+  # neither of the triggers above, so without this a release could publish having
+  # run no tests. Only the TEST half is reusable — Trusted Publishing cannot run
+  # inside a reusable workflow, so the publish job stays in release.yml.
+  workflow_call:
+
+# Least privilege. Without this the job token gets the repo default, which can be
+# broad enough to write contents — far more than a test run needs.
+permissions:
+  contents: read
+
+# Don't burn 12 runners on a commit that's already superseded. Cancelling is only
+# safe on PRs: on main, a cancelled run leaves that commit with NO result, and a
+# required status check has nothing to read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Windows is here as a DETECTOR, not a formality. This tool prints '✓ ⚠ ↳ ★'
+        # and harvests job titles in every language, and Windows defaults text I/O to
+        # the system locale (cp1252) — which does not raise, it mojibakes or dies at
+        # the console boundary. cli.main() reconfigures stdout/stderr to UTF-8 for
+        # exactly this reason, and that guard has never once been executed in CI.
+        # macOS catches case-insensitive-filesystem and BSD-vs-GNU differences.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 3.10 is the floor pyproject.toml advertises (requires-python + classifier),
+        # so it gets tested rather than assumed.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # no push needed; keeps the token out of .git/config
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install (package + dev tools)
+        # Dev tools are PINNED on purpose: unpinned, a new ruff/mypy release turns
+        # main red on a commit that changed nothing. These match the versions the
+        # change was verified against locally, so "green here" and "green on my
+        # machine" mean the same thing. Dependabot bumps them as reviewable PRs.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" ruff
-      - name: Lint
+          pip install -e ".[dev]" ruff==0.15.7 pytest==9.1.1 mypy==1.11.2
+      - name: Lint (ruff)
         run: ruff check .
-      - name: Test
+      - name: Type-check (mypy)
+        # Config (including the rapidfuzz stub exemption) lives in pyproject.toml,
+        # so this is the same invocation a contributor runs locally.
+        run: mypy
+      - name: Test (pytest)
         run: pytest -q
+
+      # The steps above use `pip install -e .` — an EDITABLE install, which points
+      # Python at the source folder. That proves the CODE works here; it cannot
+      # prove the built WHEEL does, because no wheel exists. package-data ships the
+      # starter config and watchlist from job_radar/data/, and `init` is useless
+      # without them — a packaging miss there is invisible to every test above.
+      - name: Wheel installs and works end-to-end
+        shell: bash # Windows runners default to PowerShell; force one syntax
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist_check
+
+          VENV="$PWD/.wheelenv"
+          python -m venv "$VENV"
+          # venv layout differs by platform: Scripts/ on Windows, bin/ elsewhere
+          if [ "$RUNNER_OS" = "Windows" ]; then VBIN="$VENV/Scripts"; else VBIN="$VENV/bin"; fi
+          "$VBIN/python" -m pip install --quiet dist_check/*.whl
+
+          # Run from OUTSIDE the repo. Inside it, `import job_radar` resolves to the
+          # local source folder and the check would pass while proving nothing.
+          cd "$RUNNER_TEMP"
+          "$VBIN/python" -c "import job_radar; print('import OK:', job_radar.__version__)"
+
+          # ── End-to-end, OFFLINE ─────────────────────────────────────────────
+          # NEVER run bare `job-radar` or `job-radar scan` here: this tool's whole
+          # job is polling other people's ATS feeds, and CI must not do that on
+          # every push to every matrix cell. `init` and `list` touch no network.
+          mkdir -p demo && cd demo
+
+          # Prints '✓ created …' — the exact non-ASCII path that dies on a cp1252
+          # console. On Windows this line IS the regression test for cli.main()'s
+          # stdout reconfigure; a UnicodeEncodeError here is a real user-facing bug.
+          "$VBIN/job-radar" init
+
+          test -s job-radar.yaml || { echo "FAIL: init wrote no job-radar.yaml"; exit 1; }
+          test -s watchlist.json || { echo "FAIL: init wrote no watchlist.json"; exit 1; }
+
+          # Proves package-data actually shipped in the wheel rather than only
+          # existing in the source tree: a starter watchlist with real companies.
+          N=$("$VBIN/python" -c "import json;print(len(json.load(open('watchlist.json'))['companies']))")
+          [ "$N" -ge 20 ] || { echo "FAIL: starter watchlist has $N companies — package-data missing?"; exit 1; }
+
+          # init refuses to overwrite; a second run must be a clean no-op, not a clobber.
+          "$VBIN/job-radar" init | grep -q 'kept existing' \
+            || { echo "FAIL: re-init did not preserve existing files"; exit 1; }
+
+          # No shortlist yet — this must exit 0 with a helpful message, not traceback.
+          "$VBIN/job-radar" list | grep -q 'no shortlist yet' \
+            || { echo "FAIL: list on a fresh install did not degrade gracefully"; exit 1; }
+
+          echo "end-to-end OK: init wrote both files, $N companies shipped, list degrades cleanly"
+
+  # One stable check for the branch ruleset to require. Requiring the matrix jobs
+  # by name ("test (ubuntu-latest, 3.10)", …) breaks the moment the matrix
+  # changes; this collapses them into a single gate that survives that.
+  # `if: always()` is load-bearing: without it this job is SKIPPED when a
+  # dependency fails, and a skipped required check does not read as a failure.
+  ci-ok:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs must have succeeded
+        run: |
+          echo "test=${{ needs.test.result }}"
+          [ "${{ needs.test.result }}" = "success" ] || exit 1

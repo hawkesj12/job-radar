@@ -565,14 +565,22 @@ def discover(
     return verified
 
 
-def known_keys(watchlist_path) -> set:
-    """Existing (ats, slug[, site]) keys from a watchlist, for deduping candidates."""
+def known_keys(watchlist_path) -> set[tuple[str, ...]]:
+    """Existing keys from a watchlist, for deduping candidates.
+
+    The shape is DELIBERATELY not uniform, and a caller has to match it: Workday
+    entries are a 3-tuple `(ats, slug, site)` because one tenant hosts several
+    sites that are genuinely different boards, and every other ATS is a 2-tuple
+    `(ats, slug)`. So a caller testing membership must build the same arity for
+    the ATS it is asking about — `("workday", slug)` will never match a key here,
+    which is why `from_names` (2-tuple keys throughout) must not be handed Workday.
+    """
     try:
         with open(watchlist_path, encoding="utf-8") as f:
             companies = json.load(f).get("companies", [])
     except (OSError, json.JSONDecodeError):
         return set()
-    out = set()
+    out: set[tuple[str, ...]] = set()
     for c in companies:
         ats, slug = c.get("ats", ""), (c.get("slug") or "").lower()
         if ats == "workday":
