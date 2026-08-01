@@ -331,18 +331,25 @@ def main(argv=None):
     cfg = _resolve_config(args.config)
     config.set_active(cfg)
 
-    if args.cmd == "init":
-        cmd_init(args, cfg)
-    elif args.cmd in (None, "scan"):
-        cmd_scan(args, cfg)
-    elif args.cmd == "apply":
-        cmd_status(args, cfg, "applied")
-    elif args.cmd == "dismiss":
-        cmd_status(args, cfg, "dismissed")
-    elif args.cmd == "list":
-        cmd_list(args, cfg)
-    elif args.cmd == "seed":
-        cmd_seed(args, cfg)
+    # An unreadable store is the one error that hits EVERY command -- list, apply,
+    # dismiss and scan all load it -- so it is caught once, here, and printed as
+    # advice rather than a codec traceback naming a byte offset.
+    try:
+        if args.cmd == "init":
+            cmd_init(args, cfg)
+        elif args.cmd in (None, "scan"):
+            cmd_scan(args, cfg)
+        elif args.cmd == "apply":
+            cmd_status(args, cfg, "applied")
+        elif args.cmd == "dismiss":
+            cmd_status(args, cfg, "dismissed")
+        elif args.cmd == "list":
+            cmd_list(args, cfg)
+        elif args.cmd == "seed":
+            cmd_seed(args, cfg)
+    except shortlist.ShortlistEncodingError as e:
+        print(f"⚠ {e}")
+        raise SystemExit(1) from None
 
 
 def cmd_seed(args, cfg):

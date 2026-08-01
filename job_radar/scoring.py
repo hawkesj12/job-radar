@@ -105,29 +105,56 @@ def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
     cfg = cfg or config.active()
     fw = cfg.fit_weights
     singles, multis = _kw_index(tuple(fw))
-    blob = f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
-    blob_tokens = _TOKEN_RE.findall(blob)  # tokenize ONCE — reused for length + hits
-    blob_hits = _present(blob, set(blob_tokens), fw, singles, multis)
-    raw = sum(w for w, _ in blob_hits)
-    # BM25-style length normalization: divide the body score by a saturating
-    # length factor so a long JD can't accrue score just by being long, then cap.
-    dl = len(blob_tokens)
-    norm = (1 - cfg.score_len_b) + cfg.score_len_b * (dl / cfg.avg_jd_tokens)
-    # Real BM25, not `raw / norm`. That earlier form is the k1 -> infinity limit,
-    # which removes term-frequency saturation and lets `norm`'s 0.25 floor multiply a
-    # short document's score by up to 4x. Since every keyword here contributes at
-    # most once (presence-based, tf == 1), BM25's tf*(k1+1)/(tf + k1*norm) collapses
-    # to the expression below, which damps the same length effect without the
-    # runaway multiplier. See Config.score_k1 for the measurement that motivated it.
     k1 = cfg.score_k1
-    body = min(
-        raw * (k1 + 1) / (1 + k1 * norm) if norm > 0 else raw, cfg.blob_score_cap
-    )
+
+    def _stream(text: str, avg: int, cap: int):
+        """One BM25F stream: its keyword hits and its length-normalized score.
+
+        `avg` is THIS stream's own reference length, which is the whole point --
+        ~8 tokens for a title, ~1600 for a body. Scoring both against one average
+        is what made a title-only posting look like a terrible long one.
+        """
+        toks = _TOKEN_RE.findall(text)  # tokenize ONCE — reused for length + hits
+        hits = _present(text, set(toks), fw, singles, multis)
+        raw = sum(w for w, _ in hits)
+        norm = (1 - cfg.score_len_b) + cfg.score_len_b * (len(toks) / avg)
+        val = raw * (k1 + 1) / (1 + k1 * norm) if norm > 0 else raw
+        return hits, min(val, cap), bool(toks)
+
     tl = p.get("title", "").lower()
-    # Title double-count, but CAPPED so a keyword-stuffed title can't run away.
-    title_hits = _present(tl, set(_TOKEN_RE.findall(tl)), fw, singles, multis)
-    body += min(sum(w for w, _ in title_hits), cfg.title_score_cap)
+    # LOCATION belongs to the title stream, not the body. It is short, dense
+    # metadata of exactly the title's character -- and putting it in the body was a
+    # bug the calibration caught: every posting carries a location, so a
+    # description-less feed still looked like it had an "observed" body, the
+    # absent-stream branch below never fired for the one case it exists for, and a
+    # title-only role stayed at 13 against a min_score of 22.
+    head = f"{tl} {p.get('location', '')}".lower()
+    t_hits, t_val, t_seen = _stream(head, cfg.avg_title_tokens, cfg.title_score_cap)
+    b_hits, b_val, b_seen = _stream(
+        p.get("text", "").lower(), cfg.avg_jd_tokens, cfg.blob_score_cap
+    )
+
+    # ABSENT-STREAM RENORMALIZATION. A feed that ships no description has told us
+    # nothing about the body -- it has NOT told us the body is bad. Scoring the
+    # absence as zero would rank a role lower for the accident of which feed it
+    # arrived on, which is exactly the bug: the same role scored 30 with a body and
+    # 18 without, and min_score is 22, so one copy was silently deleted. So
+    # redistribute the weight across the streams actually observed. When both are
+    # present this is a no-op.
+    obs = [(cfg.w_title, t_val, t_seen), (cfg.w_body, b_val, b_seen)]
+    seen_w = sum(w for w, _, ok in obs if ok)
+    total_w = cfg.w_title + cfg.w_body
+    # A weighted SUM (each stream's evidence adds), scaled UP by total/seen when a
+    # stream is missing -- not a weighted average, which would halve every score.
+    if seen_w > 0:
+        body = sum(w * v for w, v, ok in obs if ok) * (total_w / seen_w)
+    else:
+        body = 0.0
     body -= sum(w for kw, w in cfg.title_penalty.items() if has(kw, tl))
+    # Signals are a UNION over streams, not a concatenation: a keyword in both the
+    # title and the body is one signal, and listing it twice would push a genuinely
+    # different signal out of the top n.
+    blob_hits = list({kw: (w, kw) for w, kw in b_hits + t_hits}.values())
     # The agency penalty runs over company + the FULL description, so it was the
     # most expensive line in the program: 13 whole-word regex searches across ~4 KB
     # per posting, measured at 68% of total scoring CPU. `_present` above solves

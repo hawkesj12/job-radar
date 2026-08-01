@@ -6,7 +6,69 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Different openings stopped being merged into one.** A company's `AI Engineer`
+  and `AI Engineer, Ads` were collapsing into a single row, as were `II` vs `III`
+  and `(East)` vs `(West)` — and a merge **discards the loser's apply URL**, so
+  the second role was deleted before you ever saw it. Which copy survived depended
+  on the order the feeds happened to answer in, which is why this was invisible.
+
+  The matcher decided on string similarity alone, and string similarity is
+  positive evidence only — nothing in it could argue _against_ a match. The
+  outcome therefore tracked suffix **length** rather than meaning: `, Payments`
+  was just long enough to fall below the threshold, `, Ads` was not. Titles are
+  now checked for **disqualifying marks** — a seniority/level mark, and a trailing
+  qualifier like `(EU)` or `, Ads` — and a disagreement vetoes the merge before
+  any similarity is consulted. Two different job ids on the same board are also an
+  absolute veto: that is two openings by definition.
+
+  **You will see more duplicate rows**, and that is the intended trade. A wrong
+  merge deletes a job you wanted and hides it; a wrong split shows a redundant row
+  you can ignore. The provenance tiebreak from 0.5.0 still puts the employer's own
+  ATS link first, so the extra row is the redirect, not the real one.
+
+  Honest about the limits: this is a rule-based approximation of proper record
+  linkage, not the real thing — it still contains a hand-tuned threshold. And two
+  postings with **byte-identical** titles on one board still merge, because
+  splitting those would mean putting the job id into the store's primary key,
+  which would orphan every existing row and could reattach an "applied" status to
+  the wrong opening. That is a worse bug than the one it would fix.
+
+- **A role is no longer dropped for arriving on a feed that ships no
+  description.** SmartRecruiters (and any feed like it) sends a title and no body.
+  The same role scored 30 through a feed with a description and 18 through one
+  without — and `min_score` is 22, so one copy was silently deleted. The title and
+  the description are now scored as **separate streams**, each measured against
+  its own normal length, and when a feed supplies no description the weighting
+  redistributes onto what it did supply. Measured over 400 postings: **12.5% →
+  100%** of qualifying roles survive losing their description.
+
+  Full-description scores barely move (median +2), so **`min_score` does not need
+  changing** and a config you have tuned stays valid. Title-only roles will appear
+  that never appeared before.
+
+- **A shortlist saved in the wrong encoding no longer bricks every command.**
+  Excel's "Unicode Text" save writes UTF-16, and that raised a raw decoder
+  traceback out of _every_ command — including `apply` and `dismiss`, so you
+  couldn't reach your own file to fix it. UTF-16 now loads; anything genuinely
+  unreadable gets one sentence naming the file and the fix.
+
+### Changed
+
+- **The README's scoring claim was wrong and has been corrected.** It advertised
+  "term-frequency saturation (`score_k1`)". There is none: each keyword counts at
+  most once, so there is no term frequency to saturate — repeating a keyword 1×,
+  5× or 50× scores identically, which is measured and now pinned by a test.
+  `score_k1` is real but it is a _gain_ on length normalization. Counting each
+  keyword once is a deliberate anti-keyword-stuffing choice and is unchanged; only
+  the description of it was false. This also corrects the 0.5.2 entry below, which
+  claimed the BM25 label was "true for the first time" — the length-normalization
+  half was, the saturation half never was.
+- Three `title_penalty` keys were reported as unreachable dead config. They are
+  not: a bare "Research Scientist" is filtered by the relevance gate before
+  scoring, but "AI Research Scientist" reaches it and the penalty fires correctly.
+  Kept, with a test proving it rather than a deletion.
 
 ## [0.5.3] - 2026-07-31
 

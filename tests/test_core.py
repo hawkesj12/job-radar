@@ -801,10 +801,10 @@ def test_scoring_knobs_are_pinned_to_an_absolute_score():
         "text": "Build RAG and agentic LLM systems with retrieval and evals. " * 20,
     }
     score, _ = scoring.score_and_signals(p, cfg=cfg)
-    assert score == 41, (
+    assert score == 40, (
         f"scoring output moved to {score}. If that was deliberate, update this "
         "number and say why in the CHANGELOG — the knobs (avg_jd_tokens, score_k1, "
-        "score_len_b, the caps) all land here."
+        "score_len_b, avg_title_tokens, w_title, w_body, the caps) all land here."
     )
 
 
@@ -1008,25 +1008,183 @@ def test_fuzzy_dedup_rejects_subset_keeps_reorder():
     n = dedup.normalize_title
     assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer - Remote"), c)
     assert not dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Payments"), c)
+    # ...and here is the LIMIT of this layer, pinned so it can't be mistaken for a
+    # guarantee again. ", Ads" is the same kind of distinct opening as
+    # ", Payments", and the ratio gates MERGE it -- they always did. Payments only
+    # separates because its suffix is long enough to drag token_sort_ratio under
+    # the floor, so this test appeared to prove a rule ("a bare title doesn't merge
+    # into a more specific one") that was never true. String similarity cannot see
+    # the difference; only a disqualifier can. The real guarantee now lives in
+    # test_same_role_disqualifiers, and this assertion exists to keep anyone from
+    # re-reading the line above as broader than it is.
+    assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Ads"), c)
+    assert not dedup.same_role("AI Engineer", "AI Engineer, Ads")[0]
     assert dedup.fuzzy_title_match(
         n("Senior AI Engineer"), n("AI Engineer (Senior)"), c
     )
 
 
-def test_title_score_double_count_is_capped():
-    """A keyword-stuffed TITLE can't run away — its double-count is bounded by
-    title_score_cap."""
+# Every case below is a role a user wanted. The 5 splits were all silently merged
+# before the disqualifiers landed, and the merge DISCARDS the loser's apply URL,
+# so each one was a deleted opening the user never saw.
+SAME_ROLE_CASES = [
+    ("AI Engineer", "AI Engineer, Ads", False, "short qualifier"),
+    ("AI Engineer", "AI Engineer, Payments", False, "long qualifier"),
+    ("AI Engineer II", "AI Engineer III", False, "roman level"),
+    ("AI Engineer 2", "AI Engineer III", False, "arabic vs roman level"),
+    ("AI Engineer (East)", "AI Engineer (West)", False, "parenthetical qualifier"),
+    ("Senior AI Engineer", "Staff AI Engineer", False, "seniority"),
+    ("AI Engineer", "AI  Engineer", True, "whitespace only"),
+    ("AI Engineer - Remote", "Remote AI Engineer", True, "reorder + noise"),
+    ("AI Engineer", "AI Engineer", True, "identical"),
+    ("Senior AI Engineer", "AI Engineer (Senior)", True, "level in a parenthetical"),
+    (
+        "Engineer, Machine Learning",
+        "Machine Learning Engineer",
+        True,
+        "comma inversion",
+    ),
+    ("AI Engineer (Remote)", "AI Engineer", True, "work-arrangement qualifier"),
+]
+
+
+@pytest.mark.parametrize("a,b,want,why", SAME_ROLE_CASES)
+def test_same_role_disqualifiers(a, b, want, why):
+    got, reason = dedup.same_role(a, b)
+    assert got is want, f"{why}: {a!r} vs {b!r} -> {got} ({reason})"
+
+
+@pytest.mark.parametrize("a,b,want,why", SAME_ROLE_CASES)
+def test_same_role_disqualifiers_end_to_end(a, b, want, why):
+    """The same cases through the REAL pipeline. Deliberately different sources on
+    each side, so the job-id veto cannot be what does the work -- this proves the
+    title marks fire on their own. Asserts both postings survive the pre-dedup
+    filters first, because otherwise "one hit" would mean "one was filtered out"
+    and the test would pass while proving nothing (an earlier draft of this test
+    read exactly that way on an (EU) title, which exclude_locations drops)."""
+    c = _cfg()
+    body = "ai engineer python llm remote"
+    ps = [
+        {
+            "title": a,
+            "company": "Acme",
+            "location": "Remote",
+            "text": body,
+            "url": "https://boards.greenhouse.io/acme/jobs/1",
+            "source": "greenhouse",
+            "posted": "",
+        },
+        {
+            "title": b,
+            "company": "Acme",
+            "location": "Remote",
+            "text": body,
+            "url": "https://remoteok.com/l/99",
+            "source": "remoteok",
+            "posted": "",
+        },
+    ]
+    for p in ps:
+        assert scoring.relevant(p["title"], c) and scoring.is_remote(p, c), (
+            f"{p['title']!r} never reached dedup -- this test would be vacuous"
+        )
+    hits: dict = {}
+    engine._consume(ps, hits, {}, c, {})
+    assert (len(hits) == 1) is want, f"{why}: got {len(hits)} hits"
+
+
+def test_job_id_veto_splits_two_openings_on_one_board():
+    """Two DIFFERENT job ids on the SAME board are two openings, however alike the
+    titles read -- the strongest signal available, and one the matcher ignored."""
+    c = _cfg()
+    gh = "https://boards.greenhouse.io/acme/jobs/"
+
+    def n_hits(u1, u2):
+        ps = [
+            {
+                "title": t,
+                "company": "Acme",
+                "location": "Remote",
+                "text": "ai engineer python llm remote",
+                "url": u,
+                "source": "greenhouse",
+                "posted": "",
+            }
+            for t, u in (("AI Engineer - Remote", u1), ("Remote AI Engineer", u2))
+        ]
+        hits: dict = {}
+        engine._consume(ps, hits, {}, c, {})
+        return len(hits)
+
+    assert n_hits(gh + "7", gh + "7") == 1  # one opening, re-titled
+    assert n_hits(gh + "7", gh + "8") == 2  # two openings
+
+
+def test_job_id_veto_never_blocks_a_cross_source_merge():
+    """An aggregator redirect exposes no job id, so the veto stays silent and the
+    employer copy still absorbs it. This is the merge the product is built on."""
+    c = _cfg()
+    ps = [
+        {
+            "title": "AI Engineer",
+            "company": "Acme",
+            "location": "Remote",
+            "text": "ai engineer python llm remote",
+            "url": u,
+            "source": s,
+            "posted": "",
+        }
+        for u, s in (
+            ("https://boards.greenhouse.io/acme/jobs/7", "greenhouse"),
+            ("https://remoteok.com/l/99", "remoteok"),
+        )
+    ]
+    hits: dict = {}
+    engine._consume(ps, hits, {}, c, {})
+    assert len(hits) == 1
+    assert "greenhouse.io" in next(iter(hits.values()))["url"]
+
+
+def test_job_ref_returns_none_rather_than_guessing():
+    """None disables the veto. An unrecognized URL must degrade to the old
+    behaviour, never to a fabricated id that would split a real duplicate."""
+    assert dedup.job_ref("https://example.com/careers/123") is None
+    assert dedup.job_ref("https://boards.greenhouse.io/acme") is None  # no job id
+    assert dedup.job_ref("") is None
+    assert dedup.job_ref("https://boards.greenhouse.io/acme/jobs/42") == (
+        "greenhouse",
+        "acme",
+        "42",
+    )
+
+
+def test_a_stuffed_title_cannot_outrank_a_thorough_description():
+    """The GUARANTEE, not the mechanism. This used to assert the arithmetic of the
+    title double-count (`s12 - s0 <= 12`), which the BM25F stream split removed —
+    so the test had to change. It is rewritten to assert the thing the cap was
+    always FOR, which is unchanged and now enforced two ways: title_score_cap
+    bounds the stream, and per-stream length normalization independently damps a
+    long, stuffed title. Asserting the property rather than the formula is what
+    keeps this honest across the next refactor too."""
     stuffed = {
-        "title": "AI Engineer LLM RAG Agentic Founding Remote Senior",
+        "title": "AI Engineer LLM RAG Agentic Founding Remote Senior Staff Lead GenAI",
         "location": "Remote",
-        "text": "x",
+        "text": "",
         "company": "Acme",
     }
-    s0 = scoring.score(stuffed, config.Config(title_score_cap=0))
-    s12 = scoring.score(stuffed, config.Config(title_score_cap=12))
-    s100 = scoring.score(stuffed, config.Config(title_score_cap=100))
-    assert s12 - s0 <= 12  # the cap bounds the title bonus
-    assert s12 < s100  # ...and it actually bites on a stuffed title
+    thorough = {
+        "title": "AI Engineer",
+        "location": "Remote",
+        "company": "Acme",
+        "text": "We are hiring an AI engineer to build llm rag agent pipelines "
+        "in python. " * 40,
+    }
+    c = config.Config()
+    assert scoring.score(thorough, c) > scoring.score(stuffed, c)
+    # ...and the cap still bites, so it hasn't quietly become decorative.
+    assert scoring.score(stuffed, config.Config(title_score_cap=100)) > scoring.score(
+        stuffed, c
+    )
 
 
 def test_seed_degrades_gracefully(tmp_path, monkeypatch):
@@ -1073,24 +1231,35 @@ def test_scoring_matches_bruteforce_reference():
     fw = c.fit_weights
 
     def ref(p):
-        blob = (
-            f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
-        )
-        bh = [(w, kw) for kw, w in fw.items() if util.has(kw, blob)]
-        raw = sum(w for w, _ in bh)
-        dl = len(_re.findall(r"[a-z0-9]+", blob))
-        norm = (1 - c.score_len_b) + c.score_len_b * (dl / c.avg_jd_tokens)
-        # BM25 with tf == 1 (presence-based scoring), matching production. Kept as
-        # the explicit closed form rather than calling into scoring.py — a reference
-        # that imports the thing it is checking proves nothing.
-        body = min(
-            raw * (c.score_k1 + 1) / (1 + c.score_k1 * norm) if norm > 0 else raw,
-            c.blob_score_cap,
-        )
+        # TWO STREAMS, each against its OWN reference length — the BM25F form. Kept
+        # as an explicit closed form rather than calling into scoring.py: a
+        # reference that imports the thing it is checking proves nothing.
+        def stream(text, avg, cap):
+            hits = [(w, kw) for kw, w in fw.items() if util.has(kw, text)]
+            raw = sum(w for w, _ in hits)
+            dl = len(_re.findall(r"[a-z0-9]+", text))
+            norm = (1 - c.score_len_b) + c.score_len_b * (dl / avg)
+            val = raw * (c.score_k1 + 1) / (1 + c.score_k1 * norm) if norm > 0 else raw
+            return hits, min(val, cap), dl > 0
+
         tl = p.get("title", "").lower()
-        body += min(
-            sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap
+        th, tv, ts = stream(
+            f"{tl} {p.get('location', '')}".lower(),
+            c.avg_title_tokens,
+            c.title_score_cap,
         )
+        bth, bv, bs = stream(
+            p.get("text", "").lower(), c.avg_jd_tokens, c.blob_score_cap
+        )
+        obs = [(c.w_title, tv, ts), (c.w_body, bv, bs)]
+        seen = sum(w for w, _, ok in obs if ok)
+        # Absent-stream renormalization, matching production.
+        body = (
+            sum(w * v for w, v, ok in obs if ok) * ((c.w_title + c.w_body) / seen)
+            if seen
+            else 0.0
+        )
+        bh = list({kw: (w, kw) for w, kw in bth + th}.values())
         body -= sum(w for kw, w in c.title_penalty.items() if util.has(kw, tl))
         ab = f"{p.get('company', '')} {p.get('text', '')}".lower()
         # CAPPED, matching production. This line read `body -= sum(...)` — uncapped —
@@ -1521,3 +1690,96 @@ def test_seed_verify_probes_concurrently_and_stops_at_the_limit(tmp_path, monkey
 def test_seed_rejects_an_ats_it_cannot_mine():
     with pytest.raises(ValueError, match="seed not supported"):
         seed.enumerate_entries("myspace")
+
+
+# ── the store's encoding ──────────────────────────────────────────────────────
+def test_utf16_store_loads_instead_of_killing_every_command(tmp_path):
+    """Excel's "Unicode Text" save writes UTF-16. That used to raise a bare
+    UnicodeDecodeError out of load_all -- which sits on the path of EVERY command,
+    so `list`, `apply` and `dismiss` all died and the user could not reach their
+    own file to fix it."""
+    p = tmp_path / "shortlist.csv"
+    p.write_text("id,score,status\nabc,30,new\n", encoding="utf-16")
+    rows = shortlist.load_all(p)
+    assert rows == [{"id": "abc", "score": "30", "status": "new"}]
+
+
+def test_utf8_and_bom_stores_are_unaffected(tmp_path):
+    """The Excel UTF-8-BOM path this function already handled must not regress."""
+    for enc in ("utf-8", "utf-8-sig"):
+        p = tmp_path / f"s-{enc}.csv"
+        p.write_text("id,score\nabc,30\n", encoding=enc)
+        assert shortlist.load_all(p) == [{"id": "abc", "score": "30"}]
+
+
+def test_undecodable_store_fails_loud_but_useful(tmp_path):
+    """Fail fast -- but name the file and the fix, not a byte offset."""
+    p = tmp_path / "shortlist.csv"
+    p.write_bytes(b"id,score\n\xff\xfe\x00garbage\x81\x8d,30\n")
+    with pytest.raises(shortlist.ShortlistEncodingError) as e:
+        shortlist.load_all(p)
+    assert str(p) in str(e.value)
+    assert "CSV UTF-8" in str(e.value)
+
+
+def test_cli_prints_advice_for_an_unreadable_store(tmp_path, capsys):
+    """The whole point: the user gets a sentence they can act on, exit code 1, and
+    no traceback -- on a command that never even needed to parse the file."""
+    p = tmp_path / "shortlist.csv"
+    p.write_bytes(b"id,score\n\xff\xfe\x00garbage\x81\x8d,30\n")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["list", "--out", str(p)])
+    assert e.value.code == 1
+    assert "CSV UTF-8" in capsys.readouterr().out
+
+
+# ── the claims the README makes about scoring ─────────────────────────────────
+def test_repeating_a_keyword_cannot_change_the_score():
+    """The anti-keyword-stuffing guarantee — the property that IS true.
+
+    The README used to sell "term-frequency saturation (score_k1)", which was
+    false: `_present` returns each keyword at most once, so tf is pinned at 1 and
+    there is no term frequency left to saturate. score_k1 is a gain knob on length
+    normalization. This test pins the real guarantee so no future doc can
+    re-acquire the saturation claim by accident."""
+    c = config.Config()
+    scores = {
+        n: scoring.score(
+            {
+                "title": "AI Engineer",
+                "location": "Remote",
+                "text": "ai engineer python " + "rag " * n,
+            },
+            c,
+        )
+        for n in (1, 5, 50)
+    }
+    assert len(set(scores.values())) == 1, (
+        f"repeating a keyword moved the score: {scores}. Presence-based scoring is "
+        "the whole anti-stuffing argument."
+    )
+
+
+def test_score_k1_is_a_gain_knob_not_a_saturation_knob():
+    """...and score_k1 does something real, so it isn't dead config either."""
+    p = {"title": "AI Engineer", "location": "Remote", "text": "ai engineer python rag"}
+    lo = scoring.score(p, config.Config(score_k1=0.1))
+    hi = scoring.score(p, config.Config(score_k1=100))
+    assert lo < hi
+
+
+def test_research_title_penalties_are_reachable():
+    """Reported as unreachable dead config; they are not, and the fix was to prove
+    it rather than delete them. A BARE "Research Scientist" never reaches scoring
+    because `relevant()` filters it first — but the prefixed forms that DO pass the
+    relevance gate are exactly where the penalty is meant to bite."""
+    c = config.Config()
+    for kw in ("research scientist", "quantitative researcher", "member of technical staff"):
+        assert not scoring.relevant(kw, c), f"{kw!r} unexpectedly passes the gate bare"
+        title = f"AI {kw.title()}"
+        assert scoring.relevant(title, c), f"{title!r} should reach scoring"
+        p = {"title": title, "location": "Remote", "text": "ai engineer python"}
+        plain = {"title": "AI Engineer", "location": "Remote", "text": "ai engineer python"}
+        assert scoring.score(p, c) < scoring.score(plain, c), (
+            f"the {kw!r} penalty never fired on {title!r} — it really is unreachable"
+        )

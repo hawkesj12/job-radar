@@ -40,11 +40,23 @@ scoring:
   title_penalties: { research scientist: 8, ai researcher: 6 }
   agency_penalties: { staffing: 8, our client: 12, consultancy: 10 }
   length_norm_b: 0.75      # BM25 length penalty b (0.75 = default)
-  score_k1: 1.2            # BM25 term-frequency saturation. Without it the
-                           # length penalty has no ceiling and a short stub
-                           # outscores a full job description.
+  score_k1: 1.2            # gain on the length penalty. NOT term-frequency
+                           # saturation -- each keyword counts once, so there is
+                           # no term frequency to saturate. Without this the
+                           # penalty has no ceiling and a short stub outscores a
+                           # full job description.
+  # Title and description are scored as SEPARATE streams (BM25F), each against its
+  # own normal length. One shared length norm made a title-only feed look like a
+  # terrible long posting instead of a short one, so the same role was dropped
+  # depending on which feed it arrived on. When a feed ships no description, the
+  # weights renormalize onto the streams actually present.
   avg_jd_tokens: 1600      # reference "normal" JD length (a full ATS description;
                            # measured median ~1590 tokens -- NOT a job-board summary)
+  avg_title_tokens: 8      # reference "normal" title+location length
+  w_title: 2.0             # stream weights. Measured, not taste: this pair is the
+  w_body: 0.75             # only one where a role that clears min_score WITH a
+                           # description still clears it without one (12.5% -> 100%)
+                           # while full-body scores stay put (median +2).
   body_cap: 60             # ceiling on the body keyword score
   tiers: { strong: 30, worth_a_look: 22 }
 
