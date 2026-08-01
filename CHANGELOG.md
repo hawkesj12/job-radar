@@ -25,7 +25,14 @@ remembers what you have applied to.
   terminals — is enough. Both paths now hold an exclusive `flock` across the whole
   read-modify-write.
 
-  Deliberately `flock` rather than a lock FILE. The existing note in
+  Locked on **both** platforms: `fcntl.flock` on POSIX, `msvcrt.locking` on
+  Windows, polled to a deadline because its blocking mode gives up after ten
+  seconds and a scan can run longer. The first attempt fell through to "unlocked"
+  on Windows — so a Windows user would have silently kept the exact bug this
+  fixes. The Windows CI cells caught it, because the test asserts the guarantee
+  rather than the implementation.
+
+  Deliberately an OS lock on a descriptor rather than a lock FILE. The existing note in
   `funnel.append_watchlist` rejects locking because "a lock file only risked getting
   stuck after a crash" — true of lock files, and not of `flock`, which the kernel
   releases when the process dies. Best-effort: a platform without `fcntl` proceeds

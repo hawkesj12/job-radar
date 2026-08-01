@@ -18,6 +18,8 @@ import csv
 import hashlib
 import io
 import os
+import sys
+import time
 from pathlib import Path
 
 from .dedup import dedup_key
@@ -36,33 +38,81 @@ def _exclusive(path):
     and the role resurfaces -- which is exactly the thing this store exists to
     prevent, and the promise the README leads with.
 
-    flock, deliberately, not a lock FILE. The comment in funnel.append_watchlist
-    rejects locking because "a lock file only risked getting stuck after a crash" --
-    correct about lock files, and not true here: an flock is held by the file
-    DESCRIPTOR, so the kernel drops it when the process dies, crash included. There
-    is nothing to get stuck.
+    An OS lock on a descriptor, deliberately, not a lock FILE. The comment in
+    funnel.append_watchlist rejects locking because "a lock file only risked getting
+    stuck after a crash" -- correct about lock files, and not true here: this lock is
+    held by the file DESCRIPTOR, so the kernel drops it when the process dies, crash
+    included. There is nothing to get stuck.
 
-    Best-effort by design: a platform without fcntl (Windows) or a filesystem that
-    refuses the lock (some network mounts) proceeds unlocked rather than refusing to
-    run. Losing the serialization guarantee is bad; refusing to run at all is worse.
+    BOTH platforms are covered. POSIX gets fcntl.flock; Windows has no fcntl, so it
+    gets msvcrt.locking over a one-byte range, polled to a deadline because its
+    blocking mode gives up after ten seconds and a scan can run longer than that.
+    The first version here fell straight through to "unlocked" on Windows, which
+    meant a Windows user silently kept the very bug this function exists to fix --
+    and the Windows CI cells caught it, because the test asserts the guarantee rather
+    than the implementation.
+
+    Still best-effort at the end: a filesystem that refuses the lock (some network
+    mounts) proceeds unserialized rather than refusing to run. Losing the guarantee
+    is bad; refusing to run at all is worse.
     """
     lock_path = Path(str(path) + ".lock")
     fd = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _acquire(fd)
     except (ImportError, OSError, AttributeError):
-        pass  # unlockable platform/filesystem — carry on unserialized
+        pass  # unlockable filesystem — carry on unserialized
     try:
         yield
     finally:
         if fd is not None:
             with contextlib.suppress(OSError):
-                fd_close = fd
-                os.close(fd_close)
+                _release(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+# `sys.platform` rather than try/ImportError, because mypy NARROWS on it: each
+# branch is type-checked only on the platform that runs it. CI runs mypy in every
+# matrix cell, so the Windows branch is checked on Windows and the POSIX branch on
+# Linux and macOS -- an ImportError fallback would leave one of them unchecked
+# everywhere.
+if sys.platform == "win32":
+
+    def _acquire(fd, deadline_s: float = 120.0) -> None:
+        import msvcrt
+
+        # LK_LOCK's own blocking mode gives up after ~10s, which is shorter than a
+        # scan. Poll the non-blocking variant so a long scan is waited out instead.
+        end = time.monotonic() + deadline_s
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= end:
+                    raise
+                time.sleep(0.05)
+
+    def _release(fd) -> None:
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)  # release the same byte range that was locked
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+
+    def _acquire(fd, deadline_s: float = 120.0) -> None:
+        import fcntl  # blocks until the holder releases
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _release(fd) -> None:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 COLUMNS = [
