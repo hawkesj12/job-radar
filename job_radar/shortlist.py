@@ -13,13 +13,57 @@ source, url, signals, dedup_key
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
+import os
 from pathlib import Path
 
 from .dedup import dedup_key
 from .util import age_int, atomic_write_text, today_et
+
+
+@contextlib.contextmanager
+def _exclusive(path):
+    """Hold an exclusive advisory lock across a read-modify-write of the store.
+
+    The write itself is already atomic, so the file can never be torn -- but atomic
+    is not the same as serialized. `upsert` and `mark_status` both LOAD the whole
+    file, change it in memory, and write it back, so two overlapping processes both
+    read the pre-change state and the second write silently discards the first.
+    Measured: `job-radar apply <id>` running during a scan loses the applied status
+    and the role resurfaces -- which is exactly the thing this store exists to
+    prevent, and the promise the README leads with.
+
+    flock, deliberately, not a lock FILE. The comment in funnel.append_watchlist
+    rejects locking because "a lock file only risked getting stuck after a crash" --
+    correct about lock files, and not true here: an flock is held by the file
+    DESCRIPTOR, so the kernel drops it when the process dies, crash included. There
+    is nothing to get stuck.
+
+    Best-effort by design: a platform without fcntl (Windows) or a filesystem that
+    refuses the lock (some network mounts) proceeds unlocked rather than refusing to
+    run. Losing the serialization guarantee is bad; refusing to run at all is worse.
+    """
+    lock_path = Path(str(path) + ".lock")
+    fd = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except (ImportError, OSError, AttributeError):
+        pass  # unlockable platform/filesystem — carry on unserialized
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                fd_close = fd
+                os.close(fd_close)
+
 
 COLUMNS = [
     "id",
@@ -79,7 +123,13 @@ def load_all(path) -> list[dict]:
     p = Path(path)
     if not p.exists():
         return []
-    with p.open(newline="", encoding="utf-8") as f:
+    # utf-8-SIG, not utf-8. Excel writes a UTF-8 BOM when it saves a CSV, and with a
+    # plain utf-8 read those three bytes become part of the FIRST HEADER NAME:
+    # the column is then "﻿id" rather than "id", so every row's `id` lookup
+    # returns None and `apply`/`dismiss` report "no role with id ..." forever. The
+    # file looks perfect in a spreadsheet, which is what makes it so hard to
+    # diagnose. utf-8-sig strips a BOM if present and is identical to utf-8 if not.
+    with p.open(newline="", encoding="utf-8-sig") as f:
         return [dict(row) for row in csv.DictReader(f)]
 
 
@@ -141,6 +191,15 @@ def upsert(
     skip the file write when the caller will annotate + write once itself (the
     LLM path), avoiding a redundant full rewrite."""
     today = today or today_et()
+    # The lock spans the whole read-modify-write, not just the write. A scan that
+    # READ before a concurrent `apply` and WROTE after it would put the pre-apply
+    # rows back, silently un-applying the role -- locking only the write does not
+    # help, because the stale data was already in hand.
+    with _exclusive(path) if write else contextlib.nullcontext():
+        return _upsert_locked(path, postings, today, write)
+
+
+def _upsert_locked(path, postings, today, write):
     existing = load_all(path)
     by_key = {r.get("dedup_key"): r for r in existing if r.get("dedup_key")}
     # A role's URL is stable even when a recruiter re-titles it (which changes its
@@ -180,16 +239,40 @@ def upsert(
     return merged
 
 
-def mark_status(path, job_id: str, status: str) -> bool:
-    rows = load_all(path)
-    hit = False
-    for r in rows:
-        if r.get("id") == job_id:
-            r["status"] = status
-            hit = True
-    if hit:
+def annotate(path, by_key: dict) -> None:
+    """Apply LLM scores/notes to the stored rows, under the lock.
+
+    The LLM path cannot use `upsert(write=True)`: it reads, then makes a network
+    call that can take many seconds, then writes. Writing the rows it read would
+    discard anything that changed during the call -- an `apply`, or a second scan.
+    So re-read here, graft the annotations on by dedup_key, and write that.
+    `by_key` maps dedup_key -> {"llm_score": ..., "llm_note": ...}.
+    """
+    if not by_key:
+        return
+    with _exclusive(path):
+        rows = load_all(path)
+        for r in rows:
+            a = by_key.get(r.get("dedup_key"))
+            if a:
+                r["llm_score"] = a.get("llm_score", r.get("llm_score", ""))
+                r["llm_note"] = a.get("llm_note", r.get("llm_note", ""))
         write_all(path, rows)
-    return hit
+
+
+def mark_status(path, job_id: str, status: str) -> bool:
+    # Read-modify-write under the lock: a concurrent scan reading the pre-change
+    # rows and writing them back is what silently un-applied a role.
+    with _exclusive(path):
+        rows = load_all(path)
+        hit = False
+        for r in rows:
+            if r.get("id") == job_id:
+                r["status"] = status
+                hit = True
+        if hit:
+            write_all(path, rows)
+        return hit
 
 
 def surface(

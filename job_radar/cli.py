@@ -33,7 +33,15 @@ def _resolve_config(path_arg):
     defaults with a notice (see config.without_redirects). Naming the file with
     --config is the opt-in.
     """
-    explicit = bool(path_arg and Path(path_arg).exists())
+    # A named config that is not there is a TYPO, not a cue to look elsewhere. This
+    # used to fall through to ./job-radar.yaml, so `--config ~/tuned.yaml` with a
+    # slip in the path ran happily against a different config and reported nothing —
+    # the same trust problem as the auto-discovery below, on the path where the user
+    # was explicit about what they wanted.
+    if path_arg and not Path(path_arg).exists():
+        print(f"error: --config {path_arg}: no such file", file=sys.stderr)
+        raise SystemExit(2)
+    explicit = bool(path_arg)
     for cand in (path_arg, "job-radar.yaml", "job-radar.example.yaml"):
         if cand and Path(cand).exists():
             cfg = config.load_config(cand)
@@ -148,7 +156,11 @@ def cmd_scan(args, cfg):
             a = ann.get(r.get("dedup_key"))
             if a:
                 r["llm_score"], r["llm_note"] = a["llm_score"], a["llm_note"]
-        shortlist.write_all(args.out, merged)  # the single write for the LLM path
+        # NOT write_all(merged): `merged` was read before the LLM request, which can
+        # take many seconds, so writing it back would discard anything that changed
+        # during the call — an `apply` from another terminal, or a second scan.
+        # annotate() re-reads under the lock and grafts the scores on by dedup_key.
+        shortlist.annotate(args.out, ann)
         surfaced = shortlist.surface(merged, cfg)
 
     new_n = sum(1 for r in surfaced if r.get("_is_new"))
