@@ -2009,58 +2009,66 @@ def test_funnel_does_not_import_its_way_into_a_cycle():
 def test_harvest_bounds_the_results_it_holds_in_memory(monkeypatch):
     """`ex.map` submits every company up front, so completed results PILE UP
     unconsumed — all ~500 full sets of job descriptions alive at once, measured
-    ~1.25 GB peak RSS for work that only ever needs a couple of dozen boards in
-    memory.
+    ~1.25 GB peak RSS for work that only ever needs a couple of dozen boards.
 
-    The thing to measure is the number of results FETCHED BUT NOT YET CONSUMED. An
-    earlier version of this test asserted "at most 12 fetches in flight", which is
-    vacuous: the 12-worker pool bounds that whether or not submission is bounded,
-    and the test duly passed when the window was sabotaged to a billion. Every
-    company must still be fetched exactly once and every failure must still
-    surface."""
+    The guarantee is SCALE INVARIANCE: how much is held at once is a function of
+    the window and the pool, not of how many companies you have. So this measures
+    the peak fetched-but-unconsumed count at two very different universe sizes and
+    requires it not to grow with n. Two earlier versions of this test were worse
+    and both are worth naming: one asserted "at most 12 fetches in flight", which
+    the worker pool guarantees on its own and which PASSED with the window
+    sabotaged to a billion; the next asserted a hand-guessed constant (40) and
+    went red in CI at 45 — a correct number, since the true bound is the window
+    plus whatever completed while the main thread was consuming. A guessed
+    threshold tests the guess. This tests the property."""
     cfg = config.Config(remote_only=False, min_score=0)
     config.set_active(cfg)
-    n = 300
-    lock = __import__("threading").Lock()
-    made, eaten, gap, seen = [0], [0], [0], []
+    threading = __import__("threading")
 
-    def fake(slug, **kw):
-        if slug == "c7":
-            raise ValueError("boom")
-        out = [
-            {
-                "title": f"AI Engineer {slug}",
-                "url": f"https://boards.greenhouse.io/{slug}/jobs/1",
-                "posted": "",
-                "text": "ai engineer",
-                "location": "Remote",
-            }
+    def run(n):
+        lock = threading.Lock()
+        made, eaten, gap, seen = [0], [0], [0], []
+
+        def fake(slug, **kw):
+            if slug == "c7":
+                raise ValueError("boom")
+            out = [
+                {
+                    "title": f"AI Engineer {slug}",
+                    "url": f"https://boards.greenhouse.io/{slug}/jobs/1",
+                    "posted": "",
+                    "text": "ai engineer",
+                    "location": "Remote",
+                }
+            ]
+            with lock:
+                seen.append(slug)
+                made[0] += 1
+                gap[0] = max(gap[0], made[0] - eaten[0])
+            return out
+
+        real_consume = engine._consume
+
+        def counting_consume(postings, *a):
+            with lock:
+                eaten[0] += 1
+            return real_consume(postings, *a)
+
+        monkeypatch.setattr(engine, "_consume", counting_consume)
+        monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+        monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+        companies = [
+            {"name": f"C{i}", "ats": "greenhouse", "slug": f"c{i}"} for i in range(n)
         ]
-        with lock:
-            seen.append(slug)
-            made[0] += 1
-            gap[0] = max(gap[0], made[0] - eaten[0])
-        return out
+        rows, _, errors = engine.harvest(cfg, companies=companies)
+        assert sorted(seen) == sorted(c["slug"] for c in companies if c["slug"] != "c7")
+        assert any("c7" in e for e in errors)  # a failing board still surfaces
+        assert len(rows) == n - 1
+        return gap[0]
 
-    real_consume = engine._consume
-
-    def counting_consume(postings, *a):
-        with lock:
-            eaten[0] += 1
-        return real_consume(postings, *a)
-
-    monkeypatch.setattr(engine, "_consume", counting_consume)
-    monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
-    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
-    companies = [
-        {"name": f"C{i}", "ats": "greenhouse", "slug": f"c{i}"} for i in range(n)
-    ]
-    rows, _, errors = engine.harvest(cfg, companies=companies)
-
-    assert sorted(seen) == sorted(c["slug"] for c in companies if c["slug"] != "c7")
-    assert any("c7" in e for e in errors)  # a failing board still surfaces
-    assert len(rows) == n - 1
-    assert gap[0] <= 40, (
-        f"{gap[0]} fetched-but-unconsumed results were held at once out of {n}. "
-        "Submission is unbounded again — this is the 1.25 GB bug."
+    small, large = run(200), run(1600)
+    assert large < small * 2, (
+        f"held {small} results at n=200 but {large} at n=1600 — memory is scaling "
+        "with the universe again, which is the 1.25 GB bug."
     )
+    assert large < 200, f"held {large} results at once; the window is 24 + a pool of 12"
