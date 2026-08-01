@@ -8,6 +8,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.5.2] - 2026-07-31
+
+Three ways the store could lose your work or fail without saying so. All three were
+found by an independent review of 0.5.0 and classified minor; all three are
+reproducible, and two of them break the promise this tool leads with — that it
+remembers what you have applied to.
+
+### Fixed
+
+- **`apply` during a scan was silently discarded.** `upsert` and `mark_status` both
+  read the whole store, change it in memory and write it back. The write is atomic,
+  but atomic is not serialized: a scan that read BEFORE your `apply` and wrote after
+  it put the pre-apply rows back, so the role lost its status and resurfaced. A scan
+  takes about a minute, so a cron run overlapping a manual `apply` — or simply two
+  terminals — is enough. Both paths now hold an exclusive `flock` across the whole
+  read-modify-write.
+
+  Deliberately `flock` rather than a lock FILE. The existing note in
+  `funnel.append_watchlist` rejects locking because "a lock file only risked getting
+  stuck after a crash" — true of lock files, and not of `flock`, which the kernel
+  releases when the process dies. Best-effort: a platform without `fcntl` proceeds
+  unlocked rather than refusing to run.
+
+- **The LLM path could undo concurrent changes.** It read the store, made a network
+  request that can take many seconds, then wrote back the rows it had read —
+  discarding anything that changed meanwhile. It now re-reads under the lock and
+  grafts the scores on by `dedup_key`.
+
+- **A CSV saved by Excel broke `apply` and `dismiss` permanently.** Excel writes a
+  UTF-8 BOM; read as plain UTF-8 those bytes become part of the first header name,
+  so the column is `\ufeffid` rather than `id`, every id lookup misses, and the CLI
+  reports "no role with id ..." forever — on a file that looks perfect in a
+  spreadsheet. The store is documented as user-editable, so this was reachable by
+  doing the obvious thing. Now read as `utf-8-sig`.
+
+- **`--config <path-that-does-not-exist>` silently loaded a different config.** It
+  fell through to `./job-radar.yaml`, so a typo in the path ran happily against
+  someone else's settings and reported nothing. Now exits 2 with the path named.
+  Same trust rule as the auto-discovery guard in 0.5.0, applied to the path where
+  the user was explicit.
+
 ## [0.5.1] - 2026-07-31
 
 ### Fixed

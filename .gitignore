@@ -1,7 +1,7 @@
 # your real config + data (never commit these)
 job-radar.yaml
 watchlist.json
-watchlist.json.lock
+*.lock                 # shortlist.csv.lock, created by the store's flock guard
 shortlist.csv
 shortlist.csv.tmp
 shortlist.json

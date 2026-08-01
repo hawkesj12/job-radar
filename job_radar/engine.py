@@ -236,7 +236,7 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
                     )
                 _consume(ps, hits, blocks, cfg, meta)
 
-    # Breadth sources are 10 independent third-party hosts — fetch them in
+    # Breadth sources are independent third-party hosts — fetch them in
     # parallel (like depth) and consume single-threaded in a stable order. No
     # cross-host sleep: rate limits are per-host, and each source already sleeps
     # between its OWN repeated calls.

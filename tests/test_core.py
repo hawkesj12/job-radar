@@ -638,6 +638,66 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
     assert rows[0]["sources"] == {"greenhouse", "remoteok"}
 
 
+def test_apply_during_a_scan_is_not_lost(tmp_path):
+    """`apply` must survive a concurrent scan. Both paths read the whole store,
+    change it in memory and write it back, so an unserialized scan that read BEFORE
+    the apply put the pre-apply rows back — silently un-applying the role, which is
+    the one thing this store exists to prevent."""
+    import threading
+    import time
+
+    c = _cfg()
+    csvp = tmp_path / "s.csv"
+    merged = shortlist.upsert(
+        csvp, [_post("Acme", "AI Engineer", 40, "u1")], today="2026-07-10"
+    )
+    rid = merged[0]["id"]
+
+    def slow_scan():  # a scan holding the store across a delay
+        with shortlist._exclusive(csvp):
+            rows = shortlist.load_all(csvp)
+            time.sleep(0.25)
+            shortlist.write_all(csvp, rows)
+
+    t = threading.Thread(target=slow_scan)
+    t.start()
+    time.sleep(0.05)
+    shortlist.mark_status(csvp, rid, "applied")
+    t.join()
+    assert shortlist.load_all(csvp)[0]["status"] == "applied"
+    assert c  # cfg fixture used
+
+
+def test_a_csv_saved_by_excel_still_works(tmp_path):
+    """Excel writes a UTF-8 BOM on save. Read as plain utf-8 those bytes join the
+    FIRST HEADER NAME, so the column becomes '\\ufeffid', every id lookup misses,
+    and apply/dismiss fail with 'no role with id ...' on a file that looks perfect
+    in a spreadsheet."""
+    _cfg()
+    csvp = tmp_path / "s.csv"
+    merged = shortlist.upsert(
+        csvp, [_post("Acme", "AI Engineer", 40, "u1")], today="2026-07-10"
+    )
+    rid = merged[0]["id"]
+    csvp.write_bytes(b"\xef\xbb\xbf" + csvp.read_bytes())  # what Excel leaves behind
+    assert list(shortlist.load_all(csvp)[0])[0] == "id"  # not '﻿id'
+    assert shortlist.mark_status(csvp, rid, "applied") is True
+
+
+def test_config_typo_exits_rather_than_loading_a_neighbour(tmp_path, monkeypatch):
+    """A named config that is not there is a typo, not a cue to look elsewhere.
+    It used to fall through to ./job-radar.yaml, so a slip in `--config` ran against
+    a different config and said nothing."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "job-radar.yaml").write_text(
+        "filters:\n  min_score: 99\n", encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as e:
+        cli._resolve_config(str(tmp_path / "typo.yaml"))
+    assert e.value.code == 2
+    assert cli._resolve_config(None).min_score == 99  # discovery itself still works
+
+
 def test_version_flag_reports_the_installed_version(capsys):
     """`--version` is the first thing anyone types at an unfamiliar CLI, and it is
     what a packaging smoke test calls to prove the entry point works at all. It must
