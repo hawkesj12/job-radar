@@ -235,8 +235,9 @@ class Config:
     # NOT term-frequency saturation, despite the name and despite what this comment
     # and the README both used to claim. `_present` returns each keyword AT MOST
     # ONCE, so tf is pinned at 1 and there is no term frequency left to saturate.
-    # Measured on this codebase: repeating a keyword 1x / 5x / 50x scores 26 / 26 /
-    # 25 -- flat, as intended. What score_k1 actually does is set the GAIN on length
+    # Measured on this codebase: repeating a keyword 1x / 5x / 50x / 500x scores
+    # 26 / 26 / 25 / 22 -- never rising, and mildly falling as the repetition
+    # lengthens the document. What score_k1 actually does is set the GAIN on length
     # normalization: 0.1 / 1.2 / 100 gives 24 / 36 / 64 on the same posting. A real
     # knob, honestly described.
     #
@@ -257,43 +258,10 @@ class Config:
     # 0 of 20 relevant remote roles cleared min_score; at 1600, 7 of 20 do.
     avg_jd_tokens: int = 1600
     blob_score_cap: int = 60
-    # Cap on the TITLE stream, so a keyword-stuffed title can't outrank a thorough
-    # JD. Keyword scoring favors recall by design; the LLM re-rank is the precision
-    # layer.
+    # Cap the title-keyword double-count too, so a keyword-stuffed TITLE can't
+    # outrank a thorough JD (the body already caps at blob_score_cap). Keyword
+    # scoring favors recall by design; the optional LLM re-rank is the precision layer.
     title_score_cap: int = 12
-    # The title stream's own "normal" length. A title is ~8 tokens of dense signal;
-    # a body is ~1600 tokens of diffuse prose. Normalizing both against 1600 was the
-    # comparability bug -- see the stream weights below.
-    avg_title_tokens: int = 8
-    # BM25F. A job posting is not one document: it is a short, dense TITLE and a
-    # long, diffuse BODY, and blending them into one string means one length norm
-    # has to serve both. It can't. SmartRecruiters ships `text: ""`, so the same
-    # role scored 30 via a feed with a description and 18 via one without -- and
-    # min_score is 22, so the identical role was DELETED based on which feed it
-    # arrived on. One length norm made a title-only posting look like a terrible
-    # full posting rather than a short one.
-    #
-    # Each stream now carries its own length normalization and its own weight, and
-    # when a stream is genuinely absent the weights RENORMALIZE across the streams
-    # actually observed, instead of scoring the absence as evidence of a bad match.
-    #
-    # These weights are CONSTRAINED, not chosen by taste. Two requirements, and the
-    # pair below is the only one measured to satisfy both at once over a 400-posting
-    # corpus:
-    #   1. A role that clears min_score WITH its description must still clear it
-    #      when the feed ships none. That is the bug, stated as a rate: it was 12.5%
-    #      of qualifying roles surviving; it is now 100%.
-    #   2. Full-body scores must not drift, or min_score (22) silently becomes the
-    #      wrong number for everyone. Corpus median moved +2 and the mean absolute
-    #      per-posting shift is 1.4 -- the smallest of any pair tried, including
-    #      every pair that FAILED requirement 1.
-    # Zero rank inversions across the corpus, so the ordering users see is intact.
-    #
-    # Honest caveat: this pins the ratio to preserve a score nobody has validated
-    # against relevance judgments. It makes scoring COHERENT, and it stops deleting
-    # roles; only labelled data (qrels) can make it CORRECT.
-    w_title: float = 2.0
-    w_body: float = 0.75
     # Cap the agency penalty the way the two scores above are capped. It was the
     # only uncapped component, and the only one that goes NEGATIVE -- so a long,
     # thorough job description had more chances to accumulate penalty while its
@@ -469,9 +437,6 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("length_norm_b", "score_len_b"),
         ("score_k1", "score_k1"),
         ("avg_jd_tokens", "avg_jd_tokens"),
-        ("avg_title_tokens", "avg_title_tokens"),
-        ("w_title", "w_title"),
-        ("w_body", "w_body"),
         ("body_cap", "blob_score_cap"),
         ("title_cap", "title_score_cap"),
     ]:

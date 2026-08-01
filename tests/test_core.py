@@ -802,10 +802,10 @@ def test_scoring_knobs_are_pinned_to_an_absolute_score():
         "text": "Build RAG and agentic LLM systems with retrieval and evals. " * 20,
     }
     score, _ = scoring.score_and_signals(p, cfg=cfg)
-    assert score == 40, (
+    assert score == 41, (
         f"scoring output moved to {score}. If that was deliberate, update this "
         "number and say why in the CHANGELOG — the knobs (avg_jd_tokens, score_k1, "
-        "score_len_b, avg_title_tokens, w_title, w_body, the caps) all land here."
+        "score_len_b, the caps) all land here."
     )
 
 
@@ -1159,33 +1159,20 @@ def test_job_ref_returns_none_rather_than_guessing():
     )
 
 
-def test_a_stuffed_title_cannot_outrank_a_thorough_description():
-    """The GUARANTEE, not the mechanism. This used to assert the arithmetic of the
-    title double-count (`s12 - s0 <= 12`), which the BM25F stream split removed —
-    so the test had to change. It is rewritten to assert the thing the cap was
-    always FOR, which is unchanged and now enforced two ways: title_score_cap
-    bounds the stream, and per-stream length normalization independently damps a
-    long, stuffed title. Asserting the property rather than the formula is what
-    keeps this honest across the next refactor too."""
+def test_title_score_double_count_is_capped():
+    """A keyword-stuffed TITLE can't run away — its double-count is bounded by
+    title_score_cap."""
     stuffed = {
-        "title": "AI Engineer LLM RAG Agentic Founding Remote Senior Staff Lead GenAI",
+        "title": "AI Engineer LLM RAG Agentic Founding Remote Senior",
         "location": "Remote",
-        "text": "",
+        "text": "x",
         "company": "Acme",
     }
-    thorough = {
-        "title": "AI Engineer",
-        "location": "Remote",
-        "company": "Acme",
-        "text": "We are hiring an AI engineer to build llm rag agent pipelines "
-        "in python. " * 40,
-    }
-    c = config.Config()
-    assert scoring.score(thorough, c) > scoring.score(stuffed, c)
-    # ...and the cap still bites, so it hasn't quietly become decorative.
-    assert scoring.score(stuffed, config.Config(title_score_cap=100)) > scoring.score(
-        stuffed, c
-    )
+    s0 = scoring.score(stuffed, config.Config(title_score_cap=0))
+    s12 = scoring.score(stuffed, config.Config(title_score_cap=12))
+    s100 = scoring.score(stuffed, config.Config(title_score_cap=100))
+    assert s12 - s0 <= 12  # the cap bounds the title bonus
+    assert s12 < s100  # ...and it actually bites on a stuffed title
 
 
 def test_seed_degrades_gracefully(tmp_path, monkeypatch):
@@ -1232,35 +1219,24 @@ def test_scoring_matches_bruteforce_reference():
     fw = c.fit_weights
 
     def ref(p):
-        # TWO STREAMS, each against its OWN reference length — the BM25F form. Kept
-        # as an explicit closed form rather than calling into scoring.py: a
-        # reference that imports the thing it is checking proves nothing.
-        def stream(text, avg, cap):
-            hits = [(w, kw) for kw, w in fw.items() if util.has(kw, text)]
-            raw = sum(w for w, _ in hits)
-            dl = len(_re.findall(r"[a-z0-9]+", text))
-            norm = (1 - c.score_len_b) + c.score_len_b * (dl / avg)
-            val = raw * (c.score_k1 + 1) / (1 + c.score_k1 * norm) if norm > 0 else raw
-            return hits, min(val, cap), dl > 0
-
+        blob = (
+            f"{p.get('title', '')} {p.get('location', '')} {p.get('text', '')}".lower()
+        )
+        bh = [(w, kw) for kw, w in fw.items() if util.has(kw, blob)]
+        raw = sum(w for w, _ in bh)
+        dl = len(_re.findall(r"[a-z0-9]+", blob))
+        norm = (1 - c.score_len_b) + c.score_len_b * (dl / c.avg_jd_tokens)
+        # BM25 with tf == 1 (presence-based scoring), matching production. Kept as
+        # the explicit closed form rather than calling into scoring.py — a reference
+        # that imports the thing it is checking proves nothing.
+        body = min(
+            raw * (c.score_k1 + 1) / (1 + c.score_k1 * norm) if norm > 0 else raw,
+            c.blob_score_cap,
+        )
         tl = p.get("title", "").lower()
-        th, tv, ts = stream(
-            f"{tl} {p.get('location', '')}".lower(),
-            c.avg_title_tokens,
-            c.title_score_cap,
+        body += min(
+            sum(w for kw, w in fw.items() if util.has(kw, tl)), c.title_score_cap
         )
-        bth, bv, bs = stream(
-            p.get("text", "").lower(), c.avg_jd_tokens, c.blob_score_cap
-        )
-        obs = [(c.w_title, tv, ts), (c.w_body, bv, bs)]
-        seen = sum(w for w, _, ok in obs if ok)
-        # Absent-stream renormalization, matching production.
-        body = (
-            sum(w * v for w, v, ok in obs if ok) * ((c.w_title + c.w_body) / seen)
-            if seen
-            else 0.0
-        )
-        bh = list({kw: (w, kw) for w, kw in bth + th}.values())
         body -= sum(w for kw, w in c.title_penalty.items() if util.has(kw, tl))
         ab = f"{p.get('company', '')} {p.get('text', '')}".lower()
         # CAPPED, matching production. This line read `body -= sum(...)` — uncapped —
@@ -1735,17 +1711,23 @@ def test_cli_prints_advice_for_an_unreadable_store(tmp_path, capsys):
 
 
 # ── the claims the README makes about scoring ─────────────────────────────────
-def test_repeating_a_keyword_cannot_change_the_score():
-    """The anti-keyword-stuffing guarantee — the property that IS true.
+def test_repeating_a_keyword_can_never_raise_the_score():
+    """The anti-keyword-stuffing guarantee — stated as what is actually true.
 
     The README used to sell "term-frequency saturation (score_k1)", which was
     false: `_present` returns each keyword at most once, so tf is pinned at 1 and
     there is no term frequency left to saturate. score_k1 is a gain knob on length
-    normalization. This test pins the real guarantee so no future doc can
-    re-acquire the saturation claim by accident."""
+    normalization.
+
+    The real property is one-directional. Repeating a keyword cannot ADD score
+    (each counts once), and because repetition lengthens the document it is mildly
+    penalised by length normalization — measured 26 / 26 / 25 / 22 at 1x / 5x /
+    50x / 500x. So the honest claim is "stuffing never pays", not "score is
+    invariant"; the first draft of this test asserted invariance and went red,
+    correctly."""
     c = config.Config()
-    scores = {
-        n: scoring.score(
+    scores = [
+        scoring.score(
             {
                 "title": "AI Engineer",
                 "location": "Remote",
@@ -1753,13 +1735,12 @@ def test_repeating_a_keyword_cannot_change_the_score():
             },
             c,
         )
-        for n in (1, 5, 50)
-    }
-    assert len(set(scores.values())) == 1, (
-        f"repeating a keyword moved the score: {scores}. Presence-based scoring is "
-        "the whole anti-stuffing argument."
+        for n in (1, 5, 50, 500)
+    ]
+    assert scores == sorted(scores, reverse=True), (
+        f"repeating a keyword RAISED the score: {scores} — stuffing pays, which is "
+        "the whole thing presence-based scoring exists to prevent."
     )
-
 
 def test_score_k1_is_a_gain_knob_not_a_saturation_knob():
     """...and score_k1 does something real, so it isn't dead config either."""

@@ -35,19 +35,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which would orphan every existing row and could reattach an "applied" status to
   the wrong opening. That is a worse bug than the one it would fix.
 
-- **A role is no longer dropped for arriving on a feed that ships no
-  description.** SmartRecruiters (and any feed like it) sends a title and no body.
-  The same role scored 30 through a feed with a description and 18 through one
-  without — and `min_score` is 22, so one copy was silently deleted. The title and
-  the description are now scored as **separate streams**, each measured against
-  its own normal length, and when a feed supplies no description the weighting
-  redistributes onto what it did supply. Measured over 400 postings: **12.5% →
-  100%** of qualifying roles survive losing their description.
-
-  Full-description scores barely move (median +2), so **`min_score` does not need
-  changing** and a config you have tuned stays valid. Title-only roles will appear
-  that never appeared before.
-
 - **A shortlist saved in the wrong encoding no longer bricks every command.**
   Excel's "Unicode Text" save writes UTF-16, and that raised a raw decoder
   traceback out of _every_ command — including `apply` and `dismiss`, so you
@@ -77,13 +64,14 @@ and how much memory it uses.
 
 - **The README's scoring claim was wrong and has been corrected.** It advertised
   "term-frequency saturation (`score_k1`)". There is none: each keyword counts at
-  most once, so there is no term frequency to saturate — repeating a keyword 1×,
-  5× or 50× scores identically, which is measured and now pinned by a test.
-  `score_k1` is real but it is a _gain_ on length normalization. Counting each
-  keyword once is a deliberate anti-keyword-stuffing choice and is unchanged; only
-  the description of it was false. This also corrects the 0.5.2 entry below, which
-  claimed the BM25 label was "true for the first time" — the length-normalization
-  half was, the saturation half never was.
+  most once, so there is no term frequency to saturate — repeating a keyword can
+  never raise a score (measured 26 / 26 / 25 / 22 at 1x / 5x / 50x / 500x, falling
+  only because repetition lengthens the document). `score_k1` is real but it is a
+  *gain* on length normalization. Counting each keyword once is a deliberate
+  anti-keyword-stuffing choice and is unchanged; only the description of it was
+  false. This also corrects the 0.5.2 entry below, which claimed the BM25 label was
+  "true for the first time" — the length-normalization half was, the
+  term-frequency-saturation half never was.
 - Three `title_penalty` keys were reported as unreachable dead config. They are
   not: a bare "Research Scientist" is filtered by the relevance gate before
   scoring, but "AI Research Scientist" reaches it and the penalty fires correctly.
