@@ -8,6 +8,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.5.3] - 2026-07-31
+
+### Fixed
+
+- **A scan with the LLM re-rank enabled stored nothing.** Introduced in 0.5.2 and
+  fixed here. `cli.cmd_scan` passed `write=not llm_on` to `upsert` — skipping the
+  write to avoid one rewrite — and the `annotate()` call added in the same release
+  then re-read the file, which therefore never contained the harvested rows, and
+  wrote that back. The scan evaporated while the CLI printed that it had tracked
+  the roles: `apply <id>` could never find an id, `first_seen` never accumulated,
+  and every role stayed "new" forever.
+
+  It only affected runs with `llm.enabled: true` (off by default, needs an API
+  key), and only 0.5.2. The harvest is now always persisted, then annotated.
+
+  Why it shipped: `write=False` had one caller and zero tests, and there was no
+  end-to-end test of `cmd_scan` with the LLM on — so the one production path
+  without coverage was the one that broke. There is now a test that drives the real
+  `cmd_scan`, because the defect was in how the CLI wired two correct functions
+  together rather than in either of them.
+
+- The AI-config prompt (`prompts/build-config-with-ai.md`) emitted a `sources.ats`
+  list that omitted **workday** — reintroducing, through the "let AI write your
+  config" path, the exact bug 0.5.0 fixed in the shipped example. It also predated
+  `google_jobs` and `usajobs`. It now tells the assistant to OMIT those keys unless
+  narrowing (absent means "every adapter this build ships"), and a test asserts the
+  prompt mentions every registered adapter. A doc that generates config is config.
+
 ## [0.5.2] - 2026-07-31
 
 Three ways the store could lose your work or fail without saying so. All three were

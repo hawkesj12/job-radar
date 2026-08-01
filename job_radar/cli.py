@@ -133,10 +133,14 @@ def cmd_scan(args, cfg):
         raise SystemExit(1)
     by_key = {(p.get("dedup_key") or dedup_key(p)): p for p in rows}
     today = today_et()
-    # When the LLM re-rank runs we annotate in memory and write ONCE at the end;
-    # otherwise upsert does the single write itself.
+    # ALWAYS persist the harvest here, LLM or not. This used to pass
+    # `write=not llm_on` to save one rewrite, and that optimization cost the whole
+    # scan: with the LLM enabled the merged rows were never written, and the
+    # annotate() call below re-reads the file — which therefore did not contain
+    # them — and writes that back. The harvest evaporated while the CLI printed
+    # that it had tracked it. Two writes are cheap; a silently discarded scan is not.
     llm_on = cfg.llm.enabled
-    merged = shortlist.upsert(args.out, rows, today, write=not llm_on)
+    merged = shortlist.upsert(args.out, rows, today)
 
     surfaced = shortlist.surface(merged, cfg)
     targets = surfaced[: cfg.llm.rerank_top_n]

@@ -106,6 +106,25 @@ def test_shipped_example_config_enables_every_adapter(tmp_path):
     assert set(sources.BREADTH_ALL) == set(c.breadth_sources)
 
 
+def test_the_ai_config_prompt_lists_every_adapter():
+    """`prompts/build-config-with-ai.md` embeds a config template that the README
+    tells users to paste into an AI assistant. That template is a SECOND copy of the
+    adapter lists, and it drifted: it sat 19 days behind, missing `workday`,
+    `google_jobs` and `usajobs` — so the "let AI write your config" path handed
+    people a config with the enterprise ATS switched off, which is exactly the bug
+    0.5.0 fixed in the shipped example. A doc that generates config is config."""
+    txt = (
+        Path(__file__).parent.parent / "prompts" / "build-config-with-ai.md"
+    ).read_text(encoding="utf-8")
+    missing = [
+        a for a in list(sources.DEPTH_ALL) + list(sources.BREADTH_ALL) if a not in txt
+    ]
+    assert not missing, (
+        f"the AI-config prompt does not mention {missing} — a user following it "
+        "would get those sources silently disabled"
+    )
+
+
 @pytest.mark.parametrize("name", ["job-radar.example.yaml", "watchlist.example.json"])
 def test_root_and_packaged_examples_are_identical(name):
     """Two copies of each example file exist: one at the repo root (what a GitHub
@@ -258,6 +277,55 @@ def test_llm_is_noop_when_disabled():
     assert c.llm.enabled is False
     items = [{"key": "k", "title": "AI Engineer", "company": "Acme", "text": "..."}]
     assert llm.rerank(items, c) == {}  # never calls out when disabled
+
+
+def test_a_scan_persists_its_harvest_with_the_llm_enabled(tmp_path, monkeypatch):
+    """The LLM path must write the harvest, exactly like the plain path.
+
+    It did not. `upsert(write=not llm_on)` skipped the write to save one rewrite,
+    and `annotate()` then re-read the file — which therefore never had the rows —
+    and wrote that back. A scan with the LLM on stored NOTHING while printing that
+    it had tracked the roles: `apply <id>` could never find an id, `first_seen`
+    never accumulated, and every role stayed "new" forever.
+
+    This whole path had zero tests, which is why a 181-green suite said nothing
+    about it. Drives the real `cmd_scan` rather than the store functions, because
+    the defect lived in how the CLI wired them together, not in either one."""
+    cfg = config.Config(remote_only=True, min_score=0)
+    cfg.llm = replace(cfg.llm, enabled=True, rerank_top_n=5)
+    config.set_active(cfg)
+    out = tmp_path / "shortlist.csv"
+
+    def one_role(queries):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "location": "Remote",
+                "url": "https://x/1",
+                "posted": "2026-07-10",
+                "text": "Build RAG agentic LLM systems.",
+                "source": "remotive",
+            }
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("f", one_role)])
+    # the LLM itself is stubbed — this is about persistence, not the model
+    monkeypatch.setattr(
+        llm,
+        "rerank",
+        lambda items, c: {items[0]["key"]: {"llm_score": 91, "llm_note": "strong fit"}},
+    )
+    args = types.SimpleNamespace(
+        out=str(out), watchlist=None, limit=25, verbose=False, strict=False, config=None
+    )
+    cli.cmd_scan(args, cfg)
+
+    rows = shortlist.load_all(out)
+    assert len(rows) == 1, "the LLM path stored nothing — the harvest was discarded"
+    assert rows[0]["llm_score"] == "91"  # and the annotation landed on it
+    assert shortlist.mark_status(out, rows[0]["id"], "applied") is True  # apply works
 
 
 # ── regression tests for the three-critic review fixes ───────────────────────

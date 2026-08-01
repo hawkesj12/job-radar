@@ -58,6 +58,9 @@ scoring:
   title_penalties: { keyword: 6 } # push these titles down
   agency_penalties: { staffing: 8 } # push staffing/agency posts down
   tiers: { strong: 30, worth_a_look: 22 }
+  # Leave these at their defaults unless I say otherwise -- they are the scoring
+  # model's calibration, not preferences: length_norm_b 0.75, score_k1 1.2,
+  # avg_jd_tokens 1600 (a full ATS description, not a job-board summary).
 filters:
   remote_only: true
   location: remote # or a place: "Louisville, KY"
@@ -67,15 +70,21 @@ filters:
   exclude_titles: [intern, recruiter]
   exclude_locations: [...] # regions that are NOT valid for me
 sources:
-  ats: [greenhouse, lever, ashby, smartrecruiters, workable]
+  # OMIT these two keys entirely unless I ask to narrow the search. They are SUBSET
+  # filters, so listing five of six adapters silently switches the sixth OFF -- and
+  # leaving them out means "every adapter this build ships", which stays correct as
+  # new ones are added. If you do emit them, emit ALL of these:
+  ats: [greenhouse, lever, ashby, smartrecruiters, workable, workday]
   boards:
     [
       remotive,
+      usajobs,
       jobicy,
       arbeitnow,
       remoteok,
       himalayas,
       adzuna,
+      google_jobs,
       hn,
       braintrust,
       techtree,
