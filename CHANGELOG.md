@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.6.0] - 2026-07-31
+
+The release that stops the engine quietly deleting jobs you wanted, plus a
+faster, lighter scan. **Scores are unchanged** — a role's number is exactly what
+it was in 0.5.3.
+
 ### Fixed
 
 - **Different openings stopped being merged into one.** A company's `AI Engineer`
