@@ -40,9 +40,11 @@ scoring:
   title_penalties: { research scientist: 8, ai researcher: 6 }
   agency_penalties: { staffing: 8, our client: 12, consultancy: 10 }
   length_norm_b: 0.75      # BM25 length penalty b (0.75 = default)
-  score_k1: 1.2            # BM25 term-frequency saturation. Without it the
-                           # length penalty has no ceiling and a short stub
-                           # outscores a full job description.
+  score_k1: 1.2            # gain on the length penalty. NOT term-frequency
+                           # saturation -- each keyword counts once, so there is
+                           # no term frequency to saturate. Without this the
+                           # penalty has no ceiling and a short stub outscores a
+                           # full job description.
   avg_jd_tokens: 1600      # reference "normal" JD length (a full ATS description;
                            # measured median ~1590 tokens -- NOT a job-board summary)
   body_cap: 60             # ceiling on the body keyword score

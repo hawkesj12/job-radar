@@ -4,6 +4,7 @@ LLM no-op guarantee. Run: pytest"""
 import json
 import os
 import types
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
@@ -1008,8 +1009,153 @@ def test_fuzzy_dedup_rejects_subset_keeps_reorder():
     n = dedup.normalize_title
     assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer - Remote"), c)
     assert not dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Payments"), c)
+    # ...and here is the LIMIT of this layer, pinned so it can't be mistaken for a
+    # guarantee again. ", Ads" is the same kind of distinct opening as
+    # ", Payments", and the ratio gates MERGE it -- they always did. Payments only
+    # separates because its suffix is long enough to drag token_sort_ratio under
+    # the floor, so this test appeared to prove a rule ("a bare title doesn't merge
+    # into a more specific one") that was never true. String similarity cannot see
+    # the difference; only a disqualifier can. The real guarantee now lives in
+    # test_same_role_disqualifiers, and this assertion exists to keep anyone from
+    # re-reading the line above as broader than it is.
+    assert dedup.fuzzy_title_match(n("AI Engineer"), n("AI Engineer, Ads"), c)
+    assert not dedup.same_role("AI Engineer", "AI Engineer, Ads")[0]
     assert dedup.fuzzy_title_match(
         n("Senior AI Engineer"), n("AI Engineer (Senior)"), c
+    )
+
+
+# Every case below is a role a user wanted. The 5 splits were all silently merged
+# before the disqualifiers landed, and the merge DISCARDS the loser's apply URL,
+# so each one was a deleted opening the user never saw.
+SAME_ROLE_CASES = [
+    ("AI Engineer", "AI Engineer, Ads", False, "short qualifier"),
+    ("AI Engineer", "AI Engineer, Payments", False, "long qualifier"),
+    ("AI Engineer II", "AI Engineer III", False, "roman level"),
+    ("AI Engineer 2", "AI Engineer III", False, "arabic vs roman level"),
+    ("AI Engineer (East)", "AI Engineer (West)", False, "parenthetical qualifier"),
+    ("Senior AI Engineer", "Staff AI Engineer", False, "seniority"),
+    ("AI Engineer", "AI  Engineer", True, "whitespace only"),
+    ("AI Engineer - Remote", "Remote AI Engineer", True, "reorder + noise"),
+    ("AI Engineer", "AI Engineer", True, "identical"),
+    ("Senior AI Engineer", "AI Engineer (Senior)", True, "level in a parenthetical"),
+    (
+        "Engineer, Machine Learning",
+        "Machine Learning Engineer",
+        True,
+        "comma inversion",
+    ),
+    ("AI Engineer (Remote)", "AI Engineer", True, "work-arrangement qualifier"),
+]
+
+
+@pytest.mark.parametrize("a,b,want,why", SAME_ROLE_CASES)
+def test_same_role_disqualifiers(a, b, want, why):
+    got, reason = dedup.same_role(a, b)
+    assert got is want, f"{why}: {a!r} vs {b!r} -> {got} ({reason})"
+
+
+@pytest.mark.parametrize("a,b,want,why", SAME_ROLE_CASES)
+def test_same_role_disqualifiers_end_to_end(a, b, want, why):
+    """The same cases through the REAL pipeline. Deliberately different sources on
+    each side, so the job-id veto cannot be what does the work -- this proves the
+    title marks fire on their own. Asserts both postings survive the pre-dedup
+    filters first, because otherwise "one hit" would mean "one was filtered out"
+    and the test would pass while proving nothing (an earlier draft of this test
+    read exactly that way on an (EU) title, which exclude_locations drops)."""
+    c = _cfg()
+    body = "ai engineer python llm remote"
+    ps = [
+        {
+            "title": a,
+            "company": "Acme",
+            "location": "Remote",
+            "text": body,
+            "url": "https://boards.greenhouse.io/acme/jobs/1",
+            "source": "greenhouse",
+            "posted": "",
+        },
+        {
+            "title": b,
+            "company": "Acme",
+            "location": "Remote",
+            "text": body,
+            "url": "https://remoteok.com/l/99",
+            "source": "remoteok",
+            "posted": "",
+        },
+    ]
+    for p in ps:
+        assert scoring.relevant(p["title"], c) and scoring.is_remote(p, c), (
+            f"{p['title']!r} never reached dedup -- this test would be vacuous"
+        )
+    hits: dict = {}
+    engine._consume(ps, hits, {}, c, {})
+    assert (len(hits) == 1) is want, f"{why}: got {len(hits)} hits"
+
+
+def test_job_id_veto_splits_two_openings_on_one_board():
+    """Two DIFFERENT job ids on the SAME board are two openings, however alike the
+    titles read -- the strongest signal available, and one the matcher ignored."""
+    c = _cfg()
+    gh = "https://boards.greenhouse.io/acme/jobs/"
+
+    def n_hits(u1, u2):
+        ps = [
+            {
+                "title": t,
+                "company": "Acme",
+                "location": "Remote",
+                "text": "ai engineer python llm remote",
+                "url": u,
+                "source": "greenhouse",
+                "posted": "",
+            }
+            for t, u in (("AI Engineer - Remote", u1), ("Remote AI Engineer", u2))
+        ]
+        hits: dict = {}
+        engine._consume(ps, hits, {}, c, {})
+        return len(hits)
+
+    assert n_hits(gh + "7", gh + "7") == 1  # one opening, re-titled
+    assert n_hits(gh + "7", gh + "8") == 2  # two openings
+
+
+def test_job_id_veto_never_blocks_a_cross_source_merge():
+    """An aggregator redirect exposes no job id, so the veto stays silent and the
+    employer copy still absorbs it. This is the merge the product is built on."""
+    c = _cfg()
+    ps = [
+        {
+            "title": "AI Engineer",
+            "company": "Acme",
+            "location": "Remote",
+            "text": "ai engineer python llm remote",
+            "url": u,
+            "source": s,
+            "posted": "",
+        }
+        for u, s in (
+            ("https://boards.greenhouse.io/acme/jobs/7", "greenhouse"),
+            ("https://remoteok.com/l/99", "remoteok"),
+        )
+    ]
+    hits: dict = {}
+    engine._consume(ps, hits, {}, c, {})
+    assert len(hits) == 1
+    assert "greenhouse.io" in next(iter(hits.values()))["url"]
+
+
+def test_job_ref_returns_none_rather_than_guessing():
+    """None disables the veto. An unrecognized URL must degrade to the old
+    behaviour, never to a fabricated id that would split a real duplicate."""
+    assert dedup.job_ref("https://example.com/careers/123") is None
+    assert dedup.job_ref("https://boards.greenhouse.io/acme") is None  # no job id
+    assert dedup.job_ref("") is None
+    assert dedup.job_ref("https://boards.greenhouse.io/acme/jobs/42") == (
+        "greenhouse",
+        "acme",
+        "42",
     )
 
 
@@ -1521,3 +1667,389 @@ def test_seed_verify_probes_concurrently_and_stops_at_the_limit(tmp_path, monkey
 def test_seed_rejects_an_ats_it_cannot_mine():
     with pytest.raises(ValueError, match="seed not supported"):
         seed.enumerate_entries("myspace")
+
+
+# ── the store's encoding ──────────────────────────────────────────────────────
+def test_utf16_store_loads_instead_of_killing_every_command(tmp_path):
+    """Excel's "Unicode Text" save writes UTF-16. That used to raise a bare
+    UnicodeDecodeError out of load_all -- which sits on the path of EVERY command,
+    so `list`, `apply` and `dismiss` all died and the user could not reach their
+    own file to fix it."""
+    p = tmp_path / "shortlist.csv"
+    p.write_text("id,score,status\nabc,30,new\n", encoding="utf-16")
+    rows = shortlist.load_all(p)
+    assert rows == [{"id": "abc", "score": "30", "status": "new"}]
+
+
+def test_utf8_and_bom_stores_are_unaffected(tmp_path):
+    """The Excel UTF-8-BOM path this function already handled must not regress."""
+    for enc in ("utf-8", "utf-8-sig"):
+        p = tmp_path / f"s-{enc}.csv"
+        p.write_text("id,score\nabc,30\n", encoding=enc)
+        assert shortlist.load_all(p) == [{"id": "abc", "score": "30"}]
+
+
+def test_undecodable_store_fails_loud_but_useful(tmp_path):
+    """Fail fast -- but name the file and the fix, not a byte offset."""
+    p = tmp_path / "shortlist.csv"
+    p.write_bytes(b"id,score\n\xff\xfe\x00garbage\x81\x8d,30\n")
+    with pytest.raises(shortlist.ShortlistEncodingError) as e:
+        shortlist.load_all(p)
+    assert str(p) in str(e.value)
+    assert "CSV UTF-8" in str(e.value)
+
+
+def test_cli_prints_advice_for_an_unreadable_store(tmp_path, capsys):
+    """The whole point: the user gets a sentence they can act on, exit code 1, and
+    no traceback -- on a command that never even needed to parse the file."""
+    p = tmp_path / "shortlist.csv"
+    p.write_bytes(b"id,score\n\xff\xfe\x00garbage\x81\x8d,30\n")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["list", "--out", str(p)])
+    assert e.value.code == 1
+    assert "CSV UTF-8" in capsys.readouterr().out
+
+
+# ── the claims the README makes about scoring ─────────────────────────────────
+def test_repeating_a_keyword_can_never_raise_the_score():
+    """The anti-keyword-stuffing guarantee — stated as what is actually true.
+
+    The README used to sell "term-frequency saturation (score_k1)", which was
+    false: `_present` returns each keyword at most once, so tf is pinned at 1 and
+    there is no term frequency left to saturate. score_k1 is a gain knob on length
+    normalization.
+
+    The real property is one-directional. Repeating a keyword cannot ADD score
+    (each counts once), and because repetition lengthens the document it is mildly
+    penalised by length normalization — measured 26 / 26 / 25 / 22 at 1x / 5x /
+    50x / 500x. So the honest claim is "stuffing never pays", not "score is
+    invariant"; the first draft of this test asserted invariance and went red,
+    correctly."""
+    c = config.Config()
+    scores = [
+        scoring.score(
+            {
+                "title": "AI Engineer",
+                "location": "Remote",
+                "text": "ai engineer python " + "rag " * n,
+            },
+            c,
+        )
+        for n in (1, 5, 50, 500)
+    ]
+    assert scores == sorted(scores, reverse=True), (
+        f"repeating a keyword RAISED the score: {scores} — stuffing pays, which is "
+        "the whole thing presence-based scoring exists to prevent."
+    )
+
+def test_score_k1_is_a_gain_knob_not_a_saturation_knob():
+    """...and score_k1 does something real, so it isn't dead config either."""
+    p = {"title": "AI Engineer", "location": "Remote", "text": "ai engineer python rag"}
+    lo = scoring.score(p, config.Config(score_k1=0.1))
+    hi = scoring.score(p, config.Config(score_k1=100))
+    assert lo < hi
+
+
+def test_research_title_penalties_are_reachable():
+    """Reported as unreachable dead config; they are not, and the fix was to prove
+    it rather than delete them. A BARE "Research Scientist" never reaches scoring
+    because `relevant()` filters it first — but the prefixed forms that DO pass the
+    relevance gate are exactly where the penalty is meant to bite."""
+    c = config.Config()
+    for kw in (
+        "research scientist",
+        "quantitative researcher",
+        "member of technical staff",
+    ):
+        assert not scoring.relevant(kw, c), f"{kw!r} unexpectedly passes the gate bare"
+        title = f"AI {kw.title()}"
+        assert scoring.relevant(title, c), f"{title!r} should reach scoring"
+        p = {"title": title, "location": "Remote", "text": "ai engineer python"}
+        plain = {
+            "title": "AI Engineer",
+            "location": "Remote",
+            "text": "ai engineer python",
+        }
+        assert scoring.score(p, c) < scoring.score(plain, c), (
+            f"the {kw!r} penalty never fired on {title!r} — it really is unreachable"
+        )
+
+
+# ── HTTP connection pooling ───────────────────────────────────────────────────
+class _FakeResp:
+    def __init__(self, status=200, body=b"{}", headers=None):
+        self.status, self._b = status, body
+        self.reason, self.headers = "OK", headers or {}
+
+    def read(self):
+        return self._b
+
+    def getheader(self, k):
+        return self.headers.get(k)
+
+
+class _FakeConn:
+    """Counts how many CONNECTIONS were constructed, which is the thing pooling is
+    supposed to reduce — not how many requests were made."""
+
+    made: list = []
+
+    def __init__(self, host, timeout=None):
+        self.host, self.requests, self.closed = host, 0, False
+        _FakeConn.made.append(self)
+
+    # The script is a SHARED sequence of outcomes consumed across connections, not
+    # copied per connection — otherwise a scripted failure would repeat on the
+    # retry connection too and no retry could ever be observed to succeed.
+    def request(self, method, target, body=None, headers=None):
+        self.requests += 1
+        if _FakeConn.script and _FakeConn.script[0] == "boom":
+            _FakeConn.script.pop(0)
+            raise ConnectionResetError("server closed an idle keep-alive socket")
+
+    def getresponse(self):
+        return _FakeResp(**(_FakeConn.script.pop(0) if _FakeConn.script else {}))
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    _FakeConn.made = []
+    _FakeConn.script = []
+    monkeypatch.setattr(util.http.client, "HTTPSConnection", _FakeConn)
+    monkeypatch.setattr(util.http.client, "HTTPConnection", _FakeConn)
+    monkeypatch.setattr(util._POOL, "conns", {}, raising=False)
+    config.set_active(config.Config())
+    return _FakeConn
+
+
+def test_same_host_requests_reuse_one_connection(fake_http):
+    """The whole point: ~500 companies on a handful of ATS hosts stop paying a TLS
+    handshake each. Measured 149ms cold vs 84ms reused."""
+    for _ in range(5):
+        util.get_json("https://boards.greenhouse.io/v1/boards/acme/jobs")
+    assert len(fake_http.made) == 1
+    assert fake_http.made[0].requests == 5
+
+
+def test_different_hosts_do_not_share_a_connection(fake_http):
+    for url in ("https://a.example/x", "https://b.example/y", "https://a.example/z"):
+        util.get_json(url)
+    assert len(fake_http.made) == 2  # a, b — and a was reused
+
+
+def test_a_stale_keepalive_socket_retries_once_on_a_fresh_connection(fake_http):
+    """A server closing an idle connection must look like nothing to the caller.
+    Without this, pooling would invent outages that read as flaky job boards."""
+    # The connection is handed a dead socket on first use, then a good response.
+    fake_http.script = ["boom", {"body": b'{"ok": true}'}]
+    assert util.get_json("https://a.example/x") == {"ok": True}  # caller sees nothing
+    assert len(fake_http.made) == 2  # one fresh connection, exactly one retry
+    assert fake_http.made[0].closed  # the dead one was dropped, not left in the pool
+    assert util._POOL.conns[("https", "a.example")] is fake_http.made[1]
+
+
+def test_http_errors_still_arrive_as_urllib_HTTPError(fake_http):
+    """`engine._fetch_company` reads `.code` off this, and `discover.probe` branches
+    on 401/403/404/429. Swapping the transport must not change the exception type."""
+    fake_http.script = [{"status": 404}]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        util.get_json("https://a.example/missing")
+    assert e.value.code == 404
+
+
+def test_network_failures_still_arrive_as_NET_ERRORS(fake_http):
+    """Every source has `except NET_ERRORS` around its fetch. http.client raises
+    OSError subclasses, which that tuple does NOT catch — so an untranslated
+    failure would escape as an unhandled crash instead of "this source is down"."""
+    fake_http.script = ["boom", "boom"]
+    with pytest.raises(util.NET_ERRORS):
+        util.get_json("https://a.example/x")
+
+
+def test_redirects_are_followed(fake_http):
+    """urllib followed them, so any source whose API redirects would silently break
+    if the pooled client didn't."""
+    fake_http.script = [
+        {"status": 302, "headers": {"Location": "https://b.example/moved"}},
+        {"body": b'{"moved": true}'},
+    ]
+    assert util.get_json("https://a.example/x") == {"moved": True}
+
+
+def test_the_pool_is_thread_local(fake_http):
+    """Connection reuse ACROSS threads is how pooling corrupts responses. Two
+    threads must never be handed the same connection."""
+    import threading
+
+    seen = []
+
+    def hit():
+        util.get_json("https://a.example/x")
+        seen.append(id(util._POOL.conns[("https", "a.example")]))
+
+    ts = [threading.Thread(target=hit) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(set(seen)) == 4
+
+
+def test_the_pool_is_bounded(fake_http):
+    """A long run must not accumulate descriptors without limit."""
+    for i in range(util._POOL_MAX + 4):
+        util.get_json(f"https://h{i}.example/x")
+    assert len(util._POOL.conns) <= util._POOL_MAX
+
+
+# ── funnel: bounded, concurrent probing ───────────────────────────────────────
+def _breadth(n):
+    return [
+        {
+            "company": f"Co{i}",
+            "title": "AI Engineer",
+            "url": f"https://boards.greenhouse.io/co{i}/jobs/1",
+        }
+        for i in range(n)
+    ]
+
+
+def test_dead_candidates_stop_at_the_probe_budget(monkeypatch):
+    """The budget counts ATTEMPTS. It used to count SUCCESSES, so a run where every
+    candidate was dead never incremented it and probed all 150 serially — ~60
+    seconds of someone else's rate limit to add zero companies."""
+    calls = []
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda s: calls.append(s))
+    cfg = config.Config(funnel_max_probes_per_run=10, funnel_max_new_per_run=25)
+    assert funnel.funnel(_breadth(150), set(), set(), cfg) == []
+    assert len(calls) == 10, f"probed {len(calls)} dead candidates, budget was 10"
+
+
+def test_live_candidates_stop_at_the_new_company_budget(monkeypatch):
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda s: 3)
+    cfg = config.Config(funnel_max_probes_per_run=50, funnel_max_new_per_run=5)
+    assert len(funnel.funnel(_breadth(80), set(), set(), cfg)) == 5
+
+
+def test_probing_is_concurrent_but_never_exceeds_the_budget(monkeypatch):
+    """Concurrency here is only safe BECAUSE the budget bounds it: the slice is
+    taken before the pool runs, so parallel probing adds wall-clock speed and zero
+    extra load on third-party boards."""
+    import threading
+    import time
+
+    peak, cur, lock = [0], [0], threading.Lock()
+
+    def probe(_slug):
+        with lock:
+            cur[0] += 1
+            peak[0] = max(peak[0], cur[0])
+        time.sleep(0.02)  # hold the slot so genuine overlap is observable
+        with lock:
+            cur[0] -= 1
+        return 1
+
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: probe)
+    cfg = config.Config(funnel_max_probes_per_run=20, funnel_max_new_per_run=25)
+    funnel.funnel(_breadth(60), set(), set(), cfg)
+    assert peak[0] > 1, "probes ran serially — the parallelism is not there"
+
+
+def test_dry_run_never_probes(monkeypatch):
+    def boom(ats):
+        raise AssertionError("a dry run must not touch a third-party board")
+
+    monkeypatch.setattr(funnel, "liveness_for", boom)
+    out = funnel.funnel(_breadth(3), set(), set(), config.Config(), dry=True)
+    assert len(out) == 3
+
+
+def test_funnel_does_not_import_its_way_into_a_cycle():
+    """discover.py must not import funnel — reusing a parallel prober across the two
+    would deadlock imports."""
+    import ast
+
+    src = (Path(funnel.__file__).parent / "discover.py").read_text(encoding="utf-8")
+    imported = {
+        n.module or ""
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.ImportFrom)
+    } | {
+        a.name
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Import)
+        for a in n.names
+    }
+    assert not any("funnel" in m for m in imported), imported
+
+
+# ── harvest: bounded memory ───────────────────────────────────────────────────
+def test_harvest_bounds_the_results_it_holds_in_memory(monkeypatch):
+    """`ex.map` submits every company up front, so completed results PILE UP
+    unconsumed — all ~500 full sets of job descriptions alive at once, measured
+    ~1.25 GB peak RSS for work that only ever needs a couple of dozen boards.
+
+    The guarantee is SCALE INVARIANCE: how much is held at once is a function of
+    the window and the pool, not of how many companies you have. So this measures
+    the peak fetched-but-unconsumed count at two very different universe sizes and
+    requires it not to grow with n. Two earlier versions of this test were worse
+    and both are worth naming: one asserted "at most 12 fetches in flight", which
+    the worker pool guarantees on its own and which PASSED with the window
+    sabotaged to a billion; the next asserted a hand-guessed constant (40) and
+    went red in CI at 45 — a correct number, since the true bound is the window
+    plus whatever completed while the main thread was consuming. A guessed
+    threshold tests the guess. This tests the property."""
+    cfg = config.Config(remote_only=False, min_score=0)
+    config.set_active(cfg)
+    threading = __import__("threading")
+
+    def run(n):
+        lock = threading.Lock()
+        made, eaten, gap, seen = [0], [0], [0], []
+
+        def fake(slug, **kw):
+            if slug == "c7":
+                raise ValueError("boom")
+            out = [
+                {
+                    "title": f"AI Engineer {slug}",
+                    "url": f"https://boards.greenhouse.io/{slug}/jobs/1",
+                    "posted": "",
+                    "text": "ai engineer",
+                    "location": "Remote",
+                }
+            ]
+            with lock:
+                seen.append(slug)
+                made[0] += 1
+                gap[0] = max(gap[0], made[0] - eaten[0])
+            return out
+
+        real_consume = engine._consume
+
+        def counting_consume(postings, *a):
+            with lock:
+                eaten[0] += 1
+            return real_consume(postings, *a)
+
+        monkeypatch.setattr(engine, "_consume", counting_consume)
+        monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+        monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+        companies = [
+            {"name": f"C{i}", "ats": "greenhouse", "slug": f"c{i}"} for i in range(n)
+        ]
+        rows, _, errors = engine.harvest(cfg, companies=companies)
+        assert sorted(seen) == sorted(c["slug"] for c in companies if c["slug"] != "c7")
+        assert any("c7" in e for e in errors)  # a failing board still surfaces
+        assert len(rows) == n - 1
+        return gap[0]
+
+    small, large = run(200), run(1600)
+    assert large < small * 2, (
+        f"held {small} results at n=200 but {large} at n=1600 — memory is scaling "
+        "with the universe again, which is the 1.25 GB bug."
+    )
+    assert large < 200, f"held {large} results at once; the window is 24 + a pool of 12"

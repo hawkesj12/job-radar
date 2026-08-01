@@ -5,10 +5,11 @@ The engine itself writes nothing."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import urllib.error
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import config
 from .dedup import find_hit_key, norm
@@ -222,19 +223,38 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
             return (c, None, f"{name} ({ats}:{slug}): {type(e).__name__}")
 
     if companies:
+        # A SLIDING WINDOW of in-flight futures, not `ex.map`. `map` submits every
+        # company up front, so all ~500 result lists -- each a full set of job
+        # descriptions -- are alive at once whether or not the consumer has caught
+        # up: measured ~1.25 GB peak RSS at 500 companies, for work that only ever
+        # needs 12 boards in memory. Here at most `window` results exist, and each
+        # is released as soon as _consume has folded it into `hits`.
+        #
+        # Consumption stays SINGLE-THREADED on this thread, which is the property
+        # that lets `hits`/`blocks` go without a lock (see their comment above).
+        # Workers only fetch.
+        window = 24  # 2x max_workers: enough to keep every worker fed, no more
         with ThreadPoolExecutor(max_workers=12) as ex:
-            for c, ps, err in ex.map(_fetch_company, companies):
-                if err:
-                    errors.append(err)
-                    continue
-                name, ats = c.get("name", c.get("slug") or "?"), c.get("ats")
-                for p in ps:
-                    p["company"], p["source"], p["industry"] = (
-                        name,
-                        ats,
-                        c.get("industry", ""),
-                    )
-                _consume(ps, hits, blocks, cfg, meta)
+            pending, queue = set(), iter(companies)
+            for c in itertools.islice(queue, window):
+                pending.add(ex.submit(_fetch_company, c))
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for c in itertools.islice(queue, len(done)):  # top the window back up
+                    pending.add(ex.submit(_fetch_company, c))
+                for fut in done:
+                    c, ps, err = fut.result()
+                    if err:
+                        errors.append(err)
+                        continue
+                    name, ats = c.get("name", c.get("slug") or "?"), c.get("ats")
+                    for p in ps:
+                        p["company"], p["source"], p["industry"] = (
+                            name,
+                            ats,
+                            c.get("industry", ""),
+                        )
+                    _consume(ps, hits, blocks, cfg, meta)
 
     # Breadth sources are independent third-party hosts — fetch them in
     # parallel (like depth) and consume single-threaded in a stable order. No

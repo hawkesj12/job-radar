@@ -13,6 +13,7 @@ source, url, signals, dedup_key
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import csv
 import hashlib
@@ -24,6 +25,13 @@ from pathlib import Path
 
 from .dedup import dedup_key
 from .util import age_int, atomic_write_text, today_et
+
+
+class ShortlistEncodingError(Exception):
+    """The store exists but isn't text we can read. Its own type so a caller can
+    tell "your file is in the wrong encoding" (actionable, the user fixes it) from
+    "the file is corrupt" -- and so the CLI can print the advice instead of a
+    codec traceback."""
 
 
 @contextlib.contextmanager
@@ -179,8 +187,30 @@ def load_all(path) -> list[dict]:
     # returns None and `apply`/`dismiss` report "no role with id ..." forever. The
     # file looks perfect in a spreadsheet, which is what makes it so hard to
     # diagnose. utf-8-sig strips a BOM if present and is identical to utf-8 if not.
-    with p.open(newline="", encoding="utf-8-sig") as f:
-        return [dict(row) for row in csv.DictReader(f)]
+    #
+    # A store that isn't UTF-8 at all used to raise a bare UnicodeDecodeError out of
+    # this line, and load_all is on the path of EVERY command -- so `list`, `apply`
+    # and `dismiss` all died with a codec traceback naming a byte offset. The user
+    # could not even reach their own file to fix it. Excel on Windows will happily
+    # save a CSV as UTF-16 ("Unicode Text"), so this is a two-click mistake, not an
+    # exotic one. Sniff the BOM and decode it; anything genuinely undecodable
+    # raises a message that names the file and what to do about it. Fail loud, but
+    # fail USEFULLY.
+    raw = p.read_bytes()
+    for bom, enc in ((codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16")):
+        if raw.startswith(bom):
+            text = raw.decode(enc)
+            break
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as e:
+            raise ShortlistEncodingError(
+                f"{p}: not UTF-8 or UTF-16 ({e.reason} at byte {e.start}). "
+                "Re-save it as CSV UTF-8 -- in Excel, File > Save As > "
+                '"CSV UTF-8 (Comma delimited)".'
+            ) from e
+    return [dict(row) for row in csv.DictReader(io.StringIO(text, newline=""))]
 
 
 def write_all(path, rows: list[dict]) -> None:

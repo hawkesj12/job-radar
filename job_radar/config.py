@@ -232,17 +232,19 @@ class Config:
     frontier_penalty: int = 10
     local_bonus: int = 10
     score_len_b: float = 0.75
-    # BM25's term-frequency saturation parameter. It was MISSING, and its absence is
-    # not a detail: `raw / norm` is the k1 -> infinity limit of BM25, where
-    # saturation is switched off entirely. Because `norm` bottoms out at
-    # `1 - score_len_b` = 0.25, a very short document had its score MULTIPLIED by up
-    # to 4x -- a floor no value of avg_jd_tokens can move, since raising it shrinks
-    # the divisor for long and short documents alike. The measured consequence: an
-    # 80-word aggregator stub outscored the same role's full employer description,
-    # so 14 of 20 merged roles handed the user an aggregator redirect instead of the
-    # company's own ATS link. Scoring here is presence-based (tf is always 1), so
-    # BM25 reduces to raw*(k1+1)/(1+k1*norm). 1.2 is the literature default and
-    # measured best on a live board: aggregator-vs-employer wins 16/20 -> 7/20.
+    # NOT term-frequency saturation, despite the name and despite what this comment
+    # and the README both used to claim. `_present` returns each keyword AT MOST
+    # ONCE, so tf is pinned at 1 and there is no term frequency left to saturate.
+    # Measured on this codebase: repeating a keyword 1x / 5x / 50x / 500x scores
+    # 26 / 26 / 25 / 22 -- never rising, and mildly falling as the repetition
+    # lengthens the document. What score_k1 actually does is set the GAIN on length
+    # normalization: 0.1 / 1.2 / 100 gives 24 / 36 / 64 on the same posting. A real
+    # knob, honestly described.
+    #
+    # Keeping presence-based scoring is a deliberate choice, not an oversight: it is
+    # precisely why a keyword-stuffed posting cannot buy rank. The claim about it
+    # was the only thing wrong. 1.2 stays because it is the literature default and
+    # measured best on a live board (aggregator-vs-employer wins 16/20 -> 7/20).
     score_k1: float = 1.2
     # The "normal" JD length the BM25 length penalty divides by. Was 400, which is
     # roughly a job-board SUMMARY -- but this tool reads full ATS descriptions, and
