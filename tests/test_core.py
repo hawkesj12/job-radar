@@ -4,6 +4,7 @@ LLM no-op guarantee. Run: pytest"""
 import json
 import os
 import types
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
@@ -1774,12 +1775,292 @@ def test_research_title_penalties_are_reachable():
     because `relevant()` filters it first — but the prefixed forms that DO pass the
     relevance gate are exactly where the penalty is meant to bite."""
     c = config.Config()
-    for kw in ("research scientist", "quantitative researcher", "member of technical staff"):
+    for kw in (
+        "research scientist",
+        "quantitative researcher",
+        "member of technical staff",
+    ):
         assert not scoring.relevant(kw, c), f"{kw!r} unexpectedly passes the gate bare"
         title = f"AI {kw.title()}"
         assert scoring.relevant(title, c), f"{title!r} should reach scoring"
         p = {"title": title, "location": "Remote", "text": "ai engineer python"}
-        plain = {"title": "AI Engineer", "location": "Remote", "text": "ai engineer python"}
+        plain = {
+            "title": "AI Engineer",
+            "location": "Remote",
+            "text": "ai engineer python",
+        }
         assert scoring.score(p, c) < scoring.score(plain, c), (
             f"the {kw!r} penalty never fired on {title!r} — it really is unreachable"
         )
+
+
+# ── HTTP connection pooling ───────────────────────────────────────────────────
+class _FakeResp:
+    def __init__(self, status=200, body=b"{}", headers=None):
+        self.status, self._b = status, body
+        self.reason, self.headers = "OK", headers or {}
+
+    def read(self):
+        return self._b
+
+    def getheader(self, k):
+        return self.headers.get(k)
+
+
+class _FakeConn:
+    """Counts how many CONNECTIONS were constructed, which is the thing pooling is
+    supposed to reduce — not how many requests were made."""
+
+    made: list = []
+
+    def __init__(self, host, timeout=None):
+        self.host, self.requests, self.closed = host, 0, False
+        _FakeConn.made.append(self)
+
+    # The script is a SHARED sequence of outcomes consumed across connections, not
+    # copied per connection — otherwise a scripted failure would repeat on the
+    # retry connection too and no retry could ever be observed to succeed.
+    def request(self, method, target, body=None, headers=None):
+        self.requests += 1
+        if _FakeConn.script and _FakeConn.script[0] == "boom":
+            _FakeConn.script.pop(0)
+            raise ConnectionResetError("server closed an idle keep-alive socket")
+
+    def getresponse(self):
+        return _FakeResp(**(_FakeConn.script.pop(0) if _FakeConn.script else {}))
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    _FakeConn.made = []
+    _FakeConn.script = []
+    monkeypatch.setattr(util.http.client, "HTTPSConnection", _FakeConn)
+    monkeypatch.setattr(util.http.client, "HTTPConnection", _FakeConn)
+    monkeypatch.setattr(util._POOL, "conns", {}, raising=False)
+    config.set_active(config.Config())
+    return _FakeConn
+
+
+def test_same_host_requests_reuse_one_connection(fake_http):
+    """The whole point: ~500 companies on a handful of ATS hosts stop paying a TLS
+    handshake each. Measured 149ms cold vs 84ms reused."""
+    for _ in range(5):
+        util.get_json("https://boards.greenhouse.io/v1/boards/acme/jobs")
+    assert len(fake_http.made) == 1
+    assert fake_http.made[0].requests == 5
+
+
+def test_different_hosts_do_not_share_a_connection(fake_http):
+    for url in ("https://a.example/x", "https://b.example/y", "https://a.example/z"):
+        util.get_json(url)
+    assert len(fake_http.made) == 2  # a, b — and a was reused
+
+
+def test_a_stale_keepalive_socket_retries_once_on_a_fresh_connection(fake_http):
+    """A server closing an idle connection must look like nothing to the caller.
+    Without this, pooling would invent outages that read as flaky job boards."""
+    # The connection is handed a dead socket on first use, then a good response.
+    fake_http.script = ["boom", {"body": b'{"ok": true}'}]
+    assert util.get_json("https://a.example/x") == {"ok": True}  # caller sees nothing
+    assert len(fake_http.made) == 2  # one fresh connection, exactly one retry
+    assert fake_http.made[0].closed  # the dead one was dropped, not left in the pool
+    assert util._POOL.conns[("https", "a.example")] is fake_http.made[1]
+
+
+def test_http_errors_still_arrive_as_urllib_HTTPError(fake_http):
+    """`engine._fetch_company` reads `.code` off this, and `discover.probe` branches
+    on 401/403/404/429. Swapping the transport must not change the exception type."""
+    fake_http.script = [{"status": 404}]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        util.get_json("https://a.example/missing")
+    assert e.value.code == 404
+
+
+def test_network_failures_still_arrive_as_NET_ERRORS(fake_http):
+    """Every source has `except NET_ERRORS` around its fetch. http.client raises
+    OSError subclasses, which that tuple does NOT catch — so an untranslated
+    failure would escape as an unhandled crash instead of "this source is down"."""
+    fake_http.script = ["boom", "boom"]
+    with pytest.raises(util.NET_ERRORS):
+        util.get_json("https://a.example/x")
+
+
+def test_redirects_are_followed(fake_http):
+    """urllib followed them, so any source whose API redirects would silently break
+    if the pooled client didn't."""
+    fake_http.script = [
+        {"status": 302, "headers": {"Location": "https://b.example/moved"}},
+        {"body": b'{"moved": true}'},
+    ]
+    assert util.get_json("https://a.example/x") == {"moved": True}
+
+
+def test_the_pool_is_thread_local(fake_http):
+    """Connection reuse ACROSS threads is how pooling corrupts responses. Two
+    threads must never be handed the same connection."""
+    import threading
+
+    seen = []
+
+    def hit():
+        util.get_json("https://a.example/x")
+        seen.append(id(util._POOL.conns[("https", "a.example")]))
+
+    ts = [threading.Thread(target=hit) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(set(seen)) == 4
+
+
+def test_the_pool_is_bounded(fake_http):
+    """A long run must not accumulate descriptors without limit."""
+    for i in range(util._POOL_MAX + 4):
+        util.get_json(f"https://h{i}.example/x")
+    assert len(util._POOL.conns) <= util._POOL_MAX
+
+
+# ── funnel: bounded, concurrent probing ───────────────────────────────────────
+def _breadth(n):
+    return [
+        {
+            "company": f"Co{i}",
+            "title": "AI Engineer",
+            "url": f"https://boards.greenhouse.io/co{i}/jobs/1",
+        }
+        for i in range(n)
+    ]
+
+
+def test_dead_candidates_stop_at_the_probe_budget(monkeypatch):
+    """The budget counts ATTEMPTS. It used to count SUCCESSES, so a run where every
+    candidate was dead never incremented it and probed all 150 serially — ~60
+    seconds of someone else's rate limit to add zero companies."""
+    calls = []
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda s: calls.append(s))
+    cfg = config.Config(funnel_max_probes_per_run=10, funnel_max_new_per_run=25)
+    assert funnel.funnel(_breadth(150), set(), set(), cfg) == []
+    assert len(calls) == 10, f"probed {len(calls)} dead candidates, budget was 10"
+
+
+def test_live_candidates_stop_at_the_new_company_budget(monkeypatch):
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: lambda s: 3)
+    cfg = config.Config(funnel_max_probes_per_run=50, funnel_max_new_per_run=5)
+    assert len(funnel.funnel(_breadth(80), set(), set(), cfg)) == 5
+
+
+def test_probing_is_concurrent_but_never_exceeds_the_budget(monkeypatch):
+    """Concurrency here is only safe BECAUSE the budget bounds it: the slice is
+    taken before the pool runs, so parallel probing adds wall-clock speed and zero
+    extra load on third-party boards."""
+    import threading
+    import time
+
+    peak, cur, lock = [0], [0], threading.Lock()
+
+    def probe(_slug):
+        with lock:
+            cur[0] += 1
+            peak[0] = max(peak[0], cur[0])
+        time.sleep(0.02)  # hold the slot so genuine overlap is observable
+        with lock:
+            cur[0] -= 1
+        return 1
+
+    monkeypatch.setattr(funnel, "liveness_for", lambda ats: probe)
+    cfg = config.Config(funnel_max_probes_per_run=20, funnel_max_new_per_run=25)
+    funnel.funnel(_breadth(60), set(), set(), cfg)
+    assert peak[0] > 1, "probes ran serially — the parallelism is not there"
+
+
+def test_dry_run_never_probes(monkeypatch):
+    def boom(ats):
+        raise AssertionError("a dry run must not touch a third-party board")
+
+    monkeypatch.setattr(funnel, "liveness_for", boom)
+    out = funnel.funnel(_breadth(3), set(), set(), config.Config(), dry=True)
+    assert len(out) == 3
+
+
+def test_funnel_does_not_import_its_way_into_a_cycle():
+    """discover.py must not import funnel — reusing a parallel prober across the two
+    would deadlock imports."""
+    import ast
+
+    src = (Path(funnel.__file__).parent / "discover.py").read_text(encoding="utf-8")
+    imported = {
+        n.module or ""
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.ImportFrom)
+    } | {
+        a.name
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Import)
+        for a in n.names
+    }
+    assert not any("funnel" in m for m in imported), imported
+
+
+# ── harvest: bounded memory ───────────────────────────────────────────────────
+def test_harvest_bounds_the_results_it_holds_in_memory(monkeypatch):
+    """`ex.map` submits every company up front, so completed results PILE UP
+    unconsumed — all ~500 full sets of job descriptions alive at once, measured
+    ~1.25 GB peak RSS for work that only ever needs a couple of dozen boards in
+    memory.
+
+    The thing to measure is the number of results FETCHED BUT NOT YET CONSUMED. An
+    earlier version of this test asserted "at most 12 fetches in flight", which is
+    vacuous: the 12-worker pool bounds that whether or not submission is bounded,
+    and the test duly passed when the window was sabotaged to a billion. Every
+    company must still be fetched exactly once and every failure must still
+    surface."""
+    cfg = config.Config(remote_only=False, min_score=0)
+    config.set_active(cfg)
+    n = 300
+    lock = __import__("threading").Lock()
+    made, eaten, gap, seen = [0], [0], [0], []
+
+    def fake(slug, **kw):
+        if slug == "c7":
+            raise ValueError("boom")
+        out = [
+            {
+                "title": f"AI Engineer {slug}",
+                "url": f"https://boards.greenhouse.io/{slug}/jobs/1",
+                "posted": "",
+                "text": "ai engineer",
+                "location": "Remote",
+            }
+        ]
+        with lock:
+            seen.append(slug)
+            made[0] += 1
+            gap[0] = max(gap[0], made[0] - eaten[0])
+        return out
+
+    real_consume = engine._consume
+
+    def counting_consume(postings, *a):
+        with lock:
+            eaten[0] += 1
+        return real_consume(postings, *a)
+
+    monkeypatch.setattr(engine, "_consume", counting_consume)
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+    companies = [
+        {"name": f"C{i}", "ats": "greenhouse", "slug": f"c{i}"} for i in range(n)
+    ]
+    rows, _, errors = engine.harvest(cfg, companies=companies)
+
+    assert sorted(seen) == sorted(c["slug"] for c in companies if c["slug"] != "c7")
+    assert any("c7" in e for e in errors)  # a failing board still surfaces
+    assert len(rows) == n - 1
+    assert gap[0] <= 40, (
+        f"{gap[0]} fetched-but-unconsumed results were held at once out of {n}. "
+        "Submission is unbounded again — this is the 1.25 GB bug."
+    )

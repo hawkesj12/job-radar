@@ -54,6 +54,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   couldn't reach your own file to fix it. UTF-16 now loads; anything genuinely
   unreadable gets one sentence naming the file and the fix.
 
+### Performance
+
+None of these change a single score, ranking, or row — only how long a scan takes
+and how much memory it uses.
+
+- **HTTP connections are reused per host.** A scan is ~500 companies concentrated
+  onto a handful of ATS hosts, and every request was opening a fresh TCP + TLS
+  handshake: 149ms cold against 84ms on a reused connection. The pool is
+  per-thread, so connections are never shared between workers, and a socket the
+  server closed while idle is transparently retried once on a fresh one.
+- **The discovery funnel probes in parallel.** It was serial: ~150 dead candidates
+  measured at roughly 60 seconds of requests to add zero companies. The probe
+  budget added in 0.5.x already caps how many requests go out, so this is purely
+  wall-clock — the load on third-party boards is unchanged.
+- **Peak memory during a scan is bounded.** All ~500 companies were submitted at
+  once, so every fetched job description stayed in memory whether or not it had
+  been processed yet (~1.25 GB at 500 companies). Fetching now runs on a sliding
+  window and results are released as they are consumed.
+
 ### Changed
 
 - **The README's scoring claim was wrong and has been corrected.** It advertised

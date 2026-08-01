@@ -8,6 +8,7 @@ board: this only ever needed to know whether the slug resolves to >=1 open role.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from . import config
 from .dedup import ats_from_url, norm
@@ -33,44 +34,46 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
             continue
         candidates[key] = comp
 
-    added: list = []
-    # TWO budgets, because they bound different things and only one of them was here.
-    # `max_new_per_run` counts SUCCESSES, so a dead slug never incremented it: the
-    # break below could not fire on a run where nothing was live, and the loop probed
-    # every candidate serially. 150 dead candidates measured at ~60 seconds of
-    # third-party requests to add zero companies -- on every scan, on by default.
-    # `probes` counts ATTEMPTS, which is the thing that actually costs time and
-    # someone else's rate limit.
-    probes = 0
-    for (ats, slug), name in candidates.items():
-        if len(added) >= cfg.funnel_max_new_per_run:
-            break
-        if probes >= cfg.funnel_max_probes_per_run:
-            break  # deferred, not lost — discovery runs again next scan
-        if dry:
-            added.append(
-                {"name": name, "ats": ats, "slug": slug, "industry": "(discovered)"}
-            )
-            continue
-        probe_fn = liveness_for(ats)
-        if not probe_fn:
-            continue
-        probes += 1  # count the ATTEMPT, before it can fail
+    # Slice to the PROBE budget before probing, then run that bounded slice
+    # concurrently. Order matters: the budget is what makes concurrency safe here.
+    # An earlier decision deliberately kept this serial, on the grounds that
+    # parallelizing would multiply load on third-party ATS endpoints -- correct at
+    # the time, because the loop then probed EVERY candidate on every run. The
+    # probe budget (added since) caps the request COUNT whether they go out one at
+    # a time or eight at a time, so concurrency now only buys wall clock and adds
+    # no load at all. 150 dead candidates measured at ~60 seconds of serial
+    # requests to add zero companies.
+    #
+    # `max_new_per_run` is applied AFTER, to the live results: it counts successes,
+    # so it never bounded the probing (a dead slug never incremented it) and it
+    # cannot be used to stop early.
+    if dry:  # no probing at all — just report what WOULD be probed
+        return [
+            {"name": name, "ats": ats, "slug": slug, "industry": "(discovered)"}
+            for (ats, slug), name in list(candidates.items())[
+                : cfg.funnel_max_new_per_run
+            ]
+        ]
+
+    batch = [
+        {"name": name, "ats": ats, "slug": slug}
+        for (ats, slug), name in candidates.items()
+        if liveness_for(ats)
+    ][: cfg.funnel_max_probes_per_run]  # deferred, not lost — next scan probes on
+
+    def _probe(c):
         try:
-            n_roles = probe_fn(slug)
+            return c if liveness_for(c["ats"])(c["slug"]) else None
         except NET_ERRORS:
-            continue  # dead/unreachable slug — skip (a real bug would surface)
-        if n_roles:  # >=1 posting -> the slug is real
-            added.append(
-                {
-                    "name": name,
-                    "ats": ats,
-                    "slug": slug,
-                    "industry": "(discovered)",
-                    "source": "discovered",
-                }
-            )
-    return added
+            return None  # dead/unreachable slug (a real bug would still surface)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(batch) or 1)) as ex:
+        live = [c for c in ex.map(_probe, batch) if c]
+
+    return [
+        {**c, "industry": "(discovered)", "source": "discovered"}
+        for c in live[: cfg.funnel_max_new_per_run]
+    ]
 
 
 def append_watchlist(wl_path, new_entries):
