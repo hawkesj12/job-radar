@@ -516,6 +516,46 @@ _G_AGGREGATORS = (
     "trabajo.",
 )
 
+# THE ALLOWLIST, and the direction matters more than the contents.
+#
+# `direct_apply` used to be `not _is_aggregator(host)` against the hand-maintained
+# blocklist above, which means an UNKNOWN host counted as direct-to-employer.
+# Measured on 20 live Google results: 17 came back True, of which exactly ONE
+# actually was. The other sixteen were dice.com, jobgether.com, jobilize.com,
+# jobright.ai, recruit.net, kyjobs.usnlx.com, trabajos.univision.com, jobs.fox8.com,
+# talents.vaia.com, vacancyglobalpro.up.railway.app -- and "trabajo." misses
+# "trabajos.univision.com" by one character.
+#
+# A blocklist can never be complete: job-board hosts are effectively unbounded and
+# new ones appear constantly, so every gap defaults to a WRONG "yes" on the field
+# this product is built on. An allowlist inverts the failure: an unrecognised host
+# is reported as not-direct, which understates rather than overstates. Recognising a
+# new ATS is a one-line addition; recognising every aggregator on earth is not a
+# finishable task.
+_ATS_HOSTS = (
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "myworkdayjobs.com",
+    "smartrecruiters.com",
+    "workable.com",
+    "rippling.com",
+    "teamtailor.com",
+    "icims.com",
+    "taleo.net",
+    "successfactors.com",
+    "bamboohr.com",
+    "jobvite.com",
+    "breezy.hr",
+    "recruitee.com",
+    "personio.de",
+    "usajobs.gov",
+    "paylocity.com",
+    "ultipro.com",
+    "adp.com",
+    "oraclecloud.com",
+)
+
 
 def _google_posted(text: str) -> str:
     """'16 hours ago' / '3 days ago' / '30+ days ago' / 'today' -> YYYY-MM-DD (ET).
@@ -538,21 +578,54 @@ def _google_posted(text: str) -> str:
     return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def _is_direct_apply(url: str, company: str = "") -> bool:
+    """Can an application actually be completed at this URL, at the employer?
+
+    POSITIVE evidence only, and that is the whole point -- see the _ATS_HOSTS
+    comment. Two things count: a known applicant-tracking system, or the employer's
+    own domain (a careers page). Anything else is reported as not-direct, including
+    hosts nobody has classified yet.
+    """
+    host = urlparse(url or "").netloc.lower()
+    if not host:
+        return False
+    if any(ats in host for ats in _ATS_HOSTS):
+        return True
+    # The employer's own domain: careers.acmehealth.com IS Acme Health Inc applying
+    # to itself. `_norm_name` is reused rather than re-rolled because it already
+    # drops the legal suffix -- without that, "Acme Health Inc" -> "acmehealthinc"
+    # fails to match "acmehealth" and a real careers page reads as an aggregator.
+    # Its docstring names keeping one definition as the point.
+    from .discover import _norm_name
+
+    token = _norm_name(company).replace(" ", "")
+    # 5 chars, because short tokens produce nonsense matches -- a company called
+    # "Ace" would claim every host containing "ace", which is most of them.
+    return len(token) >= 5 and token in re.sub(r"[^a-z0-9]", "", host)
+
+
 def _is_aggregator(url: str) -> bool:
-    """Does this apply link land on an aggregator rather than the employer?"""
+    """A KNOWN aggregator. Narrower than "not direct" -- used only to demote a link
+    when choosing between several, never to certify one as direct."""
     host = urlparse(url or "").netloc.lower()
     return bool(host) and any(agg in host for agg in _G_AGGREGATORS)
 
 
-def _best_apply_link(apply_options: list, fallback: str = "") -> str:
-    """Pick the direct-to-employer apply link from Google's apply_options, else the
-    first option, else `fallback`. Google orders these by its own preference, so the
-    first non-aggregator link is the best direct-to-company URL available."""
+def _best_apply_link(apply_options: list, fallback: str = "", company: str = "") -> str:
+    """Pick the best apply link from Google's `apply_options`.
+
+    Preference order, strongest first: a link we can POSITIVELY identify as reaching
+    the employer, then anything not on the known-aggregator list, then whatever
+    Google ranked first. The middle tier exists because an unclassified host is
+    genuinely better than a known aggregator even though we cannot certify it.
+    """
     links = [o.get("link", "") for o in (apply_options or []) if o.get("link")]
     for link in links:
-        host = urlparse(link).netloc.lower()
-        if not any(agg in host for agg in _G_AGGREGATORS):
-            return link  # a direct careers/ATS link — jobfitr's preferred target
+        if _is_direct_apply(link, company):
+            return link
+    for link in links:
+        if not _is_aggregator(link):
+            return link
     return links[0] if links else fallback
 
 
@@ -614,14 +687,31 @@ def search_google_jobs(queries):
                         "location": j.get("location", ""),
                         "url": (
                             _url := _best_apply_link(
-                                j.get("apply_options"), j.get("share_link", "")
+                                j.get("apply_options"),
+                                j.get("share_link", ""),
+                                j.get("company_name", ""),
                             )
                         ),
-                        # _best_apply_link ALREADY made this judgement to pick the
-                        # url -- it prefers the first non-aggregator option. Saying
-                        # so costs one call and turns an internal preference into a
-                        # fact a consumer can filter on.
-                        "direct_apply": not _is_aggregator(_url),
+                        # POSITIVE identification, not "absence from a blocklist".
+                        # The old form was `not _is_aggregator(url)`, which reported
+                        # 17 of 20 live rows as direct when exactly ONE was -- every
+                        # unclassified host counted as a yes.
+                        "direct_apply": _is_direct_apply(
+                            _url, j.get("company_name", "")
+                        ),
+                        # Google's own name for whoever hosts the apply link
+                        # ("LinkedIn", "Dice", "BeBee") -- the same judgement stated
+                        # by the vendor, kept so a consumer can audit ours.
+                        "source_extra": {
+                            k: v
+                            for k, v in (
+                                ("via", j.get("via")),
+                                ("job_id", j.get("job_id")),
+                                ("source_link", j.get("source_link")),
+                            )
+                            if v
+                        }
+                        or None,
                         "posted": _google_posted(ext.get("posted_at", "")),
                         # ALWAYS relative -- Google states recency as "2 days ago",
                         # never a date. The absolute value above is arithmetic done
@@ -1725,6 +1815,24 @@ def _hn_rows(tree, out: list) -> None:
         if len(parts) < 2 or not parts[0]:
             continue
         m = re.search(r"https?://[^\s)\]]+", text)
+        # SCAN the segments, do not index them. The convention is loose: measured
+        # across 174 comments in one thread, the remote token lands in slot 2 (62x),
+        # slot 3 (34x), slot 1 (18x) and slot 4 (7x) -- "PostHog | Full-Time |
+        # Technical CSMs | REMOTE" puts an employment type where a title is expected.
+        #
+        # This matters beyond tidiness. HN set remote_type on NOTHING, so 40 ONSITE
+        # and 19 HYBRID rows per thread fell through to remote_posting()'s text
+        # matching -- which sees the word "remote" somewhere in a long comment and
+        # passes them. On-site jobs were entering a remote-only harvest.
+        rtype = rbasis = None
+        etype = None
+        for seg in parts:
+            if rtype is None and (got := remote_type(seg)):
+                rtype, rbasis = got, "text"
+            if etype is None:
+                norm, _ = vocab.employment_type(seg)
+                if norm and norm != "OTHER":
+                    etype = norm
         out.append(
             {
                 "title": parts[1][:120],
@@ -1734,12 +1842,21 @@ def _hn_rows(tree, out: list) -> None:
                 if m
                 else f"https://news.ycombinator.com/item?id={c.get('id')}",
                 "posted": to_date(c.get("created_at")),
+                "posted_basis": "stated",  # Algolia gives a real ISO timestamp
                 "department": "",
-                "employment_type": "contract"
-                if re.search(
-                    r"contract|freelance|part.?time|fractional|1099", text, re.I
-                )
-                else "",
+                "remote_type": rtype,
+                "remote_basis": rbasis,
+                "source_extra": {"hn_author": c.get("author"), "hn_id": c.get("id")}
+                if c.get("author")
+                else None,
+                "employment_type": etype
+                or (
+                    "contract"
+                    if re.search(
+                        r"contract|freelance|part.?time|fractional|1099", text, re.I
+                    )
+                    else ""
+                ),
                 "salary": salary_from_text(text),
                 "text": text,
                 "source": "hn",
