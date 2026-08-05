@@ -273,9 +273,20 @@ def main() -> int:
             # finished.
             err = ""
             try:
-                yaml.safe_load(text.split("---")[1])
+                fm = yaml.safe_load(text.split("---")[1])
             except Exception as e:
+                fm = None
                 err = f"  !! YAML: {getattr(e, 'problem', e)}"
+            # REQUIRED keys, per _SCHEMA.md. A panel review deleted `license.read_at`
+            # -- which the schema marks REQUIRED -- and this still printed "complete",
+            # because "no TODOs left" is not the same as "has what the schema demands".
+            if isinstance(fm, dict) and not err:
+                missing = [k for k in ("name", "status", "lane", "license") if k not in fm]
+                lic = fm.get("license")
+                if isinstance(lic, dict) and "read_at" not in lic:
+                    missing.append("license.read_at")
+                if missing:
+                    err = f"  !! MISSING: {', '.join(missing)}"
             rows.append((f.name, n, err))
         width = max(len(n) for n, _, _ in rows)
         for name, n, err in rows:
@@ -283,7 +294,11 @@ def main() -> int:
             print(f"  {name:<{width}}  {state}{err}")
         done = sum(1 for _, n, err in rows if not n and not err)
         print(f"\n{done}/{len(rows)} complete and parsing")
-        return 0
+        # NONZERO when anything is incomplete. This returned 0 unconditionally, so
+        # `--check` reported problems and still passed: a planted TODO, a planted YAML
+        # break and a deleted required key were all printed with exit code 0. A gate
+        # that always passes is not a gate, and CI could never have caught any of it.
+        return 0 if done == len(rows) else 1
 
     names = a.names or sorted(p.stem for p in OUT.glob("*.txt"))
     for name in names:

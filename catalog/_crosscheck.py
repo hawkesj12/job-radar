@@ -76,6 +76,26 @@ def main() -> int:
     header: list[str] = []
     drift, fixed = [], 0
 
+    # STRUCTURAL, and deliberately ONE-DIRECTIONAL. The cell diff below can only
+    # compare rows present in BOTH files, so a profile whose INDEX row was deleted
+    # printed "no drift" and exited 0 -- a panel review removed a whole row and this
+    # reported clean.
+    #
+    # Only "profile exists, INDEX row missing" is checked. The reverse is NOT, and
+    # that is not laziness: INDEX.md carries other tables listing candidate and
+    # unevaluated sources whose first cell is prose or a run-on list of names
+    # ("bamboohr - jazzhr - homerun ..."), so treating every row as a claimed profile
+    # produces a dozen false positives. A false alarm in a gate is how the gate gets
+    # ignored.
+    indexed = set()
+    for ln in lines:
+        if ln.startswith("|"):
+            c0 = cells(ln)
+            if c0 and c0[0] and not set(c0[0]) <= set("- "):
+                indexed.add(re.sub(r"\[([^\]]+)\].*", r"\1", c0[0]))
+    for name in sorted(set(prof) - indexed):
+        drift.append(f"{name}: has a profile but NO row in INDEX.md")
+
     for i, ln in enumerate(lines):
         if not ln.startswith("|"):
             continue

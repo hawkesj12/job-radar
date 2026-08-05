@@ -132,6 +132,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The catalog's gates now actually gate, and now run in CI.**
+  `catalog/_scaffold.py --check` reported problems and returned 0 unconditionally — a
+  planted TODO, a planted YAML break and a deleted `license.read_at` (which the schema
+  marks REQUIRED) were all printed with a passing exit code. It now checks the
+  required keys and exits nonzero. `_crosscheck.py` could only compare rows present in
+  both files, so a profile whose INDEX row was deleted printed "no drift"; it now
+  fails structurally. Deliberately one-directional — INDEX.md carries other tables of
+  candidate sources whose first cell is prose, and a gate that cries wolf gets
+  ignored. Neither script ran in CI at all; both do now.
+
 - **Source attribution, which five wired sources require as a condition of access.**
   Nothing in the package provided any of it. Remote OK and Remotive both state plainly
   that they will **revoke** API access if their name is not shown as the source;

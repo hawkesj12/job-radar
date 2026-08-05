@@ -72,6 +72,13 @@ jobs:
         run: mypy
       - name: Test (pytest)
         run: pytest -q
+      # The catalog records each source's LICENCE as quoted contract text. Its own
+      # checker reported problems and exited 0 until 2026-08-05, so nothing enforced
+      # it and nothing ran it. Both halves were the bug.
+      - name: Catalog profiles are complete and parse
+        run: python catalog/_scaffold.py --check
+      - name: Catalog INDEX agrees with the profiles
+        run: python catalog/_crosscheck.py
 
       # The steps above use `pip install -e .` — an EDITABLE install, which points
       # Python at the source folder. That proves the CODE works here; it cannot
