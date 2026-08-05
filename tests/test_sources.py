@@ -14,6 +14,9 @@ and nesting verbatim — a fixture invented from the code proves only that the c
 agrees with itself. Run: pytest tests/test_sources.py
 """
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from job_radar import config, sources
@@ -1327,3 +1330,76 @@ def test_hn_reads_two_threads_not_one(monkeypatch):
     out = sources.search_hn_whoishiring([])
     assert seen == ["aug", "jul"], f"read {seen}, expected the two newest"
     assert len(out) == 2
+
+
+# ── the compatibility gate ──────────────────────────────────────────────────
+def test_department_is_byte_identical_to_0_6_0():
+    """THE COMPATIBILITY GATE. If this goes red, the release breaks a consumer.
+
+    `department` is deprecated but still emitted, because jobfitr pins a released
+    job-radar and reads that column today (as `category`). Removing or changing it
+    before 1.0 would break a shipped consumer at a MINOR version.
+
+    This is an equivalence test against history, not a self-consistent pin: it loads
+    0.6.0's sources.py out of git, runs both versions against the SAME fixtures, and
+    compares the department values. A pin written from the current code would only
+    prove the code agrees with itself.
+
+    Compared as a SET, deliberately. Row COUNTS changed on purpose in 0.7.0 —
+    himalayas now runs two lanes, smartrecruiters pages — so counting rows would fail
+    for the right reasons and hide the wrong ones. What must not change is the VALUE
+    the mapping derives from a given posting.
+    """
+    import importlib.util
+    import subprocess
+    import sys
+
+    src = subprocess.run(
+        ["git", "show", "b839c81:job_radar/sources.py"],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).parent.parent),
+    )
+    if src.returncode != 0:  # shallow clone / no git — skip rather than fail
+        pytest.skip("0.6.0 blob unavailable (no git history here)")
+    blob = Path(tempfile.mkdtemp()) / "sources_060.py"
+    blob.write_text(src.stdout, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("job_radar._v060_sources", blob)
+    old = importlib.util.module_from_spec(spec)
+    sys.modules["job_radar._v060_sources"] = old
+    spec.loader.exec_module(old)
+
+    config.set_active(config.Config())
+
+    def departments(mod, name, depth):
+        fn = (mod.DEPTH_ALL if depth else mod.BREADTH_ALL).get(name)
+        if fn is None or name not in SAMPLES:
+            return None
+        og, op, osl = mod.get_json, mod.post_json, mod.time.sleep
+        mod.get_json = lambda u, *a, **k: SAMPLES[name]
+        mod.post_json = lambda u, b, *a, **k: SAMPLES[name]
+        mod.time.sleep = lambda s: None
+        try:
+            rows = fn("slug") if depth else fn(["AI Engineer"])
+        except Exception:  # noqa: BLE001 — a keyed source without a key returns []
+            return None
+        finally:
+            mod.get_json, mod.post_json, mod.time.sleep = og, op, osl
+        return sorted({r.get("department") for r in rows})
+
+    checked = []
+    for name in sorted(set(old.DEPTH_ALL) & set(sources.DEPTH_ALL)):
+        before, after = departments(old, name, True), departments(sources, name, True)
+        if before is None:
+            continue
+        assert before == after, f"{name}: department changed {before} -> {after}"
+        checked.append(name)
+    for name in sorted(set(old.BREADTH_ALL) & set(sources.BREADTH_ALL)):
+        before, after = departments(old, name, False), departments(sources, name, False)
+        if before is None:
+            continue
+        assert before == after, f"{name}: department changed {before} -> {after}"
+        checked.append(name)
+    # A gate that silently checked nothing is worse than no gate — it reads as
+    # assurance. Same reasoning as the canary's all-skip guard.
+    assert len(checked) >= 8, f"only compared {checked} — the gate proved almost nothing"
