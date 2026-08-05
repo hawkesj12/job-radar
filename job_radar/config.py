@@ -325,7 +325,9 @@ class Config:
     # catalog/usajobs.md: "medical assistant" 736 and "registered nurse" 620 against a
     # 500-row page. 3 pages = 1,500 rows/query, bounded because this is a federal API
     # taking the largest page size in the codebase.
-    usajobs_max_pages: int = field(default_factory=lambda: _env_int("USAJOBS_MAX_PAGES", 3))
+    usajobs_max_pages: int = field(
+        default_factory=lambda: _env_int("USAJOBS_MAX_PAGES", 3)
+    )
     funnel_auto_grow: bool = True
     funnel_max_new_per_run: int = 25
     # A budget on PROBES ATTEMPTED, which max_new_per_run is not. That one counts

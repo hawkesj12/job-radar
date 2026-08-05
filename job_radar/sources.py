@@ -184,7 +184,9 @@ def fetch_ashby(slug: str):
 # Capped rather than exhaustive: Bosch alone would be 48 requests, and this runs
 # per-company across a watchlist. 10 pages = 1,000 roles/company, a 10x improvement
 # that stays bounded. Raise SMARTRECRUITERS_MAX_PAGES to widen it.
-SMARTRECRUITERS_MAX_PAGES = int(os.environ.get("SMARTRECRUITERS_MAX_PAGES", "10"))
+SMARTRECRUITERS_MAX_PAGES = max(
+    1, int(os.environ.get("SMARTRECRUITERS_MAX_PAGES", "10"))
+)
 SMARTRECRUITERS_PAGE = 100  # the API's max; larger values are silently clamped
 
 
@@ -197,10 +199,12 @@ def fetch_smartrecruiters(slug: str):
                 f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
                 f"?limit={SMARTRECRUITERS_PAGE}&offset={offset}"
             )
-        except NET_ERRORS:
+        except Exception:  # noqa: BLE001
             # Page 1 is different: with nothing collected there is no partial result
             # to salvage, and swallowing it would report a live board as empty. Same
-            # discipline as fetch_workday's mid-walk guard.
+            # discipline as fetch_workday's mid-walk guard -- and, like it, catching
+            # bare Exception rather than only NET_ERRORS, so a parse fault on page 5
+            # does not discard the 400 rows already in hand.
             if not out:
                 raise
             break
@@ -374,7 +378,7 @@ HIMALAYAS_PAGE = 20  # the API's own page size on this endpoint
 # The browse lane's hard backstop. Not the real budget -- freshness is (see
 # _himalayas_browse) -- but a date-parsing failure must not turn a 96,000-row corpus
 # into an unbounded walk. 50 pages = 1,000 rows.
-HIMALAYAS_BROWSE_PAGES = int(os.environ.get("HIMALAYAS_BROWSE_PAGES", "50"))
+HIMALAYAS_BROWSE_PAGES = max(1, int(os.environ.get("HIMALAYAS_BROWSE_PAGES", "50")))
 
 
 # ── GOOGLE FOR JOBS (SerpApi) helpers ───────────────────────────────────────
@@ -517,6 +521,28 @@ def search_google_jobs(queries):
     return out
 
 
+def _title_of(row: dict) -> str:
+    """The row's title, GUARANTEED to be a str.
+
+    `keep` is the caller's relevance gate, and it runs here -- one layer UPSTREAM of
+    engine._coerce, which is what used to make every title safe before anything called
+    `.lower()` on it. A vendor `null` title therefore reached `scoring.relevant` raw and
+    raised AttributeError, and because a depth adapter's exception is caught per-COMPANY
+    in engine._fetch_company, one malformed posting cost the whole employer -- the good
+    roles on that board included.
+
+    That is the exact failure engine._TEXT_FIELDS was written to prevent (see its
+    comment: "one malformed posting killed the whole run"). Moving the gate earlier for
+    the request saving moved it past that guard, so the guard comes along.
+
+    Deliberately here rather than in engine._fetch_company: the adapter owns the raw
+    vendor data, and fixing only the engine would leave the same landmine armed for any
+    direct caller that passes its own `keep`.
+    """
+    t = row.get("title")
+    return t if isinstance(t, str) else ("" if t is None else str(t))
+
+
 def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
     """Workday CxS job feed. Unlike every other ATS here, Workday needs a THREE-part
     key: tenant (`slug`), the numbered host shard (`wd1`..`wd103`), and the site slug
@@ -622,7 +648,7 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
     # already in hand from the list endpoint. Everything this drops would have been
     # dropped by engine._consume moments later, after paying a request for it.
     if keep is not None:
-        out = [r for r in out if keep(r.get("title", ""))]
+        out = [r for r in out if keep(_title_of(r))]
     if WORKDAY_FETCH_DETAILS and out:
         _workday_add_details(base, out)
     for r in out:
@@ -784,7 +810,7 @@ def fetch_rippling(slug: str, keep=None):
             }
         )
     if keep is not None:  # gate before the bodies — see the docstring
-        out = [r for r in out if keep(r.get("title", ""))]
+        out = [r for r in out if keep(_title_of(r))]
     if RIPPLING_FETCH_DETAILS and out:
         list(_detail_pool().map(lambda r: _rippling_detail(slug, r), out))
     for r in out:
@@ -1128,6 +1154,7 @@ def search_himalayas(queries, strict: bool = False):
     distinguish the two. The engine never passes it.
     """
     out: list[dict] = []
+    seen: set[str] = set()  # spans both lanes and every query
     for qy in queries:
         for page in range(1, HIMALAYAS_MAX_PAGES + 1):
             try:
@@ -1140,15 +1167,15 @@ def search_himalayas(queries, strict: bool = False):
                     raise
                 break  # a dead page ends this query; other queries still run
             jobs = data.get("jobs") or []
-            _himalayas_rows(jobs, out)
+            _himalayas_rows(jobs, out, seen)
             if len(jobs) < HIMALAYAS_PAGE:
                 break  # short page -> no more results for this query
             time.sleep(0.5)  # be polite between pages of the same query
-    _himalayas_browse(out, strict)
+    _himalayas_browse(out, strict, cfg=config.active(), seen=seen)
     return out
 
 
-def _himalayas_browse(out: list, strict: bool = False) -> None:
+def _himalayas_browse(out: list, strict: bool = False, cfg=None, seen=None) -> None:
     """The BROWSE lane -- the whole corpus, newest first.
 
     Himalayas has TWO endpoints with different pagination, and picking the wrong one
@@ -1160,15 +1187,28 @@ def _himalayas_browse(out: list, strict: bool = False) -> None:
     `q` does nothing here, so this cannot replace the search lane; it is a SECOND
     lane that sweeps the market while the search lane answers the title queries.
 
-    THE BUDGET IS FRESHNESS, NOT A PAGE COUNT, because browse is date-ordered --
-    measured 2026-08-05: offset 0 -> median age 0 days, 20,000 -> 8 days, 60,000 ->
-    28 days. So paging until the rows are older than `max_age_days` fetches exactly
-    the window the engine would keep and stops, instead of guessing a page cap and
-    either truncating the fresh part or paying for rows the age gate will discard.
-    HIMALAYAS_BROWSE_PAGES remains a hard backstop so a date-parsing failure cannot
-    turn this into an unbounded 4,900-request walk.
+    Browse is DATE-ORDERED -- measured 2026-08-05: offset 0 -> median age 0 days,
+    20,000 -> 8 days, 60,000 -> 28 days. That is what makes a bounded lane worth
+    having: the rows this takes are the FRESHEST rows in the corpus, not an arbitrary
+    slice of it.
+
+    WHAT ACTUALLY BOUNDS IT: `HIMALAYAS_BROWSE_PAGES` (default 50 = 1,000 rows). Be
+    precise about this, because an earlier version of this comment claimed "the age
+    gate is the budget" and that was FALSE at every shipped setting. Do the
+    arithmetic: 50 pages x 20 = offset 980, and a 60-day row (the default
+    `max_age_days`) sits near offset 130,000. The age branch below cannot fire at
+    defaults -- it only binds when `max_age_days` is small enough to be reached inside
+    the page cap. It is a secondary guard, not the budget.
+
+    So this lane takes ~1,000 of ~97,000 rows, and the honest reason it is still worth
+    it is ordering, not coverage: those 1,000 are the newest 1,000. Walking the whole
+    corpus is 4,850 requests, which is a harvest of its own rather than one source
+    among nineteen.
     """
-    cfg = config.active()
+    # The caller's cfg, falling back to the global. A library consumer (jobfitr)
+    # passes an explicit Config to harvest(); reading config.active() here would have
+    # given it the global default's age window instead of its own.
+    cfg = cfg or config.active()
     cutoff = cfg.max_age_days
     for page in range(HIMALAYAS_BROWSE_PAGES):
         offset = page * HIMALAYAS_PAGE
@@ -1184,10 +1224,11 @@ def _himalayas_browse(out: list, strict: bool = False) -> None:
         if not jobs:
             return
         before = len(out)
-        _himalayas_rows(jobs, out)
-        # Stop once the NEWEST row on this page is already past the age gate. Reading
-        # the newest rather than the median is deliberate: the feed is ordered, so if
-        # the best row here is too old, everything after it is too.
+        _himalayas_rows(jobs, out, seen)
+        # Secondary guard, NOT the budget (see the docstring). Stops once the newest
+        # row on this page is already past the age gate -- the feed is ordered, so if
+        # the best row here is too old, everything after it is too. Only fires when
+        # `max_age_days` is small enough to be reached inside HIMALAYAS_BROWSE_PAGES.
         ages = [
             a
             for a in (age_int(r.get("posted", "")) for r in out[before:])
@@ -1201,10 +1242,23 @@ def _himalayas_browse(out: list, strict: bool = False) -> None:
         time.sleep(0.5)
 
 
-def _himalayas_rows(jobs, out):
-    """Map one page of Himalayas jobs into `out` (split out so the paging loop above
-    reads as paging rather than as parsing)."""
+def _himalayas_rows(jobs, out, seen=None):
+    """Map one page of Himalayas jobs into `out`, skipping URLs already seen.
+
+    Dedup spans BOTH lanes and every title query, because this source now hits the
+    same job several ways: six title queries against the search endpoint, plus the
+    browse sweep, all overlapping. Measured without it: one job, three queries -> 53
+    rows for 1 unique URL. The engine's dedup absorbs that downstream, but an adapter
+    should not be transporting 50x the rows it can deliver -- and The Muse in this
+    same release dedups its fan-out, so leaving this one duplicating would be two
+    adapters disagreeing about whose job it is.
+    """
     for j in jobs:
+        url = j.get("applicationLink") or j.get("guid", "")
+        if seen is not None and url:
+            if url in seen:
+                continue
+            seen.add(url)
         text = clean(j.get("description") or j.get("excerpt", ""))
         regions = j.get("locationRestrictions") or []
         loc = (", ".join(regions) if regions else "") + " (Remote)"
@@ -1213,7 +1267,7 @@ def _himalayas_rows(jobs, out):
                 "title": j.get("title", ""),
                 "company": j.get("companyName", ""),
                 "location": loc.strip(),
-                "url": j.get("applicationLink") or j.get("guid", ""),
+                "url": url,
                 "posted": to_date(j.get("pubDate")),
                 "department": "",
                 "function": ", ".join(
@@ -1677,21 +1731,31 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
 # query reaches at most 100 x 20 = 2,000 rows however many it advertises -- `page_count`
 # said 20,223 when this was measured on 2026-08-03, which is a count of pages that do
 # not exist. Its ~36,000 real rows are only reachable by fanning out over the 19
-# categories, whose slices are nearly disjoint (19 dupes in 1,138 sampled).
+# 20 categories, whose slices are nearly disjoint (19 dupes in 1,138 sampled).
 #
 # The default here is deliberately small. A full 19-category fan-out to the cap is
-# ~1,900 requests, which is a harvest of its own rather than one source among sixteen;
+# ~2,000 requests, which is a harvest of its own rather than one source among nineteen;
 # widen it with THEMUSE_MAX_PAGES when The Muse is the point of the run.
 #
 # It is also NOT sorted by date (page 0 median 420d, page 90 median 45d), so the
 # freshness cut has to happen at ingest -- you cannot page to the fresh part.
-THEMUSE_MAX_PAGES = int(os.environ.get("THEMUSE_MAX_PAGES", "5"))
+# max(1, ...) like adzuna_pages and usajobs_max_pages: a cap of 0 would make zero
+# requests and return [], which is indistinguishable from an empty source.
+THEMUSE_MAX_PAGES = max(1, int(os.environ.get("THEMUSE_MAX_PAGES", "5")))
 THEMUSE_PAGE_CAP = 99
 
 
 # The 20-value taxonomy, verbatim from catalog/themuse.md. "Unknown" is a real
 # category value in the API, not a placeholder -- it is where The Muse files a job it
 # could not classify, so dropping it would silently lose rows.
+# VERIFIED 2026-08-05, all 20, one probe each: every value returns a page_count
+# distinct from the unfiltered feed (20,287) and 20/20 rows carrying that exact
+# category. This mattered because The Muse SILENTLY IGNORES an unrecognised parameter
+# value and serves the generic feed instead -- so an unverified slice would look
+# healthy while being a copy of the others, the same silent-truncation class the
+# fan-out exists to fix. Per-slice page_counts ranged Animal Care 3 to Software
+# Engineering 5,028; "Unknown" is real (1,058) and is where The Muse files a job it
+# could not classify.
 THEMUSE_CATEGORIES = (
     "Account Management",
     "Accounting and Finance",
@@ -1769,9 +1833,12 @@ def _themuse_rows(results, seen: set, out: list) -> None:
     """
     for j in results:
         jid = j.get("id")
-        if jid in seen:
-            continue
-        seen.add(jid)
+        # An id-less row must not poison the set: adding None once would make every
+        # LATER id-less row look like a duplicate and silently drop it.
+        if jid is not None:
+            if jid in seen:
+                continue
+            seen.add(jid)
         locs = [
             x.get("name", "") for x in (j.get("locations") or []) if isinstance(x, dict)
         ]

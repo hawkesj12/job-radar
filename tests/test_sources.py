@@ -958,7 +958,12 @@ def test_themuse_stops_at_the_page_cap(monkeypatch):
 
     monkeypatch.setattr(sources, "get_json", spy)
     sources.search_themuse([])
-    assert max(pages) <= sources.THEMUSE_PAGE_CAP, f"walked to page {max(pages)}"
+    # Assert the LITERAL vendor bound, not sources.THEMUSE_PAGE_CAP. Comparing the
+    # code against its own constant catches "the loop vanished" but never "the bound
+    # is wrong" — and 99 is a fact about The Muse (page 100 is a 400 "Value page is
+    # too high"), not a preference of ours.
+    assert max(pages) <= 99, f"walked to page {max(pages)} — page 100 is a hard 400"
+    assert max(pages) == 99, "never reached the cap, so the bound was not exercised"
 
 
 def test_themuse_fans_out_over_every_category(monkeypatch):
@@ -980,10 +985,35 @@ def test_themuse_fans_out_over_every_category(monkeypatch):
     )
     sources.search_themuse([])
     asked = {unquote(u.split("category=", 1)[1]) for u in urls if "category=" in u}
-    assert asked == set(sources.THEMUSE_CATEGORIES), (
-        f"missed categories: {set(sources.THEMUSE_CATEGORIES) - asked}"
-    )
-    assert len(urls) == len(sources.THEMUSE_CATEGORIES)
+    # Pinned against the LITERAL taxonomy measured on 2026-08-05, not against
+    # sources.THEMUSE_CATEGORIES — asserting the code matches its own constant would
+    # pass just as happily if someone deleted eighteen of them. Every value here was
+    # probed individually: each returns a page_count distinct from the unfiltered feed
+    # and 20/20 rows carrying that exact category.
+    expected = {
+        "Account Management",
+        "Accounting and Finance",
+        "Advertising and Marketing",
+        "Animal Care",
+        "Business Operations",
+        "Data and Analytics",
+        "Education",
+        "Food and Hospitality Services",
+        "Healthcare",
+        "Human Resources and Recruitment",
+        "Installation, Maintenance, and Repairs",
+        "Legal Services",
+        "Management",
+        "Product Management",
+        "Project Management",
+        "Retail",
+        "Sales",
+        "Science and Engineering",
+        "Software Engineering",
+        "Unknown",
+    }
+    assert asked == expected, f"taxonomy drifted: {expected ^ asked}"
+    assert len(urls) == 20
 
 
 def test_themuse_dedups_a_job_that_spans_two_categories(monkeypatch):
@@ -1297,7 +1327,12 @@ def test_usajobs_pages_with_the_page_parameter(monkeypatch):
         # total 5 at 2/page -> pages 1,2 full, page 3 short
         n = 2 if len(calls) < 3 else 1
         return _Resp(
-            {"SearchResult": {"SearchResultItems": [item] * n, "SearchResultCountAll": 5}}
+            {
+                "SearchResult": {
+                    "SearchResultItems": [item] * n,
+                    "SearchResultCountAll": 5,
+                }
+            }
         )
 
     monkeypatch.setattr(urllib.request, "urlopen", _open)
@@ -1333,7 +1368,7 @@ def test_hn_reads_two_threads_not_one(monkeypatch):
 
 
 # ── the compatibility gate ──────────────────────────────────────────────────
-def test_department_is_byte_identical_to_0_6_0():
+def test_department_is_byte_identical_to_0_6_0(monkeypatch):
     """THE COMPATIBILITY GATE. If this goes red, the release breaks a consumer.
 
     `department` is deprecated but still emitted, because jobfitr pins a released
@@ -1360,8 +1395,21 @@ def test_department_is_byte_identical_to_0_6_0():
         text=True,
         cwd=str(Path(__file__).parent.parent),
     )
-    if src.returncode != 0:  # shallow clone / no git — skip rather than fail
-        pytest.skip("0.6.0 blob unavailable (no git history here)")
+    if src.returncode != 0:
+        # Skip ONLY where there is genuinely no history to read (an sdist, a wheel
+        # test). Where .git exists and the blob still cannot be read, that is a
+        # SHALLOW CLONE, and skipping is how this gate silently never ran in CI:
+        # actions/checkout defaults to depth 1, and `pytest -q` prints a bare `s`
+        # with no reason. A compatibility gate that quietly does not run reads as
+        # assurance, which is worse than not having it. ci.yml now sets
+        # fetch-depth: 0; this makes a regression there loud instead of invisible.
+        if (Path(__file__).parent.parent / ".git").exists():
+            pytest.fail(
+                "0.6.0 blob unreachable but .git is present — shallow clone? "
+                "The department compatibility gate cannot run. "
+                "CI needs `fetch-depth: 0` on actions/checkout."
+            )
+        pytest.skip("no git history here (sdist/wheel test) — gate cannot run")
     blob = Path(tempfile.mkdtemp()) / "sources_060.py"
     blob.write_text(src.stdout, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("job_radar._v060_sources", blob)
@@ -1369,7 +1417,19 @@ def test_department_is_byte_identical_to_0_6_0():
     sys.modules["job_radar._v060_sources"] = old
     spec.loader.exec_module(old)
 
-    config.set_active(config.Config())
+    c = _cfg()
+    # Keyed sources return [] before making a request. Counting those as "compared"
+    # is how the anti-vacuity guard below stayed partly vacuous: adzuna, google_jobs,
+    # usajobs and hn were all comparing [] == []. USAJOBS is the case the CHANGELOG
+    # names as the sharp one (DepartmentName is the EMPLOYER), so a gate blind to it
+    # was blind to its own headline example. Same three lines the contract test
+    # above already uses.
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    # USAJOBS builds its own urllib Request rather than going through get_json, so it
+    # has to be stubbed a level lower — and it is the adapter whose department mapping
+    # matters most here (DepartmentName is the EMPLOYER, the CHANGELOG's headline
+    # example). A gate that skipped it was blind to its own motivating case.
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
 
     def departments(mod, name, depth):
         fn = (mod.DEPTH_ALL if depth else mod.BREADTH_ALL).get(name)
@@ -1387,19 +1447,95 @@ def test_department_is_byte_identical_to_0_6_0():
             mod.get_json, mod.post_json, mod.time.sleep = og, op, osl
         return sorted({r.get("department") for r in rows})
 
-    checked = []
-    for name in sorted(set(old.DEPTH_ALL) & set(sources.DEPTH_ALL)):
-        before, after = departments(old, name, True), departments(sources, name, True)
+    compared, empty = [], []
+    for name, depth in [
+        (n, True) for n in sorted(set(old.DEPTH_ALL) & set(sources.DEPTH_ALL))
+    ] + [(n, False) for n in sorted(set(old.BREADTH_ALL) & set(sources.BREADTH_ALL))]:
+        before, after = departments(old, name, depth), departments(sources, name, depth)
         if before is None:
             continue
         assert before == after, f"{name}: department changed {before} -> {after}"
-        checked.append(name)
-    for name in sorted(set(old.BREADTH_ALL) & set(sources.BREADTH_ALL)):
-        before, after = departments(old, name, False), departments(sources, name, False)
-        if before is None:
+        # An adapter that produced NO rows compared [] == [] and proved nothing. Track
+        # it separately rather than counting it toward the guard.
+        # `hn` parses free-text HN comments and its sample is a search envelope with
+        # no children, so it legitimately yields no rows — the contract test above
+        # special-cases it for the same reason. Every OTHER empty is a hole.
+        if name == "hn":
             continue
-        assert before == after, f"{name}: department changed {before} -> {after}"
-        checked.append(name)
-    # A gate that silently checked nothing is worse than no gate — it reads as
-    # assurance. Same reasoning as the canary's all-skip guard.
-    assert len(checked) >= 8, f"only compared {checked} — the gate proved almost nothing"
+        (compared if before else empty).append(name)
+    assert not empty, (
+        f"{empty} yielded no rows, so the gate compared [] == [] for them and proved "
+        "nothing. Hand them a key / stub their transport, or the gate is blind to "
+        "exactly the adapters whose department mapping is most interesting."
+    )
+    assert len(compared) >= 8, (
+        f"only compared {compared} — the gate proved almost nothing"
+    )
+
+
+def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
+    """REGRESSION. The `keep` gate runs one layer UPSTREAM of engine._coerce, which
+    is what made every title safe before anything called `.lower()` on it. A vendor
+    `null` title therefore reached scoring.relevant raw and raised AttributeError —
+    and because a depth adapter's exception is caught per-COMPANY, one malformed
+    posting cost the entire board, good roles included.
+
+    Asserted through engine.harvest, NOT the adapter, because the seam is the bug:
+    the previous test in this file inspected adapter signatures and never called
+    _fetch_company, so the engine->keep path had no coverage at all.
+    """
+    from job_radar import config as _config
+    from job_radar import engine
+
+    cfg = _config.Config()
+    cfg.remote_only = False  # isolate the title path from the remote gate
+    cfg.breadth_sources = []
+    _config.set_active(cfg)
+
+    listing = {
+        "total": 2,
+        "jobPostings": [
+            {"title": None, "externalPath": "/j/1", "bulletFields": []},
+            {"title": "AI Engineer", "externalPath": "/j/2", "bulletFields": []},
+        ],
+    }
+    monkeypatch.setattr(sources, "post_json", lambda u, b, *a, **k: listing)
+    monkeypatch.setattr(sources, "get_json", lambda u, *a, **k: {"jobPostingInfo": {}})
+    rows, _, errors = engine.harvest(
+        cfg,
+        companies=[
+            {
+                "name": "Acme",
+                "ats": "workday",
+                "slug": "acme",
+                "host": "wd1",
+                "site": "s",
+            }
+        ],
+    )
+    assert errors == [], f"a null title sank the employer: {errors}"
+    assert [r["title"] for r in rows] == ["AI Engineer"]
+
+    board = [
+        {"uuid": "a", "name": None, "url": "u1"},
+        {"uuid": "b", "name": "AI Engineer", "url": "u2"},
+    ]
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda u, *a, **k: (
+            board if u.endswith("/jobs") else {"description": {"role": "x"}}
+        ),
+    )
+    rows, _, errors = engine.harvest(
+        cfg, companies=[{"name": "Beta", "ats": "rippling", "slug": "beta"}]
+    )
+    assert errors == [], f"a null name sank the board: {errors}"
+    assert [r["title"] for r in rows] == ["AI Engineer"]
+
+
+def test_title_of_survives_every_shape_a_vendor_can_send():
+    assert sources._title_of({"title": None}) == ""
+    assert sources._title_of({}) == ""
+    assert sources._title_of({"title": 123}) == "123"
+    assert sources._title_of({"title": "AI Engineer"}) == "AI Engineer"

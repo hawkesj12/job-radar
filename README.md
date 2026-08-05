@@ -127,9 +127,9 @@ accidental one — the caps are visible knobs, not hidden in a URL.
 
 | source | per run | why it stops there |
 | --- | --- | --- |
-| depth boards | the whole board | one request each; SmartRecruiters pages at 100 |
-| himalayas | the fresh window | browse is date-ordered, so it pages until rows exceed `max_age_days` |
-| themuse | 20 categories x 5 pages | the vendor caps each slice at page 99; the slices are near-disjoint |
+| depth boards | the whole board, up to each cap | one request each — except SmartRecruiters (pages at 100), and Workday/Rippling (one request per role for the body) |
+| himalayas | ~1,000 newest | browse is date-ordered, so a bounded lane still gets the freshest rows |
+| themuse | ~1,960 (20 slices x 5 pages) | the vendor caps each slice at page 99; all 20 slices verified disjoint |
 | adzuna / usajobs | 3 pages/query | vendor page sizes of 50 and 500 |
 | google_jobs | 1 page/query | metered — SerpApi's free tier is 250 searches a **month** |
 | remotive / remoteok / jobicy | one request | that is the entire corpus |
@@ -217,7 +217,8 @@ A config file found in the current directory is honored, but **not** its `llm.ba
 This is a **personal job-search tool and a harvesting library**, not a data-resale product, and it's built to be a good citizen:
 
 - **Default sources are official, public, no-auth APIs**, used as their vendors document them — Greenhouse, Lever, and Ashby publish these endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter.
-- **It caps its own request volume.** Remotive is hard-capped at 4 calls per run, and the paged sources pause between requests. Not every adapter is throttled — the per-company feeds are one request each, so volume tracks your watchlist size rather than hammering any provider. It sends a self-identifying `User-Agent`.
+- **Every loop is capped, and the caps are visible.** Remotive gets exactly **one** request per run (its own notice advises four per _day_). Paged sources pause between requests, and every page budget is a named, tunable constant rather than a number buried in a URL — `SMARTRECRUITERS_MAX_PAGES`, `THEMUSE_MAX_PAGES`, `HIMALAYAS_BROWSE_PAGES`, `WORKDAY_MAX_PAGES`, `HN_THREADS`. There is no unbounded walk against anyone's API anywhere in the codebase. It sends a self-identifying `User-Agent`.
+- **Depth costs vary, and the expensive ones are the ones without a body on the list endpoint.** Most ATS boards are one request per company. SmartRecruiters pages 100 at a time. **Workday and Rippling cost one request per _role_** for the description — so those two run the relevance filter against the list titles first and fetch bodies only for what survives, which is what keeps a wide watchlist affordable.
 - **It asks for the smallest thing that answers the question.** Checking whether a board exists costs one request, not a full download — for a Workday employer that's 1 instead of 210, and for a large Greenhouse board roughly 280 KB instead of 5.6 MB (measured 2026-07-31; the ~20x ratio is the durable part). Discovery is where a tool like this can be rude at scale, so that's where the restraint matters most.
 - **Attribution:** **RemoteOK** and **Remotive** require that if you _republish_ their listings you credit them and link back to the original job URL. Honor their terms if you share output publicly.
 - **API keys** are read from environment variables only and never logged or committed. Adzuna's and SerpApi's keys travel in the request URL per their API designs.

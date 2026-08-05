@@ -123,7 +123,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The Muse fetched 100 rows out of ~36,060.** The unfiltered feed hard-caps at page
   99 = 2,000 rows, and the cap applies **per category slice** — so the 20-category
-  fan-out is the only way past it, and it was never implemented. What blocked it was a
+  fan-out is the only way past it, and it was never implemented. All 20 category
+  values were probed individually before shipping — necessary because this API
+  silently ignores an unrecognised parameter *value* and serves the unfiltered feed,
+  so an unverified slice would look healthy while being a copy of the others. What blocked it was a
   wrong entry in our own catalog claiming category filtering was unreliable;
   re-measured, `category=Healthcare` returns 20/20 Healthcare rows with zero overlap
   against the unfiltered page. The trap is corrected in `catalog/themuse.md`. The Muse
@@ -134,9 +137,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/jobs/api` takes `offset` and walks the whole corpus (**96,934** measured). Sending
   `offset` to the search endpoint is silently ignored and returns page 1 forever. A
   browse lane is added alongside the search lane (`q` does nothing on browse, so it
-  cannot replace it). Because browse is **date-ordered** — measured offset 0 → median
-  age 0 days, 20,000 → 8 days, 60,000 → 28 days — the age gate is the budget: it pages
-  until rows exceed `max_age_days` rather than guessing a page count.
+  cannot replace it). Bounded by `HIMALAYAS_BROWSE_PAGES` (default 50 = 1,000 rows).
+  Browse is **date-ordered** — measured offset 0 → median age 0 days, 20,000 → 8 days,
+  60,000 → 28 days — which is what makes a bounded lane worth having: those 1,000 rows
+  are the newest 1,000, not an arbitrary slice. An age stop exists as a secondary
+  guard, but at the default 60-day window it cannot fire inside the page cap; the cap
+  is the budget. Walking the full corpus would be ~4,850 requests.
 
 - **USAJOBS never sent `&Page=`.** One request per keyword, so anything over one page
   was truncated — `SearchResultCountAll` reports the true total and nothing read it.

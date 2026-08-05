@@ -118,6 +118,7 @@ traps:
   - "`page_count` is not reachable pages. 20,223 advertised, 99 usable."
   - "Not date-sorted, so 'just take the newest pages' does not work."
   - "CORRECTED 2026-08-05. This entry previously read 'category filtering looks unreliable' and it was WRONG — it blocked the 19-category fan-out, and with it 36,000 of 36,060 reachable rows, for as long as it stood. Re-measured: `category=Healthcare` -> page_count 1056 with 20/20 rows carrying categories:[\"Healthcare\"] and ZERO overlap with the unfiltered page; `category=Software Engineering` -> page_count 5012, 20/20 correct, 1 overlap. The filter is exact and the slices are near-disjoint. Whatever produced the original observation, it was not this parameter."
+  - "ALL 20 CATEGORY VALUES VERIFIED 2026-08-05, one probe each — necessary because this API silently ignores an unrecognised parameter VALUE and serves the unfiltered feed, so an unverified slice looks healthy while being a copy. Every value returned a page_count distinct from the unfiltered control (20,287) and 20/20 rows carrying that exact category. Range: Animal Care 3 pages to Software Engineering 5,028. `Unknown` is a real value (1,058), not a placeholder. Reachable across all slices at the page-99 cap: ~37,680."
   - "`level` filters exactly too and splits a category cleanly (Software Engineering 5012 -> Senior 2005 + Entry 1518, zero overlap), so each sub-slice gets its own 2,000-row ceiling. Verified on ONE category only — do not assume it generalises to all 19."
 ---
 
