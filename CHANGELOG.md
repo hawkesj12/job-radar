@@ -112,6 +112,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The self-expanding watchlist was blind to three of its eight ATSs.** `funnel`
+  identified a candidate board with `ats_from_url`, which returns `(ats, slug)` and
+  therefore returns `None` for Workday (a board needs tenant + host shard + site),
+  Rippling and Teamtailor. Every candidate on those three was skipped — including the
+  direct Workday apply links `google_jobs` already returns — so the three ATSs with
+  the deepest enterprise coverage could never grow the watchlist.
+
+  `dedup.board_entry(url)` now returns the full entry an adapter needs, and
+  `funnel._probe` passes the extra fields through. That last part is not cosmetic:
+  `live_workday` **defaults** `host="wd1", site=""`, so probing with a bare slug does
+  not raise — it builds a wrong URL, 404s, and the board is discarded as dead. A
+  silently wrong probe is exactly the failure a probe exists to prevent.
+
+  `dedup.entry_key(entry)` replaces the four hand-built `(ats, slug)` tuples in
+  `engine`, `funnel` and `seed`. One Workday tenant can run several sites, and two
+  sites are two boards; the 2-tuple treated them as one and kept only the first.
+
+  `job_ref` also learned Rippling and Teamtailor, so the "two different ids on one
+  board are two openings" veto now covers all eight depth adapters instead of five.
+  Verified on Rippling's live board: the id resolves on 150/150 rows and **zero**
+  distinct openings merge — the 70 rows that do collapse are the same uuid returned
+  once per location, which is a genuine duplicate.
+
+  This also removes the last duplicate URL parser: `discover` carried its own Workday
+  regex and its own not-a-slug list. All three copies (dedup, discover, seed) had
+  drifted before, and seed's still had the `&`-vs-`?` bug that produced slugs like
+  `gemini&token=774`. There is now exactly one.
+
 - **Workday silently merged 22% of every board into other rows.** `fetch_workday`
   read `locationsText`, which **is not in the list response at all** — `location` was
   empty on 120 of 120 rows on `accenture`, the same absent-key failure Workable had.

@@ -40,7 +40,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config
-from .dedup import ats_from_url
+from .dedup import board_entry, entry_key
 from .sources import liveness_for
 from .util import NET_ERRORS
 
@@ -82,43 +82,12 @@ _PATTERNS = {
     "workday": "*.myworkdayjobs.com/*",
 }
 
-# Workday is the one ATS a job URL cannot be reduced to a single slug: it needs
-# tenant + numbered host shard + site slug. The locale segment is optional AND
-# case-insensitive — `en-us` in the wild is as common as `en-US`, and matching only
-# the latter meant the locale was captured as the site slug, then dropped by
-# _NOT_SLUGS, losing the entire tenant.
-_WORKDAY_RE = re.compile(
-    r"^https?://([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/"
-    r"(?:[A-Za-z]{2}-[A-Za-z]{2}/)?([A-Za-z0-9_-]+)",
-    re.I,
-)
-
 # ATSs that can tell us WHO OWNS a board, and how to ask. This is the difference
 # between "this board is alive" and "this board is THIS company's" — see
 # verify_identity(). Only Greenhouse exposes it; Ashby returns just {'apiVersion'}
 # and Lever's payload carries the slug, not the org name.
 _IDENTITY_URL = {
     "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{slug}",
-}
-
-# Path segments that are NEVER a company board. Kept deliberately minimal: the probe
-# is the real gate, so over-filtering here only loses real companies. Learned the
-# hard way — 'search' was on this list until it turned out to be 3M's actual Workday
-# site slug, and 'careers' is ASM Global's. Anything ambiguous belongs to the probe.
-_NOT_SLUGS = {
-    "embed",
-    "job_app",
-    "j",
-    "jobs",
-    "robots",
-    "robots.txt",
-    "favicon.ico",
-    "sitemap.xml",
-    "api",
-    "static",
-    "assets",
-    "index.html",
-    "en-us",
 }
 
 
@@ -138,33 +107,17 @@ def latest_collection() -> str:
 def _entry(ats: str, url: str) -> tuple | None:
     """One CDX url -> (dedup key, watchlist entry), or None if it isn't a board.
 
-    Workday needs its own regex for the tenant/host/site triple; everything else
-    defers to dedup.ats_from_url so this module cannot drift from the parser the
-    rest of the package uses.
+    Both halves now come from `dedup` -- `board_entry` builds the entry (including
+    Workday's tenant/host/site triple) and `entry_key` builds the identity. This
+    module used to carry its OWN Workday regex and its own not-a-slug list, which is
+    exactly the drift the "one URL parser" invariant exists to stop: discover, seed
+    and dedup each had a copy, all three disagreed, and the third still had a
+    `&`-vs-`?` bug producing slugs like `gemini&token=774`.
     """
-    if ats == "workday":
-        m = _WORKDAY_RE.match(url)
-        if not m:
-            return None
-        tenant, host, site = m.group(1), m.group(2), m.group(3)
-        if site.lower() in _NOT_SLUGS:
-            return None
-        return (tenant.lower(), host.lower(), site.lower()), {
-            "ats": ats,
-            "slug": tenant,
-            "host": host.lower(),
-            "site": site,
-        }
-    got = ats_from_url(url)
-    # ats_from_url lowercases the URL before matching, so a slug comes back
-    # lowercase; that is fine for every ATS here (boards are case-insensitive)
-    # and it makes the dedup key and the stored slug agree.
-    if not got or got[0] != ats:
+    entry = board_entry(url)
+    if not entry or entry["ats"] != ats:
         return None
-    slug = got[1]
-    if slug.lower() in _NOT_SLUGS:
-        return None
-    return slug.lower(), {"ats": ats, "slug": slug}
+    return entry_key(entry), entry
 
 
 def mine(

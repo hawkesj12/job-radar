@@ -11,9 +11,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config
-from .dedup import ats_from_url, norm
+from .dedup import board_entry, entry_key, norm
 from .scoring import relevant
-from .sources import liveness_for
+from .sources import DEPTH_EXTRA_FIELDS, liveness_for
 from .util import NET_ERRORS, atomic_write_text
 
 
@@ -26,13 +26,18 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
             continue
         if not relevant(p.get("title", ""), cfg):
             continue
-        got = ats_from_url(p.get("url", ""))
-        if not got:
+        # board_entry, not ats_from_url: a Workday board needs tenant + host + site,
+        # and a 2-tuple cannot carry them. Under the old parser Workday, Rippling and
+        # Teamtailor all returned None here, so the funnel silently skipped every
+        # candidate on the three ATSs -- including the direct Workday apply links
+        # google_jobs already returns.
+        entry = board_entry(p.get("url", ""))
+        if not entry:
             continue
-        key = (got[0], got[1].lower())
+        key = entry_key(entry)
         if key in known_slugs or key in candidates:
             continue
-        candidates[key] = comp
+        candidates[key] = (comp, entry)
 
     # Slice to the PROBE budget before probing, then run that bounded slice
     # concurrently. Order matters: the budget is what makes concurrency safe here.
@@ -49,21 +54,24 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
     # cannot be used to stop early.
     if dry:  # no probing at all — just report what WOULD be probed
         return [
-            {"name": name, "ats": ats, "slug": slug, "industry": "(discovered)"}
-            for (ats, slug), name in list(candidates.items())[
-                : cfg.funnel_max_new_per_run
-            ]
+            {**entry, "name": name, "industry": "(discovered)"}
+            for name, entry in list(candidates.values())[: cfg.funnel_max_new_per_run]
         ]
 
     batch = [
-        {"name": name, "ats": ats, "slug": slug}
-        for (ats, slug), name in candidates.items()
-        if liveness_for(ats)
+        {**entry, "name": name}
+        for name, entry in candidates.values()
+        if liveness_for(entry["ats"])
     ][: cfg.funnel_max_probes_per_run]  # deferred, not lost — next scan probes on
 
     def _probe(c):
+        # The extra fields go to the liveness call, and for Workday they are not
+        # optional: `live_workday` DEFAULTS host="wd1", site="", so calling it with a
+        # bare slug does not raise -- it builds a wrong URL, 404s, and the candidate
+        # is discarded as a dead board. A silently wrong probe, not a loud failure.
+        extra = {k: c[k] for k in DEPTH_EXTRA_FIELDS.get(c["ats"], ()) if c.get(k)}
         try:
-            return c if liveness_for(c["ats"])(c["slug"]) else None
+            return c if liveness_for(c["ats"])(c["slug"], **extra) else None
         except NET_ERRORS:
             return None  # dead/unreachable slug (a real bug would still surface)
 
@@ -85,10 +93,10 @@ def append_watchlist(wl_path, new_entries):
     if wl_path.name.endswith(".example.json"):
         return []  # never mutate a shipped template
     doc = json.loads(wl_path.read_text(encoding="utf-8"))
-    existing = {
-        (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
-    }
-    fresh = [e for e in new_entries if (e["ats"], e["slug"].lower()) not in existing]
+    # entry_key, not (ats, slug): one Workday tenant can run several sites, and two
+    # sites are two boards. The 2-tuple treated them as one and kept only the first.
+    existing = {entry_key(c) for c in doc.get("companies", [])}
+    fresh = [e for e in new_entries if entry_key(e) not in existing]
     if fresh:
         doc.setdefault("companies", []).extend(fresh)
         atomic_write_text(wl_path, json.dumps(doc, indent=2) + "\n")

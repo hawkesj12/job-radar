@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from job_radar import discover, sources
+from job_radar import dedup, discover, sources
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +191,8 @@ def test_mine_workday_recovers_the_triple_and_skips_locales(monkeypatch):
     trip = {(e["slug"], e["host"], e["site"]) for e in got}
     assert ("3m", "wd1", "Search") in trip
     assert ("barrywehmiller", "wd1", "BWCareers") in trip
-    assert not any(e["site"].lower() in discover._NOT_SLUGS for e in got)
+    # _NOT_SLUGS now lives in dedup, the single URL parser discover defers to.
+    assert not any(e["site"].lower() in dedup._NOT_SLUGS for e in got)
 
 
 def test_probe_drops_boards_that_return_nothing(monkeypatch):
@@ -650,3 +651,115 @@ def test_from_names_produces_no_false_binding_for_a_collapsing_name(monkeypatch)
     monkeypatch.setattr(discover, "probe", _capture)
     discover.from_names(["Capital Group"], ats_list=["lever", "ashby"])
     assert seen == [], f"a collapsing name leaked candidates: {seen}"
+
+
+# ── strand F: the funnel can finally act on all eight depth ATSs ─────────────
+def test_board_entry_carries_every_field_the_adapter_needs():
+    """`ats_from_url` returns `(ats, slug)`, which cannot describe a Workday board.
+    Callers that ACT on a board — probe it, add it to the watchlist — need host and
+    site too, so they use `board_entry`."""
+    wd = dedup.board_entry(
+        "https://accenture.wd103.myworkdayjobs.com/en-US/AccentureCareers"
+        "/job/Buenos-Aires/X_R00333425"
+    )
+    assert wd == {
+        "ats": "workday",
+        "slug": "accenture",
+        "host": "wd103",
+        # case PRESERVED — the Workday site slug is case-sensitive, and lowercasing
+        # it builds a URL that 404s.
+        "site": "AccentureCareers",
+    }
+    # The locale segment is optional and case-insensitive; matching only `en-US`
+    # captured the locale as the site slug and lost the tenant.
+    assert dedup.board_entry(
+        "https://3m.wd1.myworkdayjobs.com/en-us/Search/job/US-Minnesota/Y_R01169027"
+    ) == {"ats": "workday", "slug": "3m", "host": "wd1", "site": "Search"}
+
+    assert dedup.board_entry("https://ats.rippling.com/acme/jobs/u-1") == {
+        "ats": "rippling",
+        "slug": "acme",
+    }
+    # Teamtailor's slug is the SUBDOMAIN, not a path segment.
+    assert dedup.board_entry("https://acme.teamtailor.com/jobs/1234-ai-eng") == {
+        "ats": "teamtailor",
+        "slug": "acme",
+    }
+    # The vendor's own marketing site is not a company board.
+    assert dedup.board_entry("https://www.teamtailor.com/en/") is None
+    assert dedup.board_entry("") is None
+
+
+def test_entry_key_tells_two_sites_of_one_workday_tenant_apart():
+    """One tenant can run several sites, and two sites are two boards. Every caller
+    that deduped on `(ats, slug)` treated them as one and kept only the first."""
+    a = {"ats": "workday", "slug": "acme", "host": "wd1", "site": "Careers"}
+    b = {"ats": "workday", "slug": "acme", "host": "wd1", "site": "Corporate"}
+    assert dedup.entry_key(a) != dedup.entry_key(b)
+    # Case-insensitive for comparison, even though the stored site keeps its case.
+    assert dedup.entry_key(a) == dedup.entry_key({**a, "site": "CAREERS"})
+    # A single-key ATS stays a 2-tuple.
+    assert dedup.entry_key({"ats": "greenhouse", "slug": "Anthropic"}) == (
+        "greenhouse",
+        "anthropic",
+    )
+
+
+def test_extra_key_fields_matches_the_adapter_registry():
+    """`dedup._EXTRA_KEY_FIELDS` duplicates `sources.DEPTH_EXTRA_FIELDS` because
+    sources imports dedup and reading it back would be a cycle. Pinned so the two
+    cannot drift: if an adapter gains a third key, the funnel must learn it too."""
+    assert dedup._EXTRA_KEY_FIELDS == sources.DEPTH_EXTRA_FIELDS
+
+
+def test_funnel_probes_workday_with_its_triple_not_a_bare_slug():
+    """The silent failure this guards: `live_workday` DEFAULTS host='wd1', site='',
+    so a bare-slug call does not raise — it builds a wrong URL, 404s, and the
+    candidate is discarded as a dead board. Every real Workday employer the funnel
+    found would vanish without a single error."""
+    from job_radar import config, funnel
+
+    cfg = config.Config()
+    config.set_active(cfg)
+    seen = {}
+
+    def fake_liveness(ats):
+        def probe(slug, **extra):
+            seen[ats] = (slug, extra)
+            return 3  # a live board with roles
+
+        return probe
+
+    postings = [
+        {
+            "company": "Accenture",
+            "title": "AI Engineer",
+            "url": (
+                "https://accenture.wd103.myworkdayjobs.com/en-US/AccentureCareers"
+                "/job/Buenos-Aires/AI-Engineer_R00333425"
+            ),
+        },
+        {
+            "company": "Acme",
+            "title": "AI Engineer",
+            "url": "https://acme.teamtailor.com/jobs/1234-ai-engineer",
+        },
+    ]
+    import job_radar.funnel as f
+
+    orig = f.liveness_for
+    f.liveness_for = fake_liveness
+    try:
+        got = funnel.funnel(postings, set(), set(), cfg)
+    finally:
+        f.liveness_for = orig
+
+    assert seen["workday"] == (
+        "accenture",
+        {"host": "wd103", "site": "AccentureCareers"},
+    )
+    # A single-key ATS must NOT be handed phantom kwargs.
+    assert seen["teamtailor"] == ("acme", {})
+    found = {e["ats"]: e for e in got}
+    assert found["workday"]["host"] == "wd103"
+    assert found["workday"]["site"] == "AccentureCareers"

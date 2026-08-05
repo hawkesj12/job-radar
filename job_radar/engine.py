@@ -12,7 +12,7 @@ import urllib.error
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import config, vocab
-from .dedup import find_hit_key, norm
+from .dedup import entry_key, find_hit_key, norm
 from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
 from .sources import (
@@ -356,7 +356,7 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
             "local": bool(c.get("local")),
             "industry": c.get("industry", ""),
         }
-        known_slugs.add((c.get("ats"), (c.get("slug") or "").lower()))
+        known_slugs.add(entry_key(c))
     known_companies = set(meta.keys())
 
     depth = enabled_depth(cfg)

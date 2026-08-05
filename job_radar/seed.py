@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 from . import config, discover
+from .dedup import entry_key
 from .util import NET_ERRORS, atomic_write_text
 
 # One error type for "Common Crawl is having a bad day", defined in discover (which
@@ -85,16 +86,14 @@ def seed_universe(
     doc = (
         json.loads(wl.read_text(encoding="utf-8")) if wl.exists() else {"companies": []}
     )
-    existing = {
-        (c.get("ats"), (c.get("slug") or "").lower()) for c in doc.get("companies", [])
-    }
+    existing = {entry_key(c) for c in doc.get("companies", [])}
 
     print(f"  querying Common Crawl for {ats} boards…")
     entries = enumerate_entries(ats)
     fresh = [
         e
         for e in sorted(entries, key=lambda e: e["slug"].lower())
-        if (ats, e["slug"].lower()) not in existing
+        if entry_key(e) not in existing
     ]
     print(f"  found {len(entries)} slugs, {len(fresh)} new")
 

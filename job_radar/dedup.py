@@ -130,6 +130,11 @@ _JOB_REF = {
     "ashby": re.compile(r"jobs\.ashbyhq\.com/[^/?#]+/([0-9a-f-]{8,})"),
     "workable": re.compile(r"apply\.workable\.com/[^/?#]+/j/([a-z0-9]+)"),
     "smartrecruiters": re.compile(r"jobs\.smartrecruiters\.com/[^/?#]+/(\d+)"),
+    # Rippling's per-posting id is a uuid; Teamtailor's is the leading number of the
+    # job slug (`/jobs/1234-ai-engineer`). Without these two the "different ids on
+    # one board are different openings" veto could not fire for either adapter.
+    "rippling": re.compile(r"ats\.rippling\.com/[^/?#]+/jobs/([0-9a-z-]{6,})"),
+    "teamtailor": re.compile(r"teamtailor\.com/jobs/(\d+)"),
 }
 
 
@@ -152,9 +157,9 @@ _GH_JID = re.compile(r"[?&]gh_jid=(\d+)")
 # values (slug, host, site). `funnel._probe` would then call `live_workday(slug)`,
 # which has defaults `host="wd1", site=""` and so does NOT raise -- it builds a wrong
 # URL, 404s, and the candidate is silently discarded as a dead board. Every real
-# Workday employer discovery found would quietly disappear. Fixing that properly means
-# the `entry_key` seam (five call sites); this pattern gets the job id into
-# `dedup_key` today without touching any of it.
+# Workday employer discovery found would quietly disappear. `board_entry` below is the
+# answer for callers that need to ACT on a board; this pattern is only about getting
+# the job id into `dedup_key`, which needs no routing at all.
 #
 # Shape from live payloads across three tenants: the path ends `_<REQID>` --
 # `/job/Buenos-Aires/Analytics-and-Modeling-Specialist_R00333425`, `..._R327553`,
@@ -376,9 +381,91 @@ def ats_from_url(url: str):
         (r"jobs\.ashbyhq\.com/([^/?#&]+)", "ashby"),
         (r"apply\.workable\.com/([^/?#&]+)", "workable"),
         (r"jobs\.smartrecruiters\.com/([^/?#&]+)", "smartrecruiters"),
+        # Rippling puts the board slug in the first path segment; Teamtailor puts it
+        # in the SUBDOMAIN, which is why its capture sits left of the host. Both are
+        # single-key boards, so both are safe to return as a 2-tuple here -- unlike
+        # Workday, which needs three values and is deliberately absent (see _WD_REQ).
+        (r"ats\.rippling\.com/([^/?#&]+)", "rippling"),
+        (r"(?:https?://)?([a-z0-9-]+)\.teamtailor\.com", "teamtailor"),
     ]
     for rx, ats in patterns:
         m = re.search(rx, u)
-        if m and m.group(1) not in ("embed", "j"):
+        # "www" only matters for the two subdomain-slug boards, where the marketing
+        # site would otherwise parse as a company board named www.
+        if m and m.group(1) not in ("embed", "j", "www"):
             return (ats, m.group(1))
     return None
+
+
+# Workday is the one ATS a job URL cannot be reduced to a single slug: tenant +
+# numbered host shard + site slug. The locale segment is optional AND case-insensitive
+# -- `en-us` is as common in the wild as `en-US`, and matching only the latter
+# captured the locale as the site slug and lost the tenant entirely.
+_WORKDAY_URL = re.compile(
+    r"^https?://([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/"
+    r"(?:[A-Za-z]{2}-[A-Za-z]{2}/)?([A-Za-z0-9_-]+)",
+    re.I,
+)
+
+# Path segments that are never a company board. Deliberately minimal -- the liveness
+# probe is the real gate, so over-filtering here only loses real companies. Learned
+# the hard way: 'search' sat on this list until it turned out to be 3M's actual
+# Workday site slug, and 'careers' is ASM Global's.
+_NOT_SLUGS = frozenset(
+    {
+        "embed", "job_app", "j", "jobs", "robots", "robots.txt", "favicon.ico",
+        "sitemap.xml", "api", "static", "assets", "index.html", "en-us", "www",
+    }
+)  # fmt: skip
+
+
+def board_entry(url: str) -> dict | None:
+    """A job URL -> the watchlist entry that would harvest that board, or None.
+
+    The counterpart to `ats_from_url`, and the reason both exist: `ats_from_url`
+    returns `(ats, slug)`, which cannot describe a Workday board. Callers that need
+    to ACT on a board -- probe it, add it to the watchlist -- need every field its
+    adapter takes, so they call this instead and get `host`/`site` where those apply.
+
+    Keeping it here rather than in `discover` is the "one URL parser" invariant:
+    `discover` and `seed` each grew their own copy of these regexes once, all three
+    drifted, and the third still had a `&`-vs-`?` bug producing slugs like
+    `gemini&token=774`.
+    """
+    if not url:
+        return None
+    m = _WORKDAY_URL.match(url)
+    if m:
+        tenant, host, site = m.group(1), m.group(2), m.group(3)
+        if site.lower() in _NOT_SLUGS:
+            return None
+        return {
+            "ats": "workday",
+            "slug": tenant.lower(),
+            "host": host.lower(),
+            "site": site,  # case PRESERVED: the site slug is case-sensitive
+        }
+    got = ats_from_url(url)
+    if not got or got[1].lower() in _NOT_SLUGS:
+        return None
+    return {"ats": got[0], "slug": got[1].lower()}
+
+
+def entry_key(entry: dict) -> tuple:
+    """The identity of a watchlist entry, for "do we already have this board?".
+
+    A bare `(ats, slug)` is WRONG for Workday: one tenant can run several sites, and
+    two different sites are two different boards. Every caller that deduped on the
+    2-tuple would treat them as one and silently keep only the first.
+    """
+    ats = str(entry.get("ats") or "")
+    key = [ats, (entry.get("slug") or "").lower()]
+    for extra in _EXTRA_KEY_FIELDS.get(ats, ()):
+        key.append((entry.get(extra) or "").lower())
+    return tuple(key)
+
+
+# Mirrors sources.DEPTH_EXTRA_FIELDS. Duplicated deliberately rather than imported:
+# `sources` imports this module, so reading it here would be a cycle. The pairing is
+# pinned by a test so the two cannot drift.
+_EXTRA_KEY_FIELDS: dict[str, tuple[str, ...]] = {"workday": ("host", "site")}
