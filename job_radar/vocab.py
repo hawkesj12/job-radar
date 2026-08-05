@@ -105,6 +105,7 @@ def employment_type(raw) -> tuple[str | None, str | None]:
 SALARY_PERIODS = frozenset({"year", "month", "week", "day", "hour", "fixed"})
 
 _PERIOD_MAP = {
+    # generic
     "yr": "year", "year": "year", "yearly": "year", "annual": "year",
     "annually": "year", "annum": "year", "pa": "year", "per year": "year",
     "mo": "month", "month": "month", "monthly": "month",
@@ -112,6 +113,21 @@ _PERIOD_MAP = {
     "day": "day", "daily": "day", "per diem": "day",
     "hr": "hour", "hour": "hour", "hourly": "hour",
     "fixed": "fixed", "fixed price": "fixed", "project": "fixed",
+    # PROBED 2026-08-05, exact vendor strings -- these are why the map exists
+    "per year salary": "year",   # lever salaryRange.interval
+    "per month salary": "month",  # lever
+    "per week salary": "week",    # lever
+    "per day wage": "day",        # lever
+    "per hour wage": "hour",      # lever
+    "per task": "fixed",          # braintrust payment_type
+    "one time": "fixed",
+    # usajobs RateIntervalCode. Only PA was seen live 2026-08-05 (nurse, 25 rows);
+    # the rest are from OPM's published code list and are UNVERIFIED against a real
+    # posting -- they map to a period we would otherwise have had to guess.
+    # ("pa" already maps to year above -- the OPM code and the generic
+    # per-annum abbreviation happen to be the same string.)
+    "ph": "hour", "pd": "day", "pw": "week", "pm": "month",
+    "pb": "fixed", "wc": "fixed",
 }  # fmt: skip
 
 
@@ -124,6 +140,43 @@ def salary_period(raw) -> str | None:
     """
     s = _PUNCT.sub(" ", _flatten(raw).lower())
     return _PERIOD_MAP.get(" ".join(s.split()))
+
+
+def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict:
+    """Structured salary -> the five record fields. Returns all-None when there is
+    no real figure.
+
+    ZERO IS NOT A SALARY. RemoteOK sends `salary_min` and `salary_max` on all 100
+    rows of its feed and both are `0` (probed 2026-08-05) -- the keys exist, the data
+    does not. Mapping that straight through would assert a salary of zero on every
+    row, which is the same class of lie as `remote: False` for unknown. A falsy
+    figure is dropped to None.
+
+    A period is never guessed. `65` and `135000` are both valid numbers, so a wrong
+    period makes every aggregate built on it silently wrong -- worse than no period
+    at all.
+    """
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f or None  # 0 -> None; see the docstring
+
+    lo, hi = _num(lo), _num(hi)
+    if lo is None and hi is None:
+        return {
+            "salary_min": None, "salary_max": None, "salary_currency": None,
+            "salary_period": None, "salary_basis": None,
+        }  # fmt: skip
+    return {
+        "salary_min": lo,
+        "salary_max": hi if hi is not None else lo,
+        "salary_currency": (str(currency).upper() if currency else None),
+        "salary_period": salary_period(period),
+        "salary_basis": basis,
+    }
 
 
 # ── remote type ─────────────────────────────────────────────────────────────

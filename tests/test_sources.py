@@ -1560,3 +1560,129 @@ def test_title_of_survives_every_shape_a_vendor_can_send():
     assert sources._title_of({}) == ""
     assert sources._title_of({"title": 123}) == "123"
     assert sources._title_of({"title": "AI Engineer"}) == "AI Engineer"
+
+
+# ── structured salary (probed live 2026-08-05) ──────────────────────────────
+def test_zero_is_not_a_salary():
+    """RemoteOK sends salary_min and salary_max on ALL 100 rows of its feed and both
+    are 0 — the keys exist, the data does not. Mapping that through would assert a
+    salary of zero on every row, the same class of lie as remote: False for unknown."""
+    from job_radar import vocab
+
+    assert vocab.salary(0, 0)["salary_min"] is None
+    assert vocab.salary(None, None)["salary_basis"] is None
+    assert vocab.salary("0.00", "0.00")["salary_max"] is None
+
+
+def test_a_period_is_never_guessed():
+    """`65` and `135000` are both valid numbers, so a WRONG period makes every
+    aggregate silently wrong — worse than no period at all. Adzuna sends no period,
+    and its figures stay period-less however annual they look."""
+    from job_radar import vocab
+
+    assert vocab.salary(100, 200, "USD", None)["salary_period"] is None
+    assert vocab.salary(100, 200, "USD", "nonsense")["salary_period"] is None
+
+
+def test_the_probed_vendor_period_strings_all_map():
+    """These are the exact strings the vendors send, and none of them would have been
+    guessed: lever's interval, braintrust's payment_type, usajobs' RateIntervalCode."""
+    from job_radar import vocab
+
+    for raw, want in [
+        ("per-year-salary", "year"),  # lever
+        ("per-hour-wage", "hour"),  # lever
+        ("annual", "year"),  # himalayas / braintrust
+        ("hourly", "hour"),  # braintrust
+        ("per_task", "fixed"),  # braintrust
+        ("PA", "year"),  # usajobs RateIntervalCode
+        ("Per Year", "year"),  # usajobs Description
+    ]:
+        assert vocab.salary_period(raw) == want, (
+            f"{raw!r} -> {vocab.salary_period(raw)}"
+        )
+
+
+def test_every_period_in_the_map_is_legal():
+    """A typo in the map is a test failure, not a value that silently escapes."""
+    from job_radar import vocab
+
+    assert set(vocab._PERIOD_MAP.values()) <= vocab.SALARY_PERIODS
+    assert set(vocab._EMPLOYMENT_MAP.values()) <= vocab.EMPLOYMENT_TYPES
+    assert set(vocab._REMOTE_MAP.values()) <= vocab.REMOTE_TYPES
+
+
+def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
+    """MEASURED: 140 of 150 Adzuna rows carrying a salary were salary_is_predicted=1
+    — 93%, and 100% for nursing and warehouse. They are point estimates (min == max,
+    two decimals) from Adzuna's model, not figures an employer posted. In one column
+    with real salaries, a forgotten WHERE clause silently poisons every average."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda k: "k")
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    payload = {
+        "results": [
+            {
+                "title": "RN",
+                "salary_min": 61482.41,
+                "salary_max": 61482.41,
+                "salary_is_predicted": "1",
+                "redirect_url": "https://a/1",
+            },
+            {
+                "title": "SWE",
+                "salary_min": 115000,
+                "salary_max": 145000,
+                "salary_is_predicted": "0",
+                "redirect_url": "https://a/2",
+            },
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: payload)
+    from job_radar import engine
+
+    # Through _coerce, because that is what a consumer receives: the adapter emits
+    # ONLY the estimate columns for a predicted row, and the boundary supplies the
+    # rest as None.
+    out = [engine._coerce(r) for r in sources.search_adzuna(["x"])]
+    predicted, real = out[0], out[1]
+    assert predicted["salary_min"] is None, "a prediction reached the commitment column"
+    assert predicted["salary_estimated_min"] == 61482.41
+    assert real["salary_min"] == 115000.0 and real["salary_basis"] == "stated"
+    assert real.get("salary_estimated_min") is None
+
+
+def test_usajobs_reads_its_rate_interval(monkeypatch):
+    """No currency field exists — these are US federal postings, so USD is structural.
+    RateIntervalCode carries the period."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda k: "k")
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(
+        monkeypatch,
+        {
+            "SearchResult": {
+                "SearchResultCountAll": 1,
+                "SearchResultItems": [
+                    {
+                        "MatchedObjectDescriptor": {
+                            "PositionTitle": "Nurse",
+                            "PositionURI": "https://u/1",
+                            "PositionRemuneration": [
+                                {
+                                    "MinimumRange": "105053",
+                                    "MaximumRange": "136571",
+                                    "RateIntervalCode": "PA",
+                                    "Description": "Per Year",
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+        },
+    )
+    r = sources.search_usajobs(["nurse"])[0]
+    assert r["salary_min"] == 105053.0  # arrives as a STRING from this API
+    assert r["salary_period"] == "year" and r["salary_currency"] == "USD"
+    assert r["salary_basis"] == "stated"

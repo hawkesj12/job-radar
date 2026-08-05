@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from . import config
+from . import vocab
 from .vocab import remote_type
 from .util import (
     NET_ERRORS,
@@ -99,6 +100,13 @@ def fetch_lever(slug: str):
         cats = j.get("categories") or {}
         text = clean(j.get("descriptionPlain") or j.get("description", ""))
         sr = j.get("salaryRange") or {}
+        # PROBED 2026-08-05 on leverdemo: {min, max, currency, interval} where
+        # interval is a vendor-specific string ("per-year-salary", "per-hour-wage")
+        # that no generic period map would have guessed. Thin coverage -- 9 of 388
+        # postings there, 0 of 295 on binance.
+        pay = vocab.salary(
+            sr.get("min"), sr.get("max"), sr.get("currency"), sr.get("interval")
+        )
         if sr.get("min") and sr.get("max"):
             salary = (
                 f"${int(sr['min']):,}–${int(sr['max']):,} {sr.get('currency', 'USD')}"
@@ -118,6 +126,7 @@ def fetch_lever(slug: str):
                 # the description while the source stated it outright.
                 **_lever_remote(j.get("workplaceType")),
                 "employment_type": cats.get("commitment", ""),
+                **pay,
                 "salary": salary,
                 "text": text,
             }
@@ -1147,7 +1156,14 @@ def search_remoteok(queries):
                 "remote_type": "remote",  # a remote-only board by definition
                 "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
+                # salary_min/salary_max are present on all 100 rows of this feed and
+                # both are 0 (probed 2026-08-05) -- the keys exist, the data does not.
+                # vocab.salary drops a falsy figure to None rather than asserting a
+                # salary of zero on every row.
                 "salary": salary_range(j.get("salary_min"), j.get("salary_max")),
+                **vocab.salary(
+                    j.get("salary_min"), j.get("salary_max"), currency="USD"
+                ),
                 "text": text,
                 "source": "remoteok",
             }
@@ -1299,10 +1315,34 @@ def _himalayas_rows(jobs, out, seen=None):
                 or None,
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary_range(j.get("minSalary"), j.get("maxSalary")),
+                # `salaryPeriod` ("annual") and `currency` ("USD") are real fields,
+                # confirmed live 2026-08-05 -- 7 of 20 rows carry them. Both were
+                # being discarded while the two numbers beside them were kept.
+                **vocab.salary(
+                    j.get("minSalary"),
+                    j.get("maxSalary"),
+                    j.get("currency"),
+                    j.get("salaryPeriod"),
+                ),
                 "text": text,
                 "source": "himalayas",
             }
         )
+
+
+def _adzuna_pay(j: dict) -> dict:
+    """Adzuna salary -> the commitment columns OR the estimate columns, never both."""
+    lo, hi = j.get("salary_min"), j.get("salary_max")
+    if str(j.get("salary_is_predicted")) == "1":
+
+        def _n(v):
+            try:
+                return float(v) or None
+            except (TypeError, ValueError):
+                return None
+
+        return {"salary_estimated_min": _n(lo), "salary_estimated_max": _n(hi)}
+    return vocab.salary(lo, hi, currency="USD", period=None, basis="stated")
 
 
 def _adzuna_place(area):
@@ -1409,6 +1449,18 @@ def search_adzuna(queries):
                         "salary": salary_range(
                             j.get("salary_min"), j.get("salary_max")
                         ),
+                        # PREDICTED salaries never touch the commitment columns.
+                        # Measured 2026-08-05 across three queries: 140 of 150 rows
+                        # with a salary were `salary_is_predicted: "1"` -- 93%, and
+                        # 100% for nursing and warehouse. They are point estimates
+                        # (min == max, to two decimals) produced by Adzuna's model,
+                        # not figures an employer posted. In one column with real
+                        # salaries, a single forgotten WHERE clause silently poisons
+                        # every average built on the corpus.
+                        #
+                        # Adzuna sends NO period, so these stay period-less rather
+                        # than being assumed annual, however annual they look.
+                        **_adzuna_pay(j),
                         "text": text,
                         "source": "adzuna",
                     }
@@ -1562,6 +1614,16 @@ def search_braintrust(queries):
                     or None,
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
                     "salary": _bt_rate(j),
+                    # `payment_type` is annual|hourly|per_task (probed), and the
+                    # budgets arrive as strings ("50000.00"). An hourly 42 and an
+                    # annual 50000 in one column with no period makes every aggregate
+                    # wrong, silently -- both are valid numbers.
+                    **vocab.salary(
+                        j.get("budget_minimum_usd"),
+                        j.get("budget_maximum_usd"),
+                        currency="USD",
+                        period=j.get("payment_type"),
+                    ),
                     "text": text,
                     "source": "braintrust",
                 }
@@ -1731,6 +1793,18 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 ),
                 "salary": salary_range(
                     pay.get("MinimumRange"), pay.get("MaximumRange")
+                ),
+                # PROBED 2026-08-05: {MinimumRange, MaximumRange, RateIntervalCode,
+                # Description}. There is NO currency field -- these are US federal
+                # postings, so USD is structural rather than stated. The period comes
+                # from RateIntervalCode ("PA"), with Description ("Per Year") as a
+                # readable fallback; only PA was seen live, the other OPM codes are
+                # unverified. Ranges arrive as STRINGS ("105053").
+                **vocab.salary(
+                    pay.get("MinimumRange"),
+                    pay.get("MaximumRange"),
+                    currency="USD",
+                    period=pay.get("RateIntervalCode") or pay.get("Description"),
                 ),
                 "text": clean(
                     (d.get("UserArea") or {}).get("Details", {}).get("JobSummary", "")
