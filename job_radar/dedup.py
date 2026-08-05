@@ -143,6 +143,32 @@ _JOB_REF = {
 # appears; the host it appears on is not part of what makes it a job id.
 _GH_JID = re.compile(r"[?&]gh_jid=(\d+)")
 
+# The Workday requisition id, taken from the URL and DELIBERATELY not routed through
+# `ats_from_url`, which is the whole reason this is a separate pattern rather than an
+# entry in `_JOB_REF`.
+#
+# Teaching `ats_from_url` about Workday would look like the tidy fix and would break
+# discovery: it returns a 2-tuple `(ats, slug)`, but a Workday board needs three
+# values (slug, host, site). `funnel._probe` would then call `live_workday(slug)`,
+# which has defaults `host="wd1", site=""` and so does NOT raise -- it builds a wrong
+# URL, 404s, and the candidate is silently discarded as a dead board. Every real
+# Workday employer discovery found would quietly disappear. Fixing that properly means
+# the `entry_key` seam (five call sites); this pattern gets the job id into
+# `dedup_key` today without touching any of it.
+#
+# Shape from live payloads across three tenants: the path ends `_<REQID>` --
+# `/job/Buenos-Aires/Analytics-and-Modeling-Specialist_R00333425`, `..._R327553`,
+# `..._R01169027`. Anchored to a myworkdayjobs host so a stray `_R123` in some other
+# vendor's URL cannot be mistaken for one.
+#
+# The trailing `-N` is REQUIRED, not decorative: Workday appends a copy suffix when a
+# tenant reposts a requisition, so the live path is `..._R00265608-1`. Anchoring the id
+# to end-of-path missed every one of those, and they cluster -- all 14 residual wrong
+# merges on accenture were `-1` rows.
+_WD_REQ = re.compile(
+    r"myworkdayjobs\.com/.*_([a-z]{0,4}\d{3,}(?:-\d+)?)(?:[/?#]|$)", re.I
+)
+
 
 def job_ref(url: str):
     """`(ats, slug, ref)` when a URL identifies one specific posting on a known
@@ -154,7 +180,10 @@ def job_ref(url: str):
         # Slug unknown on a custom domain, and that is fine: `different_openings`
         # only ever compares postings already inside one company block, so the
         # company is established before the ref is consulted.
-        return ("greenhouse", "", m.group(1)) if m else None
+        if m:
+            return ("greenhouse", "", m.group(1))
+        m = _WD_REQ.search(url or "")
+        return ("workday", "", m.group(1)) if m else None
     rx = _JOB_REF.get(got[0])
     m = rx.search(url.lower()) if rx else None
     if not m:

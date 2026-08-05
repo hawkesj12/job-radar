@@ -523,6 +523,10 @@ WORKDAY_FETCH_DETAILS = os.environ.get("WORKDAY_FETCH_DETAILS", "1") not in (
 WORKDAY_DETAIL_WORKERS = int(os.environ.get("WORKDAY_DETAIL_WORKERS", "8"))
 _ET = ZoneInfo("America/New_York")  # every date in job-radar is Eastern
 _WD_POSTED = re.compile(r"Posting Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})")
+# A Workday requisition id as it appears in bulletFields: 'R00333425', 'R327553',
+# 'R01169027'. Used to tell an id apart from a location in that heterogeneous list --
+# matched on 59 of 60 rows across three tenants.
+_WD_REQID = re.compile(r"[A-Za-z]{0,4}[-_]?\d{3,}")
 _WD_RELATIVE = re.compile(r"Posted\s+(\d+)\+?\s+(day|week|month)s?\s+ago", re.I)
 _WD_TODAY = re.compile(r"Posted\s+(today|yesterday)", re.I)
 
@@ -971,7 +975,7 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
             out.append(
                 {
                     "title": j.get("title", ""),
-                    "location": j.get("locationsText", ""),
+                    "location": _workday_place(j, path),
                     "url": f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{path}",
                     "posted": posted,
                     "posted_basis": posted_basis,
@@ -1036,6 +1040,62 @@ def _detail_pool() -> ThreadPoolExecutor:
 def _shutdown_detail_pool() -> None:
     if _DETAIL_POOL is not None:
         _DETAIL_POOL.shutdown(wait=False)
+
+
+def _wd_unslug(seg: str) -> str:
+    """A Workday URL path segment -> the location string it was made from.
+
+    Workday builds the segment by replacing each space with `-`, so a literal hyphen
+    surrounded by spaces becomes `---`. Decoding therefore has to run longest-first:
+    `Sao-Paulo---Barueri` is "Sao Paulo - Barueri", not "Sao Paulo   Barueri".
+    """
+    s = str(seg or "").replace("---", " \x00 ").replace("--", "\x00")
+    return " ".join(s.replace("-", " ").replace("\x00", "-").split())
+
+
+def _workday_place(j: dict, path: str) -> str:
+    """The city for one Workday posting.
+
+    `locationsText` -- which this adapter read for its entire life -- IS NOT IN THE
+    LIST RESPONSE. Measured on accenture: `location` was empty on 120 of 120 rows,
+    the same absent-key failure Workable had. The consequence was not a blank column
+    but SILENT ROW LOSS: `dedup_key` is `company|title|location|job_id`, and with the
+    location empty and the job id unparsed, every same-titled role a company posts
+    worldwide collapsed into one row. On accenture (n=400) that discarded 89 rows,
+    22% of the board, each with its own apply URL and its own city.
+
+    Both values were in the payload already, at no extra request. Two sources, in
+    preference order:
+
+      * `bulletFields` -- the tenant's own display string, no decoding needed, but
+        present on only some tenants (accenture sends ['R00333425', 'Buenos Aires'];
+        academy and 3m send only ['R327553']).
+      * `externalPath` -- `/job/<Location>/<Title>_<ReqId>` on EVERY tenant probed,
+        so it is the reliable fallback.
+
+    bulletFields is read BY SHAPE, never by position: it holds a requisition id, a
+    location and sometimes 'Posting Date: MM/DD/YYYY', in no guaranteed order. A
+    positional read is the same mistake this repo already made and fixed in the HN
+    adapter, where the remote token turned out to be in slot 2 sixty-two times and
+    slot 3 thirty-four times.
+    """
+    # `locationsText` FIRST, and kept even though it is absent from every tenant
+    # probed: it is the documented field, some tenant may well send it, and reading a
+    # real value costs nothing. The bug was never that this key is wrong -- it was
+    # that it was the ONLY thing read, so its absence produced an empty column with no
+    # fallback at all.
+    if str(j.get("locationsText") or "").strip():
+        return str(j["locationsText"]).strip()
+    for b in j.get("bulletFields") or []:
+        s = str(b or "").strip()
+        if not s or _WD_POSTED.search(s) or _WD_REQID.fullmatch(s):
+            continue
+        return s
+    # /job/<Location>/<Title>_<ReqId> -- take the segment after "job".
+    parts = [p for p in str(path or "").split("/") if p]
+    if len(parts) >= 3 and parts[0] == "job":
+        return _wd_unslug(parts[1])
+    return ""
 
 
 def _workday_add_details(base: str, rows: list[dict]) -> None:

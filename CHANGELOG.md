@@ -112,6 +112,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Workday silently merged 22% of every board into other rows.** `fetch_workday`
+  read `locationsText`, which **is not in the list response at all** — `location` was
+  empty on 120 of 120 rows on `accenture`, the same absent-key failure Workable had.
+
+  The consequence was not a blank column. `dedup_key` is
+  `company|title|location|job_id`, and Workday was missing *both* of the last two —
+  the location because of the absent key, the requisition id because `job_ref` did
+  not recognise a Workday URL. So the key collapsed to `company|title`, and every
+  same-titled role a company posts worldwide became one row. Measured on `accenture`
+  (n=400): **89 rows discarded, each with its own apply URL and its own city** —
+  "Contract Manager" in three cities kept one. The veto that exists to prevent
+  exactly this could fire on **0 of 19,900 pairs**.
+
+  Both values were already in the payload, at no extra request. `externalPath` is
+  `/job/<Location>/<Title>_<ReqId>` on every tenant probed (accenture/wd103,
+  academy/wd1, 3m/wd1); `bulletFields` carries them on some. `bulletFields` is read
+  **by shape, never by position** — it holds a requisition id, sometimes a location,
+  and sometimes `Posting Date: MM/DD/YYYY`, in no guaranteed order. After the fix:
+  location 400/400, and rows discarded 89 → 6, the remaining six being degenerate
+  rows the API returns with no title and no path, which the relevance gate drops.
+
+  The requisition id is parsed by its own pattern rather than by teaching
+  `ats_from_url` about Workday, and that restraint is load-bearing: `ats_from_url`
+  returns `(ats, slug)`, but a Workday board needs slug + host + site. Routing it
+  there would make `funnel._probe` call `live_workday(slug)`, whose defaults do not
+  raise — it would build a wrong URL, 404, and silently discard every real Workday
+  employer discovery finds.
+
 - **Six adapters were discarding data their API already sends.** Each was measured
   against the live endpoint, not inferred:
 

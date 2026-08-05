@@ -155,7 +155,7 @@ Stated plainly, because they're the difference between "normalized" and "actuall
 - **Structured location is per-source, not universal.** Adzuna, USAJOBS, SmartRecruiters and Ashby send real `city`/`state`/`country`; Lever sends `country`; The Muse is parsed from its `"Waco, TX"` display string. Greenhouse, RemoteOK, Remotive, HN and Braintrust are free text and stay unparsed, because the parser refuses anything it cannot read with confidence — `"Taiwan, Taipei"` is country-first and `"Toronto, ON"` names a province, and guessing either produces a permanently wrong row. `location` always carries the raw string, so nothing is lost, but **do not assume `state` is populated.** `country` and `state` are normalized to ISO alpha-2 across every source; a posting naming several places keeps the rest in `locations`.
 - **`department` still exists.** Deprecated, emitted byte-identically, removed at 1.0. It is the one contract field whose meaning varies by source; `category` / `team` / `parent_company` / `seniority` are the replacements.
 - **SmartRecruiters returns no body** through its list endpoint, so `text` and `salary` are empty for that adapter.
-- **Workday truncates at 200 roles per employer** by default, silently, in Workday's own ordering rather than newest-first. Raise `WORKDAY_MAX_PAGES` to widen it.
+- **Workday truncates at 500 roles per employer** by default (`WORKDAY_MAX_PAGES` 25 × 20 per page), silently, in Workday's own ordering rather than newest-first. Raise `WORKDAY_MAX_PAGES` to widen it. Its list endpoint sends no `location` field, so the city is recovered from the posting path; a role whose path carries neither a location nor a requisition id keeps an empty location.
 
 ## Structured output for a database
 

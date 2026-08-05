@@ -2043,3 +2043,93 @@ def test_greenhouse_metadata_goes_to_source_extra_not_a_core_column():
         # a multi-select stays a list; taking the first would silently drop the rest
         "Career Page Posting Category": ["Field Engineering"],
     }
+
+
+# ── workday location + requisition id (probed live 2026-08-05) ───────────────
+def test_workday_recovers_the_location_its_list_endpoint_never_sends():
+    """`locationsText` IS NOT IN the Workday list response — `location` was empty on
+    120 of 120 accenture rows. That emptied two of `dedup_key`'s four components at
+    once (the location, and the job id nothing parsed), so every same-titled role a
+    company posts worldwide collapsed into ONE row: 89 of 400 discarded, each with
+    its own apply URL and city."""
+    # bulletFields carries it on some tenants, alongside a req id and sometimes a
+    # posting date — read BY SHAPE, never by position.
+    assert (
+        sources._workday_place(
+            {"bulletFields": ["R00333425", "Buenos Aires"]}, "/job/Buenos-Aires/X_R1"
+        )
+        == "Buenos Aires"
+    )
+    # Other tenants send only the id, so the path is the fallback — and it is the one
+    # source present on every tenant probed.
+    assert (
+        sources._workday_place(
+            {"bulletFields": ["R327553"]},
+            "/job/US-Minnesota-Maplewood/Automated-Inspection-Engineer_R01169027",
+        )
+        == "US Minnesota Maplewood"
+    )
+    # A posting date in bulletFields must never be mistaken for a location.
+    assert (
+        sources._workday_place(
+            {"bulletFields": ["R123", "Posting Date: 06/26/2026"]}, "/job/Reno/X_R123"
+        )
+        == "Reno"
+    )
+    # The documented field still wins when a tenant actually sends it.
+    assert (
+        sources._workday_place({"locationsText": "Springfield, IL"}, "/job/Other/X_R1")
+        == "Springfield, IL"
+    )
+    assert sources._workday_place({}, "") == ""
+
+
+def test_workday_path_decoding_survives_a_literal_hyphen():
+    """Workday encodes each space as `-`, so a real hyphen between spaces arrives as
+    `---`. Decoding shortest-first turns "Sao Paulo - Barueri" into three spaces."""
+    assert sources._wd_unslug("Buenos-Aires") == "Buenos Aires"
+    assert sources._wd_unslug("Sao-Paulo---Barueri") == "Sao Paulo - Barueri"
+    assert sources._wd_unslug("") == ""
+
+
+def test_workday_requisition_id_reaches_dedup_key_without_breaking_discovery():
+    """The id is parsed by its OWN pattern rather than by teaching `ats_from_url`
+    about Workday, and that is load-bearing: `ats_from_url` returns `(ats, slug)`,
+    but a Workday board needs slug + host + site. `funnel._probe` would call
+    `live_workday(slug)`, whose defaults do not raise — it would build a wrong URL,
+    404, and silently discard every real Workday employer discovery found."""
+    from job_radar import dedup
+
+    url = (
+        "https://accenture.wd103.myworkdayjobs.com/en-US/AccentureCareers"
+        "/job/Buenos-Aires/Analytics-and-Modeling-Specialist_R00333425"
+    )
+    assert dedup.job_ref(url) == ("workday", "", "R00333425")
+    # Workday appends a copy suffix when a requisition is reposted. Anchoring the id
+    # to end-of-path missed every one, and they cluster: all 14 residual wrong merges
+    # on accenture after the first fix were `-1` rows.
+    assert dedup.job_ref(url + "-1")[2] == "R00333425-1"
+    # Still NOT a known ATS for routing purposes — this is the invariant that keeps
+    # discovery working.
+    assert dedup.ats_from_url(url) is None
+
+
+def test_two_workday_openings_with_one_title_stay_two_rows():
+    """The end of the actual bug: same title, same company, different city and
+    requisition id."""
+    from job_radar import dedup
+
+    def row(city, req):
+        return {
+            "company": "Accenture",
+            "title": "Contract Manager",
+            "location": city,
+            "url": (
+                "https://accenture.wd103.myworkdayjobs.com/en-US/AccentureCareers"
+                f"/job/{city.replace(' ', '-')}/Contract-Manager_{req}"
+            ),
+        }
+
+    a, b = row("Buenos Aires", "R00333425"), row("Yokohama", "R00250899")
+    assert dedup.dedup_key(a) != dedup.dedup_key(b)
+    assert dedup.different_openings(a, b), "two requisition ids are two openings"
