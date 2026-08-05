@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, config, emit, engine, funnel, llm, shortlist
+from . import __version__, attribution, config, emit, engine, funnel, llm, shortlist
 from .dedup import dedup_key
 from .util import today_et
 
@@ -204,6 +204,16 @@ def cmd_scan(args, cfg):
     print()
     for r in surfaced[: args.limit]:
         print(_fmt(r, cfg))
+    # ATTRIBUTION. The terminal is job-radar's own display surface, so this is the
+    # one obligation it can discharge itself rather than hand downstream: Remote OK
+    # and Remotive both state they will revoke API access if their name is not shown
+    # as the source. Only the sources that actually contributed are credited --
+    # crediting a source that returned nothing is noise, and noise gets ignored.
+    credit = attribution.credit_line(
+        {s for r in merged for s in (r.get("sources") or [r.get("source")]) if s}
+    )
+    if credit:
+        print(f"\n{credit}")
     print(f"\nFull list: {args.out}  ·  apply: job-radar apply <id>")
     if args.strict and errors:  # opt-in: a partial failure is a failure
         raise SystemExit(1)

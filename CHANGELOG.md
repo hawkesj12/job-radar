@@ -112,6 +112,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Source attribution, which five wired sources require as a condition of access.**
+  Nothing in the package provided any of it. Remote OK and Remotive both state plainly
+  that they will **revoke** API access if their name is not shown as the source;
+  Himalayas, Arbeitnow and Adzuna each attach their own stated condition. This was
+  found by re-reading `catalog/`, where the terms are quoted and dated — the audit
+  that started as "Arbeitnow needs a link" turned up four more.
+
+  Three surfaces, because a library cannot discharge a *display* obligation on behalf
+  of whatever displays the jobs:
+
+  - the CLI credits the sources a run actually used (crediting one that returned
+    nothing is noise, and noise is how a credit line gets ignored);
+  - `--format ndjson` carries the full terms in the run manifest under `attribution`,
+    keyed by the same `source` value on every row, so a consumer can join without a
+    lookup table of its own and render what it owes;
+  - the README states the obligation for anyone building on this.
+
+  `row_link_suffices` is the distinction that decides what a consumer must build.
+  Every one of these terms wants a link to the job's own URL, which the record already
+  carries — that half is satisfied structurally. Naming the source never is, and
+  Adzuna needs more than a text credit at all (a branded label and a sized logo per
+  advert), so it is flagged `false` rather than reported as satisfiable by a link.
+
+  Two constraints that are not attribution and are easy to miss: Remote OK requires
+  the link back be followable, explicitly **not** `rel=nofollow`, and Remotive forbids
+  submitting its jobs to third-party job sites. Both now travel in the manifest.
+
+  A test cross-checks `job_radar/attribution.py` against `catalog/`, so a newly wired
+  source whose profile demands attribution cannot ship without it — the failure mode
+  otherwise is invisible until a vendor cuts you off.
+
 - **`sources.harvest_depth` — every depth ceiling in one named config block.** The
   nine ceilings were module-level constants in `sources.py`, each reading its own
   environment variable at IMPORT time, which had two consequences: a YAML config

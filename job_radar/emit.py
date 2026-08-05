@@ -40,6 +40,8 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import attribution
+
 _ET = ZoneInfo("America/New_York")  # every timestamp in job-radar is Eastern
 
 
@@ -148,6 +150,13 @@ def manifest(rows, errors, discovered, cfg, started_at=None) -> str:
             "sources_failed": len(errors),
             "errors": list(errors),
             "companies_discovered": len(discovered or ()),
+            # THE OBLIGATION TRAVELS WITH THE DATA. Four of these sources grant API
+            # access on the stated condition that you link back and name them, and
+            # two say outright they will revoke access if you do not. A library
+            # cannot discharge a DISPLAY obligation on behalf of whatever displays
+            # the jobs, so it hands the terms to the consumer that can -- keyed by
+            # the same `source` value on every row. See job_radar/attribution.py.
+            "attribution": attribution.as_dicts(by_source),
             "config": {
                 "remote_only": cfg.remote_only,
                 "location": cfg.location,
