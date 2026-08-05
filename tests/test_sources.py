@@ -246,11 +246,20 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
                         "PositionLocationDisplay": "Bethesda, Maryland",
                         "PositionURI": "https://www.usajobs.gov/job/1",
                         "PublicationStartDate": "2026-07-06",
-                        "PositionSchedule": [{"Name": "Full-Time"}],
+                        # `.Code`, because `.Name` is EMPTY on 47 of 50 live rows
+                        # and a shift pattern on the rest — see the adapter comment.
+                        "PositionSchedule": [{"Code": "1", "Name": "Full-Time"}],
+                        "JobGrade": [{"Code": "GS"}],
                         "PositionRemuneration": [
                             {"MinimumRange": "120000", "MaximumRange": "150000"}
                         ],
-                        "UserArea": {"Details": {"JobSummary": "Federal AI work."}},
+                        "UserArea": {
+                            "Details": {
+                                "JobSummary": "Federal AI work.",
+                                "LowGrade": "13",
+                                "HighGrade": "14",
+                            }
+                        },
                     }
                 }
             ]
@@ -277,7 +286,14 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
     assert j["title"] == "IT Specialist (Data Management)"
     assert j["company"] == "National Institutes of Health"
     assert j["department"] == "Department of Health"
-    assert j["employment_type"] == "Full-Time"
+    # NORMALIZED from PositionSchedule[].Code — `.Name` is EMPTY on 47 of 50 live
+    # rows and a shift pattern on the rest, so not one row in 50 produced a usable
+    # employment type from it. The vendor's own string is preserved.
+    assert j["employment_type"] == "FULL_TIME"
+    assert j["employment_type_raw"] == "Full-Time"
+    # The GRADE BAND, not the pay plan. `JobGrade[].Code` is "GS"/"ND"/"FV" — pay
+    # PLANS — and putting one in `seniority` asserted something it is not.
+    assert j["seniority"] == "GS-13/14"
     assert "120,000" in j["salary"]
     assert j["text"] == "Federal AI work."
     _assert_contract(out, "usajobs")
@@ -784,11 +800,20 @@ SAMPLES = {
                         "PositionLocationDisplay": "Bethesda, Maryland",
                         "PositionURI": "https://www.usajobs.gov/job/1",
                         "PublicationStartDate": "2026-07-10",
-                        "PositionSchedule": [{"Name": "Full-Time"}],
+                        # `.Code`, because `.Name` is EMPTY on 47 of 50 live rows
+                        # and a shift pattern on the rest — see the adapter comment.
+                        "PositionSchedule": [{"Code": "1", "Name": "Full-Time"}],
+                        "JobGrade": [{"Code": "GS"}],
                         "PositionRemuneration": [
                             {"MinimumRange": "120000", "MaximumRange": "150000"}
                         ],
-                        "UserArea": {"Details": {"JobSummary": "Federal AI work."}},
+                        "UserArea": {
+                            "Details": {
+                                "JobSummary": "Federal AI work.",
+                                "LowGrade": "13",
+                                "HighGrade": "14",
+                            }
+                        },
                     }
                 }
             ]

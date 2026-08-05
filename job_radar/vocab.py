@@ -184,11 +184,30 @@ def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict
 # not a number a generic currency regex would give a period to. This is the exact
 # case that makes salary_period load-bearing: 47 and 2140 and 50 are all valid
 # numbers and mean nothing without their unit.
+# Anchored on the PERIOD and read right-to-left, which is the only shape that
+# survives what Google actually sends. Three real strings broke the first version:
+#
+#   "US$6,117–US$8,342 a month"  the repeated currency prefix made an unanchored
+#                                scan skip the low figure, so the MAXIMUM was written
+#                                into salary_min -- a wrong number in the column that
+#                                means "what the employer committed to as a floor",
+#                                carrying basis="parsed" as though it were reliable.
+#                                That is worse than dropping it.
+#   "101K–132K a year"           the K suffix was unhandled; dropped entirely.
+#   "81,873–104,388 a year"      the only one of the four that worked.
+#
+# So: find the unit, then take the one-or-two numbers immediately before it, allowing
+# an arbitrary currency prefix on each and an optional K/M multiplier.
+_G_NUM = r"(?:[^\d\s]{0,3}\s?)?(?P<%s>[\d,]+(?:\.\d+)?)\s*(?P<%s>[KkMm])?"
 _G_SALARY = re.compile(
-    r"(?P<lo>[\d,]+(?:\.\d+)?)\s*(?:[-–—]|to)?\s*(?P<hi>[\d,]+(?:\.\d+)?)?\s*"
+    _G_NUM % ("lo", "lomul")
+    + r"\s*(?:[-–—]|to)?\s*(?:"
+    + (_G_NUM % ("hi", "himul"))
+    + r")?\s*"
     r"(?:an?|per)\s+(?P<per>hour|hr|week|wk|month|mo|year|yr|day)",
     re.I,
 )
+_MULT = {"k": 1_000, "m": 1_000_000}
 
 
 def google_salary(raw) -> dict:
@@ -202,14 +221,39 @@ def google_salary(raw) -> dict:
     if not m:
         return salary()
 
-    def _n(v):
+    def _n(num, mul):
         try:
-            return float(str(v).replace(",", "")) or None
+            v = float(str(num).replace(",", ""))
         except (TypeError, ValueError):
             return None
+        return (v * _MULT[mul.lower()] if mul else v) or None
 
-    lo, hi = _n(m.group("lo")), _n(m.group("hi"))
+    lo = _n(m.group("lo"), m.group("lomul"))
+    hi = _n(m.group("hi"), m.group("himul"))
+    # ORDER IS NOT GUARANTEED by the regex alone. If the low group somehow captured
+    # the larger figure, swapping is the honest repair -- a min above its max is a
+    # nonsense record, and silently keeping it is how "$8,342 minimum" ships.
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo
     return salary(lo, hi, currency="USD", period=m.group("per"), basis="parsed")
+
+
+# OPM position-schedule codes -> the employment_type vocabulary. USAJOBS' own
+# `PositionSchedule[].Name` is EMPTY on 47 of 50 rows measured, and on the three that
+# have it, it is a shift pattern ("Monday through Friday, 8:00am to 4:30pm") that
+# normalizes to OTHER. Not one row in 50 yielded FULL_TIME from the name. `.Code` is
+# present on 50/50.
+#
+# Only code "1" appeared live; the rest are from OPM's published list and are
+# UNVERIFIED, on the same footing as the RateIntervalCode entries above.
+USAJOBS_SCHEDULE = {
+    "1": "FULL_TIME",
+    "2": "PART_TIME",
+    "3": "PART_TIME",  # shift
+    "4": "TEMPORARY",  # intermittent
+    "5": "PER_DIEM",
+    "6": "TEMPORARY",  # on-call / seasonal
+}
 
 
 # ── remote type ─────────────────────────────────────────────────────────────

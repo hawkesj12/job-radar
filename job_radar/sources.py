@@ -178,11 +178,25 @@ def fetch_ashby(slug: str):
                 ),
                 "department": j.get("department", "") or j.get("team", ""),
                 "team": j.get("department") or j.get("team") or None,
-                # `isRemote` is a real boolean on every Ashby posting. Structured
-                # geography lives at address.postalAddress -- present in 657 of 737
-                # measured, and never read until now.
-                "remote_type": _rt(j.get("isRemote")),
-                "remote_basis": "stated" if "isRemote" in j else None,
+                # `workplaceType`, NOT `isRemote`. Measured on openai (n=733):
+                #
+                #   isRemote=True,  workplaceType='Hybrid'   442
+                #   isRemote=None,  workplaceType=None       235
+                #   isRemote=True,  workplaceType='Remote'    31
+                #   isRemote=False, workplaceType='OnSite'    25
+                #
+                # `isRemote` is TRUE ON EVERY HYBRID ROW, so reading it reported 442
+                # of 733 postings -- 60% of the board -- as fully remote. A boolean
+                # cannot express hybrid, which is the entire reason remote_type is an
+                # enum; wiring it to the one field that collapses the distinction
+                # threw that away. `workplaceType` states it outright and
+                # vocab.remote_type already maps all three values.
+                #
+                # The basis keys on the VALUE, not the key: `isRemote` is present on
+                # 733/733 while null on 235, so keying on presence made 235 rows
+                # claim a stated basis with remote_type=None.
+                "remote_type": remote_type(j.get("workplaceType")),
+                "remote_basis": "stated" if j.get("workplaceType") else None,
                 **_ashby_place(j.get("address")),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
@@ -298,10 +312,19 @@ def fetch_workable(slug: str):
     )
     out = []
     for j in data.get("jobs", []):
-        loc = j.get("location") or {}
-        parts = [loc.get("city", ""), loc.get("region", ""), loc.get("country", "")]
-        loctext = ", ".join(p for p in parts if p)
-        if loc.get("telecommuting") or j.get("telecommuting"):
+        # THERE IS NO `location` KEY. This read `j.get("location") or {}` and built
+        # the string from `.city/.region/.country` inside it, so `loctext` was ""
+        # on EVERY row of every Workable board -- the only postings with any location
+        # at all were remote ones, reading literally "(Remote)". Measured 28/28.
+        # The real data is at the TOP LEVEL: city 26/28, state 26/28, country 28/28,
+        # plus a `locations[]` list carrying an ISO-2 countryCode.
+        places = [x for x in (j.get("locations") or []) if isinstance(x, dict)]
+        first = places[0] if places else {}
+        city = j.get("city") or first.get("city")
+        state = j.get("state") or first.get("region")
+        country = j.get("country") or first.get("country")
+        loctext = ", ".join(p for p in (city, state, country) if p)
+        if j.get("telecommuting"):
             loctext = (loctext + " (Remote)").strip()
         text = clean(j.get("description", ""))
         out.append(
@@ -313,6 +336,45 @@ def fetch_workable(slug: str):
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
                 "posted": to_date(j.get("created_at") or j.get("published_on")),
                 "department": j.get("department", ""),
+                "team": j.get("department") or None,
+                "city": city,
+                "state": state,
+                "country": country,
+                "locations": [
+                    {
+                        "raw": ", ".join(
+                            p
+                            for p in (x.get("city"), x.get("region"), x.get("country"))
+                            if p
+                        ),
+                        "city": x.get("city"),
+                        "state": x.get("region"),
+                        "country": x.get("countryCode") or x.get("country"),
+                        "url": j.get("application_url") or j.get("url"),
+                    }
+                    for x in places
+                ]
+                or None,
+                # `telecommuting` was already being read for the location STRING and
+                # never for the enum -- the one-liner. False is a real answer here:
+                # the key is on 28/28 rows, so an absent value is genuinely absent
+                # rather than unknown.
+                "remote_type": ("remote" if j.get("telecommuting") else "onsite")
+                if "telecommuting" in j
+                else None,
+                "remote_basis": "stated" if "telecommuting" in j else None,
+                "seniority": j.get("experience") or None,
+                "category": j.get("function") or None,
+                "source_extra": {
+                    k: v
+                    for k, v in (
+                        ("industry", j.get("industry")),
+                        ("education", j.get("education")),
+                        ("shortcode", j.get("shortcode")),
+                    )
+                    if v
+                }
+                or None,
                 "employment_type": j.get("employment_type", ""),
                 "salary": salary_from_text(text),
                 "text": text,
@@ -908,19 +970,31 @@ def fetch_teamtailor(slug: str):
     data = get_json(f"https://{slug}.teamtailor.com/jobs.json")
     out = []
     for j in data.get("items", []) if isinstance(data, dict) else []:
-        jp = j.get("_jobposting") or {}
-        loc = ""
-        place = jp.get("jobLocation") if isinstance(jp, dict) else None
-        if isinstance(place, dict):
-            addr = place.get("address") or {}
+        jp = j.get("_jobposting") if isinstance(j.get("_jobposting"), dict) else {}
+        # `jobLocation` IS A LIST, not a dict. This guarded on `isinstance(place,
+        # dict)`, which never fired -- so `location` was "" on 53 of 53 rows across
+        # three boards, every one of which carries a full structured address.
+        raw_places = jp.get("jobLocation")
+        places: list[dict] = []
+        for x in raw_places if isinstance(raw_places, list) else [raw_places]:
+            addr = x.get("address") if isinstance(x, dict) else None
             if isinstance(addr, dict):
-                parts = [
-                    addr.get("addressLocality", ""),
-                    addr.get("addressRegion", ""),
-                    addr.get("addressCountry", ""),
-                ]
-                loc = ", ".join(str(p) for p in parts if p)
-        if isinstance(jp, dict) and jp.get("jobLocationType") == "TELECOMMUTE":
+                places.append(addr)
+
+        def _fmt(a: dict) -> str:
+            return ", ".join(
+                str(p)
+                for p in (
+                    a.get("addressLocality"),
+                    a.get("addressRegion"),
+                    a.get("addressCountry"),
+                )
+                if p
+            )
+
+        first: dict = places[0] if places else {}
+        loc = _fmt(first)
+        if jp.get("jobLocationType") == "TELECOMMUTE":
             loc = (loc + " (Remote)").strip()
         text = clean(
             j.get("content_html", "")
@@ -933,10 +1007,25 @@ def fetch_teamtailor(slug: str):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("date_published")),
                 "department": "",
-                "employment_type": (
-                    jp.get("employmentType", "") if isinstance(jp, dict) else ""
-                )
-                or "",
+                "city": first.get("addressLocality") or None,
+                "state": first.get("addressRegion") or None,
+                "country": first.get("addressCountry") or None,
+                "locations": [
+                    {
+                        "raw": _fmt(a),
+                        "city": a.get("addressLocality"),
+                        "state": a.get("addressRegion"),
+                        "country": a.get("addressCountry"),
+                        "url": j.get("url", ""),
+                    }
+                    for a in places
+                ]
+                or None,
+                # The only WORKING expires on the depth lane -- 8 of 53 measured.
+                "expires": to_date((jp.get("validThrough") or "")[:10]),
+                "parent_company": (jp.get("hiringOrganization") or {}).get("name")
+                or None,
+                "employment_type": jp.get("employmentType") or "",
                 "salary": salary_from_text(text),
                 "text": text,
             }
@@ -1129,6 +1218,9 @@ def search_remotive(queries, strict: bool = False):
                 # definition (it is a remote-only board), so the " (Remote)" suffix is
                 # accurate even though the place is a hiring region, not a workplace.
                 "location": (j.get("candidate_required_location") or "") + " (Remote)",
+                # The same string, read for what it IS: where a candidate may live.
+                # 31/31, and today it is only concatenated into the display string.
+                "remote_region": j.get("candidate_required_location") or None,
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("publication_date")),
                 "department": j.get("category", ""),
@@ -1174,6 +1266,19 @@ def search_jobicy(queries):
                 "remote_basis": "stated",
                 "employment_type": _joined(j.get("jobType")),
                 "salary": salary_from_text(text),
+                # salaryMin/Max/Currency/Period are REAL fields on 46 of 100 rows --
+                # and multi-currency (EUR/GBP/CAD, not just USD). The adapter was
+                # regexing the description instead of reading the vendor's own
+                # commitment sitting four keys away.
+                **vocab.salary(
+                    j.get("salaryMin"),
+                    j.get("salaryMax"),
+                    j.get("salaryCurrency"),
+                    j.get("salaryPeriod"),
+                ),
+                # `jobGeo` is where a remote worker may sit ("USA", "EMEA, UK"),
+                # 100/100 -- a region, never a city.
+                "remote_region": j.get("jobGeo") or None,
                 "text": text,
                 "source": "jobicy",
             }
@@ -1365,10 +1470,18 @@ def _himalayas_rows(jobs, out, seen=None):
         text = clean(j.get("description") or j.get("excerpt", ""))
         regions = j.get("locationRestrictions") or []
         loc = (", ".join(regions) if regions else "") + " (Remote)"
+        # The browse lane returns the literal string "name" as companyName on the
+        # FRESHEST rows (20/20 at offset 0, reproduced twice ~20 min apart), while
+        # `companySlug` is correct on every row of every probe. A placeholder company
+        # is worse than a missing one -- it is a real-looking value that groups every
+        # affected posting under one fake employer.
+        comp = j.get("companyName") or ""
+        if comp.strip().lower() in ("", "name"):
+            comp = (j.get("companySlug") or "").replace("-", " ").title()
         out.append(
             {
                 "title": j.get("title", ""),
-                "company": j.get("companyName", ""),
+                "company": comp,
                 "location": loc.strip(),
                 "url": url,
                 "posted": to_date(j.get("pubDate")),
@@ -1385,6 +1498,24 @@ def _himalayas_rows(jobs, out, seen=None):
                 or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 "remote_basis": "stated",
+                # `locationRestrictions` is a COUNTRY list ("United States", or forty
+                # of them) -- never a city. That is a region, which is exactly what
+                # remote_region means, and it was only being joined into the display
+                # string.
+                "remote_region": ", ".join(x for x in regions if isinstance(x, str))
+                or None,
+                # 20/20 on BOTH lanes -- the only wired source that actually
+                # populates an expiry.
+                "expires": to_date(j.get("expiryDate")),
+                "source_extra": {
+                    k: v
+                    for k, v in (
+                        ("company_slug", j.get("companySlug")),
+                        ("timezones", j.get("timezoneRestrictions")),
+                    )
+                    if v
+                }
+                or None,
                 "tags": [x for x in (j.get("categories") or []) if isinstance(x, str)]
                 or None,
                 "employment_type": j.get("employmentType", ""),
@@ -1686,7 +1817,13 @@ def search_braintrust(queries):
                     # category, one of the four meanings that made that column
                     # unusable downstream. It now says what it is.
                     "department": "",
-                    "seniority": j.get("level") or None,
+                    # `level` DOES NOT EXIST in this payload -- 0 of 20 rows carry
+                    # the key, so this mapping has been dead since it was written and
+                    # the 20% seniority fill came from the title decomposition, not
+                    # from Braintrust. `role.name` is a clean job FAMILY on 20/20 and
+                    # `category` was empty.
+                    "category": (j.get("role") or {}).get("name") or None,
+                    "expires": to_date(j.get("deadline")),
                     "remote_type": "remote",  # a remote freelance network by definition
                     "remote_basis": "stated",
                     "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
@@ -1742,6 +1879,17 @@ _CC_NAME = {
     "BR": "Brazil",
     "MX": "Mexico",
 }
+
+
+def _usajobs_grade(d: dict) -> str | None:
+    """LowGrade/HighGrade + the pay plan -> "GS-13" / "GS-11/12"."""
+    det = (d.get("UserArea") or {}).get("Details") or {}
+    lo, hi = det.get("LowGrade"), det.get("HighGrade")
+    plan = ((d.get("JobGrade") or [{}])[0] or {}).get("Code") or ""
+    if not lo and not hi:
+        return None
+    band = f"{lo}/{hi}" if lo and hi and lo != hi else (lo or hi)
+    return f"{plan}-{band}" if plan else band
 
 
 def _usajobs_place(locations) -> dict:
@@ -1863,12 +2011,13 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     if c.get("Name")
                 )
                 or None,
-                "seniority": ", ".join(
-                    g.get("Code", "")
-                    for g in (d.get("JobGrade") or [])
-                    if g.get("Code")
-                )
-                or None,
+                # The GRADE, not the pay plan. `JobGrade[].Code` is GS / ND / GG /
+                # FV -- those are pay PLANS, not levels, and putting them in
+                # `seniority` asserted something the value is not. The actual band is
+                # LowGrade/HighGrade in UserArea.Details, present on 50/50 measured
+                # ("13"-"13", "11"-"12"). Reported as "GS-13" or "GS-11/12", which is
+                # how a federal applicant reads it.
+                "seniority": _usajobs_grade(d),
                 **_usajobs_place(d.get("PositionLocation")),
                 "remote_type": "remote" if remote else None,
                 "remote_basis": "stated" if remote else None,
@@ -1897,9 +2046,16 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     if v
                 }
                 or None,
-                "employment_type": ", ".join(
-                    s.get("Name", "") for s in (d.get("PositionSchedule") or [])
+                # `.Code`, not `.Name`. The name is EMPTY on 47 of 50 rows and a
+                # shift pattern on the rest, so not one row in 50 produced a usable
+                # employment type; the code is present on 50/50.
+                "employment_type": vocab.USAJOBS_SCHEDULE.get(
+                    (d.get("PositionSchedule") or [{}])[0].get("Code", ""), ""
                 ),
+                "employment_type_raw": (d.get("PositionSchedule") or [{}])[0].get(
+                    "Name"
+                )
+                or None,
                 "salary": salary_range(
                     pay.get("MinimumRange"), pay.get("MaximumRange")
                 ),
