@@ -213,6 +213,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `None` rather than guessing, and the vendor's text is never lost (`location` and
   `locations[].raw` keep it).
 
+- **A US state was sometimes a name and sometimes a code, in the same column.**
+  `state` is deliberately two vocabularies — a two-letter code inside the US, the
+  source's own subdivision name outside it, because `Greater London` and `Attica` have
+  no code to map to. The US half of that rule was false on **580 measured rows**: Ashby
+  sent `California` 518 times, Workable `New York`, Adzuna `Michigan`, so
+  `state='California'` and `state='CA'` named the same place and a US-state filter
+  missed 566 of Ashby's 737 rows. Every one of the 580 mapped cleanly through
+  `vocab.us_state_code`, which usajobs already used for exactly this. Canonicalized at
+  the boundary; it may only canonicalize, never discard, so an unrecognised US
+  subdivision (a county, a metro) survives untouched, as does every non-US row.
+
 - **`employment_type` was `""` on 24% of rows.** 680 of 2,747 — 100% of Greenhouse,
   RemoteOK and Teamtailor — and `""` is not a member of `vocab.EMPLOYMENT_TYPES`. It
   is the exact None-vs-empty lie the contract exists to remove, and it was invisible

@@ -2463,3 +2463,50 @@ def test_salary_basis_values_are_inside_the_closed_vocabulary():
     assert vocab.salary(1, 2, "USD", "year")["salary_basis"] in vocab.SALARY_BASES
     got = vocab.google_salary("47–55 an hour")
     assert got["salary_basis"] in vocab.SALARY_BASES, got["salary_basis"]
+
+
+def test_a_us_state_is_always_a_two_letter_code():
+    """`state` is deliberately two vocabularies — a code inside the US, the source's
+    own subdivision name outside it, because 'Greater London' and 'Attica' have no
+    code. But the US half of that rule was FALSE on 580 measured rows: ashby sent
+    'California' 518 times, so `state='California'` and `state='CA'` named the same
+    place in one column and a US-state filter missed 566 of ashby's 737 rows."""
+    r = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/1",
+            "source": "ashby",
+            "city": "San Francisco",
+            "state": "California",
+            "country": "US",
+        }
+    )
+    assert r["state"] == "CA"
+
+    # Outside the US, untouched — there is nothing to map to.
+    uk = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/2",
+            "source": "ashby",
+            "state": "Greater London",
+            "country": "GB",
+        }
+    )
+    assert uk["state"] == "Greater London"
+
+    # May only canonicalize, never discard: an unrecognised US subdivision (a county,
+    # a metro) survives rather than being nulled.
+    odd = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/3",
+            "source": "adzuna",
+            "state": "Cook County",
+            "country": "US",
+        }
+    )
+    assert odd["state"] == "Cook County"

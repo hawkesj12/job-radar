@@ -218,6 +218,20 @@ def _coerce(p: dict) -> dict:
     if p.get("country") is not None:
         p["country"] = vocab.country_code(p["country"])
 
+    # US STATES ARE CODES, symmetric with the line above and for the same reason.
+    # This column is deliberately two vocabularies -- a two-letter code inside the US,
+    # the source's own subdivision name outside it, because "Greater London" and
+    # "Attica" have no code to map to. But that rule was FALSE on 580 measured rows:
+    # ashby sent "California" 518 times, workable "New York", adzuna "Michigan", so
+    # `state='California'` and `state='CA'` named the same place in one column and a
+    # US-state filter missed 566 of ashby's 737 rows. Every one of the 580 mapped
+    # cleanly; none was a county or a metro that would map wrong.
+    #
+    # `or p["state"]` keeps an unrecognised US subdivision rather than nulling it --
+    # this may only canonicalize, never discard. Non-US rows are untouched.
+    if p.get("country") == "US" and p.get("state"):
+        p["state"] = vocab.us_state_code(p["state"]) or p["state"]
+
     # GEOGRAPHY FALLBACK, once here instead of in six adapters. Two big depth
     # sources were discarding geography they already had: greenhouse filled
     # city/state/country on 0 of 396 live rows while split_place resolves 358 of the
