@@ -28,6 +28,7 @@ CLAUDE.md
 BUILD-0.7.0.md
 ARCHITECTURE.md
 MAPPING.md
+RECORD-SHAPE.md
 
 # catalog working data — the PROBE OUTPUT, not the knowledge. Every profile carries
 # its own verbatim "## A real record" (required by _SCHEMA.md), so the evidence is in
