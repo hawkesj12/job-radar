@@ -33,7 +33,7 @@ Every adapter, whatever it was handed, emits the same dict:
 | **`title_root`** · **`title_level`** | the matchable role with decoration stripped; `I`–`IV`      |
 | **`salary_min`** · **`salary_max`** | what an employer COMMITTED to, with currency and period     |
 | **`salary_estimated_*`**       | a model's guess, kept in separate keys. Adzuna predicts 93%.      |
-| **`city` · `state` · `country`** | structured geography, where the source sends it                |
+| **`city` · `state` · `country`** | structured geography. **`country` is ISO alpha-2 or `None`** — normalized at the boundary, never a display name. `state` is a US two-letter code where the place is in the US and the source's own subdivision name elsewhere (`Greater London`), so filter it together with `country`. Derived from the location string when a source sends no structured fields, and left `None` when it cannot be read with confidence. |
 | **`remote`**                   | `True` / `False` / **`None`** — see below                        |
 | **`remote_type`**              | `remote` · `hybrid` · `onsite` · `None` — a bool cannot say hybrid |
 | **`remote_basis`**             | how we decided: `stated` · `board` · `location` · `text`         |

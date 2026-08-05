@@ -22,6 +22,7 @@ from job_radar import (
     sources,
     shortlist,
     util,
+    vocab,
 )
 
 
@@ -2349,3 +2350,116 @@ def test_employment_type_raw_never_holds_a_value_the_vendor_did_not_send():
     )
     assert r2["employment_type"] == "FULL_TIME"
     assert r2["employment_type_raw"] == "Full-time"
+
+
+# ── contract consistency, found by live probe across all 19 sources 2026-08-05 ──
+def test_country_is_one_vocabulary_no_matter_which_adapter_filled_it():
+    """Live probe found THREE vocabularies in one column: UPPER alpha-2 from most
+    sources, LOWERCASE from smartrecruiters ('de', 'us' — 79/100 rows) and DISPLAY
+    NAMES from workable ('United States', 28/28). Grouping by country split every
+    country into pieces."""
+    for raw, want in (("de", "DE"), ("United States", "US"), ("US", "US")):
+        r = engine._coerce(
+            {
+                "title": "E",
+                "company": "A",
+                "url": "https://x/1",
+                "source": "smartrecruiters",
+                "country": raw,
+            }
+        )
+        assert r["country"] == want, f"{raw!r} -> {r['country']!r}"
+
+
+def test_employment_type_is_none_when_the_source_said_nothing():
+    """It was `""` on 680 of 2,747 live rows (24%) — 100% of greenhouse, remoteok and
+    teamtailor — and `""` is not a member of the closed vocabulary. Invisible in
+    NDJSON because emit masks it with `or None`; only the flat dict a library consumer
+    receives carried it, which is exactly who this contract is for."""
+    r = engine._coerce(
+        {"title": "E", "company": "A", "url": "https://x/1", "source": "greenhouse"}
+    )
+    assert r["employment_type"] is None
+    assert r["employment_type"] != ""
+
+
+def test_every_locations_element_has_the_same_keys():
+    """644 of 3,153 live elements were `{raw, url}` only — no city/state/country key
+    at all — so a consumer doing `l["city"]` raised on a fifth of the list."""
+    multi = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/1",
+            "source": "greenhouse",
+            "location": "Waco, TX; Dublin, Ireland",
+        }
+    )
+    single = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/2",
+            "source": "greenhouse",
+            "location": "Waco, TX",
+        }
+    )
+    want = {"raw", "city", "state", "country", "url"}
+    for row in (multi, single):
+        for el in row["locations"]:
+            assert set(el) == want, f"element keys {sorted(el)} != {sorted(want)}"
+    # Each place is parsed from ITS OWN string, not copied from the first.
+    assert multi["locations"][1]["country"] == "IE"
+
+
+def test_geography_is_derived_from_the_location_string_when_a_source_sends_none():
+    """greenhouse filled city/state/country on 0 of 396 live rows while the strings it
+    emits parse on 358 of them; rippling 0 of 193 where all 193 parse. One fallback
+    here fixes every adapter at once instead of six times."""
+    r = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/1",
+            "source": "greenhouse",
+            "location": "Sydney, Australia",
+        }
+    )
+    assert (r["city"], r["country"]) == ("Sydney", "AU")
+
+    # It may only ADD. A source that sent real structured geography always wins.
+    keep = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/2",
+            "source": "ashby",
+            "location": "Sydney, Australia",
+            "city": "Melbourne",
+            "state": None,
+            "country": "AU",
+        }
+    )
+    assert keep["city"] == "Melbourne", "overwrote a source's own structured value"
+
+    # An unreadable location stays None rather than becoming a guess.
+    unknown = engine._coerce(
+        {
+            "title": "E",
+            "company": "A",
+            "url": "https://x/3",
+            "source": "greenhouse",
+            "location": "Kuala Lumpur",
+        }
+    )
+    assert unknown["city"] is None and unknown["country"] is None
+
+
+def test_salary_basis_values_are_inside_the_closed_vocabulary():
+    """`vocab.google_salary` emits `parsed`, which was outside SALARY_BASES — the
+    frozenset and the caller had been renamed apart. Checked through the FUNCTIONS
+    rather than by grepping literals, which is how the mismatch survived a
+    source-reading test."""
+    assert vocab.salary(1, 2, "USD", "year")["salary_basis"] in vocab.SALARY_BASES
+    got = vocab.google_salary("47–55 an hour")
+    assert got["salary_basis"] in vocab.SALARY_BASES, got["salary_basis"]

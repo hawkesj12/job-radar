@@ -60,7 +60,13 @@ def _src_pref(p) -> int:
 # posting killed the whole run, discarded a completed network harvest, and skipped
 # the "keep your existing shortlist" guard on the way out. Coerce once, here, at the
 # only boundary every posting from every adapter has to cross.
-_REQUIRED_TEXT = ("title", "company", "url", "source", "industry", "employment_type")
+# `employment_type` is NOT here, and that was a real contract break while it was:
+# `norm or ""` wrote the empty string on 680 of 2,747 live rows (24%) -- 100% of
+# greenhouse, remoteok and teamtailor -- and "" is not a member of
+# vocab.EMPLOYMENT_TYPES. It is the exact None-vs-empty lie the contract exists to
+# remove, and it was invisible from the NDJSON because emit masks it with `or None`;
+# only the flat dict a library consumer receives carried it.
+_REQUIRED_TEXT = ("title", "company", "url", "source", "industry")
 
 
 # The keys added in 0.7.0, and their UNKNOWN value. `None` is the default on every
@@ -128,7 +134,9 @@ _CONTRACT_FIELDS = (
 # `text` deliberately keeps its name. `body` reads better, but it is a released,
 # README-documented field with call sites in the only consumer, and renaming it buys
 # a nicer word and nothing else. If it ever moves it moves at 1.0 with `department`.
-_NULLABLE_TEXT = ("posted", "salary", "text", "location", "department")
+_NULLABLE_TEXT = (
+    "posted", "salary", "text", "location", "department", "employment_type",
+)  # fmt: skip
 
 
 def _coerce(p: dict) -> dict:
@@ -197,6 +205,35 @@ def _coerce(p: dict) -> dict:
     rt = p.get("remote_type")
     p["remote"] = None if rt is None else rt == "remote"
 
+    # `country` IS ALPHA-2 OR None, enforced here so no adapter can reintroduce a
+    # second vocabulary. A live probe across all nineteen sources found three at once
+    # in this one column: UPPER alpha-2 from most, LOWERCASE from smartrecruiters
+    # ('de', 'us' -- 79/100 rows) and DISPLAY NAMES from workable ('United States',
+    # 28/28, while its own locations[] said 'US' on the same row). Grouping by country
+    # split every country into pieces.
+    #
+    # An unrecognised name becomes None rather than riding through: country_code
+    # refuses to guess, and the vendor's original text is never lost -- it is still in
+    # `location` and in `locations[].raw`.
+    if p.get("country") is not None:
+        p["country"] = vocab.country_code(p["country"])
+
+    # GEOGRAPHY FALLBACK, once here instead of in six adapters. Two big depth
+    # sources were discarding geography they already had: greenhouse filled
+    # city/state/country on 0 of 396 live rows while split_place resolves 358 of the
+    # `location` strings it emits ("Sydney, Australia", "Dublin, IE"), and rippling
+    # 0 of 193 where split_place resolves 193.
+    #
+    # ONLY fills what the adapter left None, so a source that sends real structured
+    # geography always wins -- this can add, never overwrite. split_place refuses
+    # anything it cannot read with confidence, so an unparseable location stays None
+    # rather than becoming a guess.
+    if p.get("city") is None and p.get("state") is None and p.get("country") is None:
+        first = (p.get("location") or "").split(";")[0]
+        for k, v in vocab.split_place(first).items():
+            if v is not None:
+                p[k] = v
+
     # `locations` -- every place ONE posting names. Greenhouse separates them with
     # `;` ("Berlin, Germany; Munich, Germany") and 143 of 810 postings on one measured
     # board do this. That is a single job id, so it stays a single row; the places
@@ -205,7 +242,14 @@ def _coerce(p: dict) -> dict:
     if p.get("locations") is None:
         parts = [x.strip() for x in (p.get("location") or "").split(";") if x.strip()]
         if len(parts) > 1:
-            p["locations"] = [{"raw": x, "url": p.get("url")} for x in parts]
+            # SAME KEYS as the single-place branch below. This used to emit only
+            # {raw, url}, so 644 of 3,153 live elements had no city/state/country
+            # key at all and a consumer doing `l["city"]` raised on a fifth of the
+            # list. The parsed values are per-place, so each is read from its own
+            # string rather than copied from the row's first place.
+            p["locations"] = [
+                {"raw": x, **vocab.split_place(x), "url": p.get("url")} for x in parts
+            ]
         elif parts:
             p["locations"] = [
                 {
@@ -229,7 +273,7 @@ def _coerce(p: dict) -> dict:
     if p.get("employment_type_raw") is None:
         incoming = p.get("employment_type")
         norm, raw = vocab.employment_type(incoming)
-        p["employment_type"] = norm or ""
+        p["employment_type"] = norm  # None when the source said nothing, never ""
         # `raw` means "what the VENDOR actually said", so it must not be back-filled
         # with a value the vendor never sent. An adapter that already mapped into the
         # closed vocabulary -- usajobs turns PositionSchedule Code "1" into FULL_TIME,
@@ -395,7 +439,9 @@ def _harvest(cfg, watchlist_path, companies):
     # (block -> [key]) that keeps the fuzzy de-dup linear. Both persist across the
     # depth + breadth _consume passes; _consume mutates them ONLY on the main
     # thread (workers just fetch), so the shared state needs no lock.
-    hits, blocks, errors = {}, {}, []
+    hits: dict = {}
+    blocks: dict = {}
+    errors: list = []
     if watchlist_err:
         errors.append(watchlist_err)
 

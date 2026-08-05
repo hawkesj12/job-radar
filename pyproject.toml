@@ -71,6 +71,12 @@ markers = [
 ]
 
 [tool.mypy]
+# Adapters are largely unannotated, so plain mypy checked almost none of sources.py --
+# a panel review injected `_bug: int = "not an int"` plus a wrong-arity call into an
+# adapter and mypy reported only a note. This turns on checking of unannotated bodies,
+# which covers the changed surface, WITHOUT the hundreds of low-value findings full
+# strict mode produces.
+check_untyped_defs = true
 python_version = "3.10"
 files = ["job_radar"]
 # Deliberately NOT strict. This codebase passes untyped dicts (postings, config

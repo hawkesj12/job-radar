@@ -193,6 +193,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One column, three vocabularies — `country` is now alpha-2 or `None`, enforced at
+  the boundary.** A live probe across all nineteen sources (2,747 rows) found UPPER
+  alpha-2 from most adapters, **lowercase** from SmartRecruiters (`de`, `us` — 79 of
+  100 rows) and **display names** from Workable (`United States`, 28/28 — while that
+  same record's own `locations[0].country` said `US`). Grouping by country split every
+  country into pieces. Normalized in `engine._coerce` rather than per adapter, so no
+  future adapter can reintroduce a second vocabulary; an unrecognised name becomes
+  `None` rather than guessing, and the vendor's text is never lost (`location` and
+  `locations[].raw` keep it).
+
+- **`employment_type` was `""` on 24% of rows.** 680 of 2,747 — 100% of Greenhouse,
+  RemoteOK and Teamtailor — and `""` is not a member of `vocab.EMPLOYMENT_TYPES`. It
+  is the exact None-vs-empty lie the contract exists to remove, and it was invisible
+  from NDJSON because `emit` masks it with `or None`: only the flat dict a **library**
+  consumer receives carried it, which is precisely who the contract is for.
+
+- **`locations[]` had two different element shapes.** 644 of 3,153 elements were
+  `{raw, url}` with no `city`/`state`/`country` key at all, so a consumer doing
+  `l["city"]` raised on a fifth of the list. Every element now carries the same five
+  keys, each place parsed from its own string rather than copied from the first.
+
+- **Two depth sources discarded geography they already had.** Greenhouse filled
+  `city`/`state`/`country` on **0 of 396** live rows while the location strings it
+  emits parse on 358 of them; Rippling 0 of 193 where all 193 parse. One fallback in
+  `_coerce` fixes every adapter at once. It may only ADD — a source that sends real
+  structured geography always wins — and an unreadable location stays `None`.
+
+- **`salary_basis: "parsed"` was outside its own closed set.** `vocab.google_salary`
+  and `SALARY_BASES` had been renamed apart. Caught only by checking the values the
+  FUNCTIONS produce; a test that greps source literals missed it, because the value
+  arrives as a keyword-argument default.
+
 - **A caller-supplied `cfg` did not govern the run.** `engine.harvest(cfg=...)` never
   installed it, while `sources._depth()` (every `harvest_depth` ceiling), the SerpApi
   quota guard and the adzuna/usajobs adapters all read the process-global

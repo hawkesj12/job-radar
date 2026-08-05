@@ -461,7 +461,11 @@ POSTED_BASES = frozenset({"stated", "relative"})
 
 # `salary_basis` -- `estimated` rides in salary_estimated_* rather than here, so a
 # figure in salary_min is always one an employer committed to.
-SALARY_BASES = frozenset({"stated", "text"})
+# `parsed` = read out of a vendor's free-text salary string (google_jobs' "47-55 an
+# hour"); `stated` = the vendor sent real numeric fields. `estimated` is deliberately
+# absent -- a model's guess rides in salary_estimated_* instead, so a figure in
+# salary_min is always one an employer committed to.
+SALARY_BASES = frozenset({"stated", "parsed"})
 
 
 def remote_type(raw) -> str | None:

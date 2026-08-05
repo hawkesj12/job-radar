@@ -1805,7 +1805,12 @@ def test_employment_type_is_normalized_once_for_every_adapter():
         assert r["employment_type_raw"] == raw, "the vendor's own string was destroyed"
         assert r["employment_type"] in vocab.EMPLOYMENT_TYPES
     silent = engine._coerce({"title": "x"})
-    assert silent["employment_type"] == "" and silent["employment_type_raw"] is None
+    # None, NOT "". A source that said nothing is not a source that said "no type",
+    # and "" is not a member of the closed vocabulary either. This asserted `== ""`
+    # until 2026-08-05, when a live probe found the empty string on 680 of 2,747 rows
+    # (24%) -- 100% of greenhouse, remoteok and teamtailor.
+    assert silent["employment_type"] is None
+    assert silent["employment_type_raw"] is None
 
 
 def test_direct_apply_asks_whether_you_can_actually_apply_there(monkeypatch):

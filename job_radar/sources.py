@@ -379,7 +379,10 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 "seniority": (j.get("experienceLevel") or {}).get("label") or None,
                 "city": loc.get("city") or None,
                 "state": loc.get("region") or None,
-                "country": loc.get("country") or None,
+                # country_code, not passthrough: SmartRecruiters sends LOWERCASE
+                # alpha-2 ('de', 'us' -- 79 of 100 rows on boschgroup), so the column
+                # held 'de' and 'DE' as different countries.
+                "country": country_code(loc.get("country")),
                 "remote_type": _rt(loc.get("remote"), loc.get("hybrid")),
                 "remote_basis": "stated" if "remote" in loc else None,
                 "employment_type": (j.get("typeOfEmployment") or {}).get("label", ""),
@@ -419,7 +422,13 @@ def fetch_workable(slug: str):
         first = places[0] if places else {}
         city = j.get("city") or first.get("city")
         state = j.get("state") or first.get("region")
-        country = j.get("country") or first.get("country")
+        # `countryCode` FIRST. Workable's top-level `country` is a DISPLAY NAME
+        # ('United States', 28/28 rows) while its own locations[] carries alpha-2 --
+        # so one record asserted country='United States' and locations[0].country='US'
+        # at the same time. country_code maps either onto the one vocabulary.
+        country = country_code(
+            first.get("countryCode") or j.get("country") or first.get("country")
+        )
         loctext = ", ".join(p for p in (city, state, country) if p)
         if j.get("telecommuting"):
             loctext = (loctext + " (Remote)").strip()
@@ -2377,7 +2386,7 @@ def search_usajobs(queries):
     # parameter with the number of the paged result desired" (worked example
     # ?Page=3&ResultsPerPage=50 -> results 151-200).
     max_pages = max(1, getattr(cfg, "usajobs_max_pages", 3))
-    out = []
+    out: list[dict] = []
     for qy in queries:
         for page in range(1, max_pages + 1):
             url = (
@@ -2601,7 +2610,8 @@ def search_themuse(queries):
     requests, ~2,000 rows). `seen` dedups across slices because a job can carry two
     categories.
     """
-    out, seen = [], set()
+    out: list[dict] = []
+    seen: set = set()
     pages = min(_depth("themuse_max_pages"), THEMUSE_PAGE_CAP + 1)
     for category in THEMUSE_CATEGORIES:
         for page in range(pages):

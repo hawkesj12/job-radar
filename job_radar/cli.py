@@ -314,9 +314,16 @@ def main(argv=None):
     # crash a run on a cp1252-defaulted Windows console or a redirected stdout (a
     # scheduled task logging to a file). Worst case a glyph degrades to '?'.
     for _stream in (sys.stdout, sys.stderr):
+        # getattr rather than a direct call: a replaced stdout (pytest's capture, a
+        # StringIO in an embedding app) has no `reconfigure`, which the except below
+        # already handled at runtime -- but only the lookup form is checkable, and
+        # this file is now type-checked with check_untyped_defs.
+        reconfigure = getattr(_stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
         try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
+            reconfigure(encoding="utf-8", errors="replace")
+        except ValueError:
             pass
 
     # Shared options attached to BOTH the top level and each subcommand, so they
