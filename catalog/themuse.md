@@ -118,7 +118,8 @@ traps:
   - "`page_count` is not reachable pages. 20,223 advertised, 99 usable."
   - "Not date-sorted, so 'just take the newest pages' does not work."
   - "CORRECTED 2026-08-05. This entry previously read 'category filtering looks unreliable' and it was WRONG — it blocked the 19-category fan-out, and with it 36,000 of 36,060 reachable rows, for as long as it stood. Re-measured: `category=Healthcare` -> page_count 1056 with 20/20 rows carrying categories:[\"Healthcare\"] and ZERO overlap with the unfiltered page; `category=Software Engineering` -> page_count 5012, 20/20 correct, 1 overlap. The filter is exact and the slices are near-disjoint. Whatever produced the original observation, it was not this parameter."
-  - "ALL 20 CATEGORY VALUES VERIFIED 2026-08-05, one probe each — necessary because this API silently ignores an unrecognised parameter VALUE and serves the unfiltered feed, so an unverified slice looks healthy while being a copy. Every value returned a page_count distinct from the unfiltered control (20,287) and 20/20 rows carrying that exact category. Range: Animal Care 3 pages to Software Engineering 5,028. `Unknown` is a real value (1,058), not a placeholder. Reachable across all slices at the page-99 cap: ~37,680."
+  - "ALL 20 CATEGORY VALUES VERIFIED 2026-08-05, one probe each — necessary because this API silently ignores an unrecognised parameter VALUE and serves the unfiltered feed, so an unverified slice looks healthy while being a copy. Every value returned a page_count distinct from the unfiltered control (20,287) and 20/20 rows carrying that exact category. `Unknown` is a real value, not a placeholder. Full page_counts recorded below so the reachable total is re-derivable rather than asserted."
+  - "page_count is a LIVE, DRIFTING count, not a constant: Software Engineering measured 5,012 earlier on 2026-08-05 and 5,028 hours later. Treat any single figure here as a sample with a timestamp, and do not `assert` on one."
   - "`level` filters exactly too and splits a category cleanly (Software Engineering 5012 -> Senior 2005 + Entry 1518, zero overlap), so each sub-slice gets its own 2,000-row ceiling. Verified on ONE category only — do not assume it generalises to all 19."
 ---
 
@@ -127,6 +128,39 @@ traps:
 It is the only evaluated source whose supply is genuinely **not** tech. jobfitr's corpus is ~78%
 tech; The Muse's sampled titles were **11%** tech, with real healthcare, skilled trades, retail
 and logistics roles. That is the gap the product actually has.
+
+
+## Per-category page_count (measured 2026-08-05, one probe each)
+
+Unfiltered control: **20,287**. Each slice hard-caps at page 99, so reachable per slice
+is `min(page_count, 99) x 20`. These drift — see the traps entry.
+
+| category | page_count | reachable (cap 99) |
+| --- | ---: | ---: |
+| Account Management | 270 | 1,980 |
+| Accounting and Finance | 158 | 1,980 |
+| Advertising and Marketing | 293 | 1,980 |
+| Animal Care | **3** | **60** |
+| Business Operations | 886 | 1,980 |
+| Data and Analytics | 901 | 1,980 |
+| Education | 582 | 1,980 |
+| Food and Hospitality Services | 1,864 | 1,980 |
+| Healthcare | 1,058 | 1,980 |
+| Human Resources and Recruitment | 520 | 1,980 |
+| Installation, Maintenance, and Repairs | 677 | 1,980 |
+| Legal Services | 226 | 1,980 |
+| Management | 291 | 1,980 |
+| Product Management | 109 | 1,980 |
+| Project Management | 452 | 1,980 |
+| Retail | 1,176 | 1,980 |
+| Sales | 449 | 1,980 |
+| Science and Engineering | 360 | 1,980 |
+| Software Engineering | 5,028 | 1,980 |
+| Unknown | 1,066 | 1,980 |
+| **total** | | **37,680** |
+
+Only Animal Care falls under the cap; every other slice is ceiling-bound, which is why
+the total is `19 x 1,980 + 60` rather than a function of the page_counts.
 
 ## The 20-value category taxonomy
 

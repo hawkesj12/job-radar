@@ -373,11 +373,15 @@ def _is_remote_query(cfg) -> bool:
 # Capped rather than exhaustive: 401 pages x N title queries is a lot of requests for
 # a board whose rows the relevance gate will mostly drop. 10 pages = 200 rows/query,
 # a 10x improvement that stays polite. Raise HIMALAYAS_MAX_PAGES to widen it.
-HIMALAYAS_MAX_PAGES = int(os.environ.get("HIMALAYAS_MAX_PAGES", "10"))
+HIMALAYAS_MAX_PAGES = max(1, int(os.environ.get("HIMALAYAS_MAX_PAGES", "10")))
 HIMALAYAS_PAGE = 20  # the API's own page size on this endpoint
-# The browse lane's hard backstop. Not the real budget -- freshness is (see
-# _himalayas_browse) -- but a date-parsing failure must not turn a 96,000-row corpus
-# into an unbounded walk. 50 pages = 1,000 rows.
+# The browse lane's budget. THIS is what bounds it -- 50 pages x 20 = 1,000 of the
+# ~97,000 rows in the corpus. An earlier version of this comment said freshness was
+# the budget and the cap was only a backstop; that was wrong, and the arithmetic says
+# so: a 60-day row (the default max_age_days) sits near offset 130,000, which this cap
+# cannot reach, so the age stop in _himalayas_browse is a secondary guard that only
+# fires on a short window. Worth having anyway because browse is date-ordered: these
+# are the NEWEST 1,000, not an arbitrary slice.
 HIMALAYAS_BROWSE_PAGES = max(1, int(os.environ.get("HIMALAYAS_BROWSE_PAGES", "50")))
 
 
@@ -1409,7 +1413,7 @@ def search_adzuna(queries):
 # How many "Who is Hiring?" threads to read. Two, because one is the start-of-month
 # cliff: on the 1st the newest thread is nearly empty and the prior month's 245 rows
 # vanish. The Algolia search already returns four, so this only costs the fetch.
-HN_THREADS = int(os.environ.get("HN_THREADS", "2"))
+HN_THREADS = max(1, int(os.environ.get("HN_THREADS", "2")))
 
 
 def search_hn_whoishiring(queries):

@@ -796,7 +796,24 @@ SAMPLES = {
     },
     # HN parses free-text "Who is hiring" COMMENTS, not a job object, so a job-shaped
     # sample would misrepresent it. Its own parser test covers the text path.
-    "hn": {"hits": []},
+    # BOTH calls this adapter makes, in one payload. `search_by_date` returns the
+    # thread list and `items/{id}` returns its comment tree, and a stub that answers
+    # every URL with this dict satisfies both — which is what lets hn be held to the
+    # same contract as every other adapter instead of being special-cased out of it.
+    "hn": {
+        "hits": [
+            {"title": "Ask HN: Who is hiring? (August 2026)", "objectID": "aug"},
+            {"title": "Ask HN: Who is hiring? (July 2026)", "objectID": "jul"},
+        ],
+        "children": [
+            {
+                "id": 1,
+                "created_at": "2026-08-01T12:00:00.000Z",
+                "text": "Acme | AI Engineer | Remote (US) | Full-time | "
+                "https://acme.example/jobs/1",
+            }
+        ],
+    },
 }
 
 
@@ -828,9 +845,6 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
         out = sources.BREADTH_ALL[name](["AI Engineer"])
         required = BREADTH_REQUIRED_KEYS
 
-    if name == "hn":  # parses free-text comments; see the SAMPLES note
-        assert isinstance(out, list)
-        return
     assert out, f"{name}: produced no row from its own sample payload"
     _assert_contract(out, required=required)
 
@@ -1417,6 +1431,7 @@ def test_department_is_byte_identical_to_0_6_0(monkeypatch):
     sys.modules["job_radar._v060_sources"] = old
     spec.loader.exec_module(old)
 
+    restore = config.active()  # this test mutates the process global; put it back
     c = _cfg()
     # Keyed sources return [] before making a request. Counting those as "compared"
     # is how the anti-vacuity guard below stayed partly vacuous: adzuna, google_jobs,
@@ -1457,11 +1472,6 @@ def test_department_is_byte_identical_to_0_6_0(monkeypatch):
         assert before == after, f"{name}: department changed {before} -> {after}"
         # An adapter that produced NO rows compared [] == [] and proved nothing. Track
         # it separately rather than counting it toward the guard.
-        # `hn` parses free-text HN comments and its sample is a search envelope with
-        # no children, so it legitimately yields no rows — the contract test above
-        # special-cases it for the same reason. Every OTHER empty is a hole.
-        if name == "hn":
-            continue
         (compared if before else empty).append(name)
     assert not empty, (
         f"{empty} yielded no rows, so the gate compared [] == [] for them and proved "
@@ -1471,6 +1481,7 @@ def test_department_is_byte_identical_to_0_6_0(monkeypatch):
     assert len(compared) >= 8, (
         f"only compared {compared} — the gate proved almost nothing"
     )
+    config.set_active(restore)
 
 
 def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
@@ -1487,6 +1498,7 @@ def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
     from job_radar import config as _config
     from job_radar import engine
 
+    restore = _config.active()  # mutates the process global; put it back
     cfg = _config.Config()
     cfg.remote_only = False  # isolate the title path from the remote gate
     cfg.breadth_sources = []
@@ -1532,6 +1544,7 @@ def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
     )
     assert errors == [], f"a null name sank the board: {errors}"
     assert [r["title"] for r in rows] == ["AI Engineer"]
+    _config.set_active(restore)
 
 
 def test_title_of_survives_every_shape_a_vendor_can_send():
