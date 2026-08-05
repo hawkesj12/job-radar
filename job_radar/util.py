@@ -261,6 +261,30 @@ def today_et() -> str:
     return datetime.now(_ET).strftime("%Y-%m-%d")
 
 
+def posted_from(value) -> dict:
+    """An absolute vendor timestamp -> `{posted, posted_basis}`, produced TOGETHER.
+
+    The basis is a property of HOW the date was derived, not of the record, and that
+    knowledge exists in exactly one place: which helper the adapter called. Emitting
+    both here is what makes them impossible to drift apart -- there is no way to
+    change the date and forget the label, and a new adapter gets the basis free.
+
+    Deliberately NOT a default applied at the engine boundary. `_coerce` sees a date
+    string and cannot tell an ISO timestamp from arithmetic on "30+ days ago", so a
+    default of "stated" there would be right for sixteen adapters and an invisible
+    lie for the two that derive -- the same shape as defaulting seniority to "mid".
+    An adapter that calls neither helper leaves the basis None, which is honestly
+    unknown rather than falsely confident.
+
+    HONEST LIMIT: "stated" means the vendor sent us a date, NOT that the date is
+    correct. Greenhouse's `updated_at` was a real ISO timestamp and still the wrong
+    field -- a bulk-touch stamp that made every posting look a day old. The basis
+    describes derivation, never truthfulness.
+    """
+    d = to_date(value)
+    return {"posted": d, "posted_basis": "stated" if d else None}
+
+
 def now_et() -> str:
     """Now, as an ET timestamp. Stamped on every harvested row.
 

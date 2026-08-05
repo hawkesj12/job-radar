@@ -112,6 +112,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A date and the label saying where it came from can no longer drift apart.**
+  `posted_basis` distinguishes a date the vendor published (`stated`) from one this
+  tool computed by subtracting a phrase like "Posted 26 Days Ago" (`relative`) — but
+  the label was hand-written at each of eighteen call sites, so a new adapter, or a
+  moved line, produced a date with no basis and nothing caught it. Rippling had
+  already drifted: it sets `posted` in its detail pass, which no one updated, so every
+  Rippling row carried a date and no basis.
+
+  Both values now come out of one call — `util.posted_from()` for a vendor timestamp,
+  `sources.posted_from_relative()` for a recency phrase — because the basis is a
+  property of *how the date was derived*, which is knowledge only the deriving code
+  has. It cannot be defaulted at the record boundary either: by then a computed date
+  and a real timestamp are both just strings, so defaulting to `stated` would be right
+  for sixteen adapters and an invisible lie for the two that compute. A test now
+  asserts the pairing across all nineteen adapters.
+
+  The label reports provenance, not accuracy: `stated` means the vendor sent a date,
+  not that it is the right one. Greenhouse's `updated_at` was a genuine ISO timestamp
+  and still the wrong field.
+
 - **SmartRecruiters returned 100 rows of every board, however large.** The API clamps
   `limit` at 100 and says nothing — `?limit=200` returns 100 rows and echoes
   `limit: 100` — and the adapter made a single call. Measured on a real board

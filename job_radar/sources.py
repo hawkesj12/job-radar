@@ -30,6 +30,7 @@ from .vocab import remote_type
 from .util import (
     NET_ERRORS,
     age_int,
+    posted_from,
     clean,
     get_json,
     post_json,
@@ -57,7 +58,24 @@ def fetch_greenhouse(slug: str):
                 "title": j.get("title", ""),
                 "location": (j.get("location") or {}).get("name", ""),
                 "url": j.get("absolute_url", ""),
-                "posted": to_date(j.get("updated_at") or j.get("first_published")),
+                # `first_published`, NOT `updated_at`. This is a correctness fix
+                # wearing a mapping choice: `updated_at` is a last-EDIT stamp, and on
+                # a real board it is not per-job information at all -- every one of
+                # Anthropic's 395 postings reported an updated_at inside 30 days,
+                # because the board gets touched in bulk. It carries no signal and
+                # defeats every freshness gate downstream. Measured 2026-08-05:
+                #
+                #   anthropic   median age  1d (updated_at) vs  76d (first_published)
+                #   databricks  median age 11d              vs 104d
+                #
+                # At the default max_age_days=60, databricks reported ALL 808 rows as
+                # fresh when only 303 were -- 505 stale postings passing the filter,
+                # and the stale_after_days score penalty never firing either.
+                #
+                # updated_at is kept in source_extra: "recently touched" is real
+                # information, it is just not the post date.
+                **posted_from(j.get("first_published") or j.get("updated_at")),
+                "source_extra": {"updated_at": to_date(j.get("updated_at"))} or None,
                 # Present on every Greenhouse posting and NULL on all 397 of the
                 # board measured 2026-08-05 -- the key exists, the data usually does
                 # not. Mapped anyway: it costs nothing, other boards may fill it, and
@@ -123,7 +141,7 @@ def fetch_lever(slug: str):
                 "title": j.get("text", ""),
                 "location": cats.get("location", ""),
                 "url": j.get("hostedUrl", ""),
-                "posted": to_date(j.get("createdAt")),
+                **posted_from(j.get("createdAt")),
                 "department": cats.get("team") or cats.get("department", ""),
                 "team": cats.get("team") or cats.get("department") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
@@ -173,7 +191,7 @@ def fetch_ashby(slug: str):
                 "title": j.get("title", ""),
                 "location": loc,
                 "url": j.get("jobUrl") or j.get("applyUrl", ""),
-                "posted": to_date(
+                **posted_from(
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
                 "department": j.get("department", "") or j.get("team", ""),
@@ -270,7 +288,7 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 "title": j.get("name", ""),
                 "location": loctext,
                 "url": f"https://jobs.smartrecruiters.com/{slug}/{j.get('id', '')}",
-                "posted": to_date(j.get("releasedDate") or j.get("createdOn")),
+                **posted_from(j.get("releasedDate") or j.get("createdOn")),
                 "department": (j.get("department") or {}).get("label", ""),
                 # The most structured source in the set, and the adapter used almost
                 # none of it: a real job family, a real org unit, a real seniority
@@ -334,7 +352,7 @@ def fetch_workable(slug: str):
                 "url": j.get("application_url")
                 or j.get("url")
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
-                "posted": to_date(j.get("created_at") or j.get("published_on")),
+                **posted_from(j.get("created_at") or j.get("published_on")),
                 "department": j.get("department", ""),
                 "team": j.get("department") or None,
                 "city": city,
@@ -424,6 +442,18 @@ _ET = ZoneInfo("America/New_York")  # every date in job-radar is Eastern
 _WD_POSTED = re.compile(r"Posting Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})")
 _WD_RELATIVE = re.compile(r"Posted\s+(\d+)\+?\s+(day|week|month)s?\s+ago", re.I)
 _WD_TODAY = re.compile(r"Posted\s+(today|yesterday)", re.I)
+
+
+def posted_from_relative(text: str) -> dict:
+    """A RELATIVE recency phrase -> `{posted, posted_basis}`, produced together.
+
+    The sibling of util.posted_from, and the reason that one cannot simply be a
+    boundary default: these two adapters compute a date from "Posted 26 Days Ago" or
+    "3 days ago", and the result is indistinguishable from a real timestamp once it
+    is a string. "30+ Days Ago" could be 30 days or 300.
+    """
+    d = _relative_posted(text)
+    return {"posted": d, "posted_basis": "relative" if d else None}
 
 
 def _relative_posted(text: str) -> str:
@@ -712,12 +742,11 @@ def search_google_jobs(queries):
                             if v
                         }
                         or None,
-                        "posted": _google_posted(ext.get("posted_at", "")),
                         # ALWAYS relative -- Google states recency as "2 days ago",
-                        # never a date. The absolute value above is arithmetic done
-                        # at fetch time, and a consumer sorting by freshness deserves
-                        # to know that rather than trusting it like a timestamp.
-                        "posted_basis": "relative" if ext.get("posted_at") else None,
+                        # never a date, so the value is arithmetic done at fetch time
+                        # and says so.
+                        "posted": (_gp := _google_posted(ext.get("posted_at", ""))),
+                        "posted_basis": "relative" if _gp else None,
                         "department": "",
                         # `work_from_home` is a real boolean on the extension, and it
                         # is the ONLY structured remote signal Google gives. Verified
@@ -850,13 +879,12 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
                 # expose just 'Posted 26 Days Ago'. Derive the date from it rather
                 # than leaving posted empty — a blank date sinks the role in any
                 # freshness filter, which would silently bury whole employers.
-                posted = _relative_posted(j.get("postedOn", ""))
-                # ARITHMETIC ON A PHRASE, not a date the tenant published. Workday
-                # says "Posted 26 Days Ago" -- and "30+ Days Ago" could be 30 or 300.
-                # Without this label the derived date looks exactly as authoritative
-                # as Greenhouse's real timestamp, and only SOME tenants put an
-                # absolute date in bulletFields, so the two arrive side by side.
-                posted_basis = "relative" if posted else None
+                # The helper labels it ARITHMETIC ON A PHRASE, not a date the tenant
+                # published -- "30+ Days Ago" could be 30 or 300. This is the one
+                # adapter that emits both bases, since only SOME tenants fill
+                # bulletFields, so the two arrive side by side and must be told apart.
+                rel = posted_from_relative(j.get("postedOn", ""))
+                posted, posted_basis = rel["posted"], rel["posted_basis"]
             out.append(
                 {
                     "title": j.get("title", ""),
@@ -998,7 +1026,12 @@ def _rippling_detail(slug: str, row: dict) -> None:
         )
     elif isinstance(desc, str):
         row["text"] = clean(desc)
-    row["posted"] = to_date(d.get("createdOn")) or row["posted"]
+    # Through the helper, so the basis travels with the date. The list endpoint sends
+    # no date at all, so this detail call is where a Rippling row gets one -- and
+    # setting `posted` directly here left every Rippling row with a date and no
+    # basis, which is exactly the drift posted_from exists to make impossible.
+    if (fresh := posted_from(d.get("createdOn")))["posted"]:
+        row.update(fresh)
     et = d.get("employmentType")
     if isinstance(et, dict):
         # INVERTED, and not a typo: `id` holds the human string ("Salaried,
@@ -1095,7 +1128,7 @@ def fetch_teamtailor(slug: str):
                 "title": j.get("title", ""),
                 "location": loc,
                 "url": j.get("url", ""),
-                "posted": to_date(j.get("date_published")),
+                **posted_from(j.get("date_published")),
                 "department": "",
                 "city": first.get("addressLocality") or None,
                 "state": first.get("addressRegion") or None,
@@ -1312,7 +1345,7 @@ def search_remotive(queries, strict: bool = False):
                 # 31/31, and today it is only concatenated into the display string.
                 "remote_region": j.get("candidate_required_location") or None,
                 "url": j.get("url", ""),
-                "posted": to_date(j.get("publication_date")),
+                **posted_from(j.get("publication_date")),
                 "department": j.get("category", ""),
                 "category": j.get("category") or None,
                 "remote_type": "remote",  # a remote-only board by definition
@@ -1348,7 +1381,7 @@ def search_jobicy(queries):
                 "company": j.get("companyName", ""),
                 "location": (j.get("jobGeo") or "") + " (Remote)",
                 "url": j.get("url", ""),
-                "posted": to_date(j.get("pubDate")),
+                **posted_from(j.get("pubDate")),
                 "department": _joined(j.get("jobIndustry")),
                 "category": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
@@ -1390,7 +1423,7 @@ def search_arbeitnow(queries):
                 "company": j.get("company_name", ""),
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url", ""),
-                "posted": to_date(j.get("created_at")),
+                **posted_from(j.get("created_at")),
                 "department": "",
                 "remote_type": "remote",  # the adapter already filtered on j["remote"] above
                 "remote_basis": "stated",
@@ -1419,7 +1452,7 @@ def search_remoteok(queries):
                 "company": j.get("company", ""),
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url") or j.get("apply_url", ""),
-                "posted": to_date(j.get("date") or j.get("epoch")),
+                **posted_from(j.get("date") or j.get("epoch")),
                 "department": "",
                 "employment_type": "",
                 "remote_type": "remote",  # a remote-only board by definition
@@ -1574,7 +1607,7 @@ def _himalayas_rows(jobs, out, seen=None):
                 "company": comp,
                 "location": loc.strip(),
                 "url": url,
-                "posted": to_date(j.get("pubDate")),
+                **posted_from(j.get("pubDate")),
                 "department": "",
                 "category": ", ".join(
                     x
@@ -1730,7 +1763,7 @@ def search_adzuna(queries):
                         # array beside it has the state; see _adzuna_place.
                         "location": loc.get("display_name", ""),
                         "url": j.get("redirect_url", ""),
-                        "posted": to_date(j.get("created")),
+                        **posted_from(j.get("created")),
                         "expires": to_date(j.get("deadline")),  # 1 of 20 populated
                         "department": (j.get("category") or {}).get("label", ""),
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
@@ -1841,8 +1874,7 @@ def _hn_rows(tree, out: list) -> None:
                 "url": m.group(0)
                 if m
                 else f"https://news.ycombinator.com/item?id={c.get('id')}",
-                "posted": to_date(c.get("created_at")),
-                "posted_basis": "stated",  # Algolia gives a real ISO timestamp
+                **posted_from(c.get("created_at")),
                 "department": "",
                 "remote_type": rtype,
                 "remote_basis": rbasis,
@@ -1929,7 +1961,7 @@ def search_braintrust(queries):
                         " ".join(_names(j.get("locations"))) + " (Remote)"
                     ).strip(),
                     "url": f"https://app.usebraintrust.com/jobs/{j.get('id')}/",
-                    "posted": to_date(j.get("created")),
+                    **posted_from(j.get("created")),
                     # `level` was going into `department` -- a seniority filed as a
                     # category, one of the four meanings that made that column
                     # unusable downstream. It now says what it is.
@@ -2107,7 +2139,7 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     + (" (Remote)" if remote else "")
                 ),
                 "url": d.get("PositionURI", ""),
-                "posted": to_date(d.get("PublicationStartDate")),
+                **posted_from(d.get("PublicationStartDate")),
                 # Every federal posting carries a close date (10/10 measured
                 # 2026-08-05, some only days out) and it was being discarded. A job
                 # that shut yesterday is worse than no job: it wastes the one thing
@@ -2326,7 +2358,7 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 "company": (j.get("company") or {}).get("name", ""),
                 "location": "; ".join(x for x in locs if x),
                 "url": (j.get("refs") or {}).get("landing_page", ""),
-                "posted": to_date(j.get("publication_date")),
+                **posted_from(j.get("publication_date")),
                 # A job FAMILY ("Data Science"), not an org unit -- see
                 # catalog/_SCHEMA.md on why that distinction is load-bearing.
                 "department": "; ".join(x for x in cats if x),

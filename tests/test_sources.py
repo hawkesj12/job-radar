@@ -1857,3 +1857,70 @@ def test_a_missing_deadline_stays_absent(monkeypatch):
     fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00Z"
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
     assert r["expires"] == "2026-09-30"
+
+
+def test_posted_and_its_basis_are_produced_together():
+    """The basis is a property of HOW the date was derived, so it comes from the
+    function that derives it — not from a boundary default and not from fifteen
+    hand-set adapters that can drift.
+
+    A boundary default would have been wrong in kind: _coerce sees a date string and
+    cannot tell an ISO timestamp from arithmetic on "30+ days ago", so defaulting to
+    "stated" would be right for sixteen adapters and an invisible lie for the two
+    that compute. Same shape as defaulting seniority to "mid".
+    """
+    from job_radar.util import posted_from
+
+    assert posted_from("2026-07-30T00:00:00Z") == {
+        "posted": "2026-07-30",
+        "posted_basis": "stated",
+    }
+    # An unparseable or absent date leaves the basis None — honestly unknown, never
+    # a confident label on a value that does not exist.
+    assert posted_from(None) == {"posted": "", "posted_basis": None}
+    assert posted_from("not a date") == {"posted": "", "posted_basis": None}
+
+    got = sources.posted_from_relative("Posted 26 Days Ago")
+    assert got["posted"] and got["posted_basis"] == "relative"
+    assert sources.posted_from_relative("")["posted_basis"] is None
+
+
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_every_adapter_labels_where_its_date_came_from(name, monkeypatch):
+    """A date with no basis is a date a consumer cannot weigh. Asserted across every
+    adapter rather than trusting sixteen call sites to stay in step."""
+    from job_radar import engine
+
+    if name not in SAMPLES:
+        pytest.skip(f"no SAMPLE payload for {name}")
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda k: "test-key")
+    def _get(url, *a, **k):
+        # Rippling alone splits list and detail across two shapes, and the DATE only
+        # exists on the detail object -- so a fixture that returns the list for both
+        # would let this test pass while proving nothing (which is how it first failed).
+        if name == "rippling" and "/jobs/" in str(url):
+            return {"createdOn": "2026-07-28T00:00:00Z"}
+        return SAMPLES[name]
+
+    monkeypatch.setattr(sources, "get_json", _get)
+    monkeypatch.setattr(sources, "post_json", lambda *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+
+    rows = (
+        sources.DEPTH_ALL[name]("slug")
+        if name in sources.DEPTH_ALL
+        else sources.BREADTH_ALL[name](["x"])
+    )
+    dated = 0
+    for r in (engine._coerce(x) for x in rows):
+        if r["posted"]:
+            dated += 1
+            assert r["posted_basis"] in ("stated", "relative"), (
+                f"{name}: emitted a date with no basis — a consumer cannot tell a "
+                "real timestamp from arithmetic on a phrase"
+            )
+    assert dated or not rows, f"{name}: no row carried a date, so nothing was proven"
