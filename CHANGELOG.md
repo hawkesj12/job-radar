@@ -110,6 +110,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that copy gone it could only match a file the user placed there. The generic
   defaults it falls through to are the same configuration the example encodes.
 
+### Added
+
+- **`sources.harvest_depth` — every depth ceiling in one named config block.** The
+  nine ceilings were module-level constants in `sources.py`, each reading its own
+  environment variable at IMPORT time, which had two consequences: a YAML config
+  (parsed later) could not set any of them, and tuning a harvest meant knowing nine
+  undocumented variable names. They now read from config at call time. The same env
+  vars still supply the defaults, so nothing that worked before stopped working.
+
+  A typo'd key warns to stderr and is ignored rather than raising — matching how this
+  loader treats every other bad input, since a malformed config must not crash the
+  CLI. What it must not do is stay silent: an ignored ceiling reads as "that setting
+  had no effect", which is indistinguishable from a quiet job market.
+
+- **A SerpApi quota guard, because `google_jobs` is the one metered source.** It
+  spends `pages × title_queries` searches per run — six at the shipped defaults, or
+  180 of a 250/month free tier at daily cadence (72%). One more title query or one
+  more page overruns it mid-month, and SerpApi reports exhaustion as a JSON `error`
+  rather than an HTTP failure, so the adapter degraded into a printed notice while the
+  shortlist quietly shrank.
+
+  The remaining quota is now checked before anything is spent, against SerpApi's
+  `/account` endpoint — which is **free**, verified live: usage stayed put across
+  calls, which is what makes checking every run affordable. `reserve` (default 25) is
+  held back so an overrun cannot consume the end of the month, and
+  `max_searches_per_run` (default 12) bounds a single run regardless of what the plan
+  reports. A failed quota check falls back to that cap rather than to zero — a network
+  blip says nothing about the quota, and treating it as empty would disable the
+  adapter. Every reduction is announced; nothing is trimmed silently.
+
 ### Fixed
 
 - **The self-expanding watchlist was blind to three of its eight ATSs.** `funnel`

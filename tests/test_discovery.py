@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from job_radar import dedup, discover, sources
+from job_radar import config, dedup, discover, sources
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +19,7 @@ def _no_workday_details(monkeypatch):
     """Keep the per-job detail pass OFF unless a test opts in. Without this the
     pagination tests fan out real HTTP for every stubbed row — the suite went from
     1.1s to 21s and quietly depended on the network."""
-    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", False)
+    monkeypatch.setattr(config.active().harvest_depth, "workday_fetch_details", False)
 
 
 # ── fetch_workday: pagination ────────────────────────────────────────────────
@@ -65,8 +65,9 @@ def test_workday_respects_the_page_cap(monkeypatch):
     fake, calls = _wd_pages(total=10_000, n_pages=999)
     monkeypatch.setattr(sources, "post_json", fake)
     rows = sources.fetch_workday("huge", host="wd5", site="X")
-    assert len(rows) == sources.WORKDAY_MAX_PAGES * sources.WORKDAY_PAGE
-    assert len(calls) == sources.WORKDAY_MAX_PAGES
+    cap = config.active().harvest_depth.workday_max_pages
+    assert len(rows) == cap * sources.WORKDAY_PAGE
+    assert len(calls) == cap
 
 
 def test_workday_maps_fields_and_builds_a_public_url(monkeypatch):
@@ -357,7 +358,7 @@ def test_workday_fetches_descriptions_when_enabled(monkeypatch):
     being worth harvesting at all."""
     fake, _ = _wd_pages(total=2, n_pages=1)
     monkeypatch.setattr(sources, "post_json", fake)
-    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+    monkeypatch.setattr(config.active().harvest_depth, "workday_fetch_details", True)
     monkeypatch.setattr(
         sources,
         "get_json",
@@ -380,7 +381,7 @@ def test_workday_fetches_descriptions_when_enabled(monkeypatch):
 def test_workday_skips_descriptions_when_disabled(monkeypatch):
     fake, _ = _wd_pages(total=2, n_pages=1)
     monkeypatch.setattr(sources, "post_json", fake)
-    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", False)
+    monkeypatch.setattr(config.active().harvest_depth, "workday_fetch_details", False)
     monkeypatch.setattr(
         sources, "get_json", lambda url: pytest.fail("must not fetch details")
     )
@@ -391,7 +392,7 @@ def test_workday_skips_descriptions_when_disabled(monkeypatch):
 def test_one_bad_detail_does_not_sink_the_employer(monkeypatch):
     fake, _ = _wd_pages(total=3, n_pages=1)
     monkeypatch.setattr(sources, "post_json", fake)
-    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+    monkeypatch.setattr(config.active().harvest_depth, "workday_fetch_details", True)
 
     def flaky(url):
         if url.endswith("Role_1"):
@@ -462,7 +463,7 @@ def test_liveness_workday_costs_one_request_not_two_hundred(monkeypatch):
     )
     monkeypatch.setattr(sources, "get_json", lambda url: gets.append(url))
     # details ON, to prove liveness does not touch the detail endpoint regardless
-    monkeypatch.setattr(sources, "WORKDAY_FETCH_DETAILS", True)
+    monkeypatch.setattr(config.active().harvest_depth, "workday_fetch_details", True)
 
     n = sources.liveness_for("workday")("3m", host="wd1", site="Search")
 

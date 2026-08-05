@@ -83,11 +83,39 @@ sources:
   google_jobs:
     key_env: SERPAPI_KEY  # env var holding your SerpApi key
     pages: 1              # or set GOOGLE_JOBS_PAGES
+    # THE QUOTA GUARD. Spend is pages x title_queries searches per run -- with the
+    # six title queries above and one page that is 6/run, i.e. 180 of a 250/month
+    # free tier at daily cadence. SerpApi reports exhaustion as a JSON error rather
+    # than an HTTP failure, so without this the adapter degrades into a printed
+    # notice and the shortlist just gets quieter. The remaining quota is checked
+    # before each run against SerpApi's /account endpoint, which is free.
+    max_searches_per_run: 12  # a hard ceiling for one run, whatever the plan says
+    reserve: 25               # searches never spent, so an overrun cannot eat the
+                              # end of the month. Set 0 to spend down to the floor.
   usajobs:
     results_per_page: 500  # the vendor max
     max_pages: 3           # USAJOBS pages with &Page=; 3 x 500 = 1,500 rows/query.
                            # It never paged at all before 0.7.0, so any keyword with
                            # more than 500 matches was silently truncated.
+  # ── how deep each adapter walks its source ────────────────────────────────
+  # Every value is a CEILING, not a target: there is no unbounded walk against
+  # anyone's API anywhere in this package, and this is where the bounds live. Each
+  # one also reads an env var of the same name in caps (WORKDAY_MAX_PAGES, ...),
+  # which is what these settings default to.
+  harvest_depth:
+    smartrecruiters_max_pages: 10   # x100 rows; boards run to thousands
+    workday_max_pages: 25           # x20 rows = 500 roles per employer
+    himalayas_max_pages: 10         # the search lane
+    himalayas_browse_pages: 50      # the browse lane, x20 = 1,000 rows
+    themuse_max_pages: 5            # PER CATEGORY, across a 20-value taxonomy
+    hn_threads: 2                   # 1 misses the prior month on the 1st
+    # The two adapters that buy descriptions ONE REQUEST PER ROLE. Turning these off
+    # is the biggest single lever on a harvest's request count -- and it costs the
+    # body, which is the entire input to the fit score.
+    workday_fetch_details: true
+    workday_detail_workers: 8
+    rippling_fetch_details: true
+
   funnel:
     auto_grow: true        # discover + add new companies from breadth hits
     max_new_per_run: 25    # cap on companies ADDED per run

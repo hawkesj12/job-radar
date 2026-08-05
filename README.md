@@ -138,9 +138,21 @@ accidental one — the caps are visible knobs, not hidden in a URL.
 | google_jobs | 1 page/query | metered — SerpApi's free tier is 250 searches a **month** |
 | remotive / remoteok / jobicy | one request | that is the entire corpus |
 
-Tunable per source: `SMARTRECRUITERS_MAX_PAGES`, `HIMALAYAS_MAX_PAGES`,
-`HIMALAYAS_BROWSE_PAGES`, `THEMUSE_MAX_PAGES`, `WORKDAY_MAX_PAGES`, `HN_THREADS`, and
-`sources.usajobs.max_pages` / `sources.adzuna.pages` in the config.
+Every depth ceiling lives in one config block, `sources.harvest_depth` — nine keys
+covering SmartRecruiters, Workday, Himalayas' two lanes, The Muse, HN, and the two
+per-role detail passes. Each still reads an environment variable of the same name in
+caps (`WORKDAY_MAX_PAGES`, `HN_THREADS`, …), which is what the config defaults to, so
+nothing that worked before stopped working. Paging for the keyed APIs stays with its
+credentials: `sources.usajobs.max_pages` and `sources.adzuna.pages`.
+
+**SerpApi is the one metered source, so it has a quota guard.** `google_jobs` spends
+`pages × title_queries` searches per run — six a run at the shipped defaults, which is
+180 of a 250/month free tier at daily cadence. SerpApi reports exhaustion as a JSON
+error rather than an HTTP failure, so an overrun would degrade into a printed notice
+while the shortlist quietly shrank. Before spending anything, the adapter checks the
+remaining quota against SerpApi's free `/account` endpoint and holds
+`sources.google_jobs.reserve` (default 25) back, so an overrun cannot consume the end
+of the month. It says what it dropped rather than trimming silently.
 
 **Two adapters buy job descriptions one request at a time** — Workday and Rippling
 return no body on their list endpoint. Those are gated: the relevance filter runs

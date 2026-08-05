@@ -2255,3 +2255,62 @@ def test_absent_optional_text_is_none_not_empty_string():
     r = engine._coerce({"title": "Engineer", "posted": "", "salary": "", "text": ""})
     assert r["posted"] is None and r["salary"] is None and r["text"] is None
     assert r["title"] == "Engineer"  # required fields stay strings
+
+
+# ── harvest depth: one named block instead of nine env vars (Strand G) ───────
+def test_harvest_depth_is_settable_from_yaml(tmp_path):
+    """The reason this block exists: the nine ceilings were module-level constants
+    read at IMPORT time, so a YAML file — parsed later — could never set any of them.
+    Tuning a harvest meant knowing nine undocumented environment variable names."""
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "sources:\n"
+        "  harvest_depth:\n"
+        "    workday_max_pages: 3\n"
+        "    workday_fetch_details: false\n"
+        "    hn_threads: 1\n",
+        encoding="utf-8",
+    )
+    hd = config.load_config(p).harvest_depth
+    assert hd.workday_max_pages == 3
+    assert hd.workday_fetch_details is False
+    assert hd.hn_threads == 1
+    assert hd.themuse_max_pages == 5, "an unset key must keep its default"
+
+
+def test_env_vars_still_drive_the_defaults(monkeypatch):
+    """The env vars were the ONLY interface before, so they keep working — the block
+    takes them as its defaults rather than replacing them."""
+    monkeypatch.setenv("WORKDAY_MAX_PAGES", "7")
+    monkeypatch.setenv("RIPPLING_FETCH_DETAILS", "0")
+    hd = config.HarvestDepth()
+    assert hd.workday_max_pages == 7
+    assert hd.rippling_fetch_details is False
+
+
+def test_a_typo_in_a_depth_key_is_reported_not_silently_ignored(tmp_path, capsys):
+    """Silence would be the worst option: a typo'd ceiling reads as "that setting had
+    no effect", which is indistinguishable from a quiet job market. It warns and
+    continues rather than raising, matching how this loader treats every bad input —
+    a malformed config must not crash the CLI."""
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "sources:\n  harvest_depth:\n    workday_max_page: 3\n", encoding="utf-8"
+    )
+    cfg = config.load_config(p)
+    assert cfg.harvest_depth.workday_max_pages == 25, "the typo must not take effect"
+    assert "workday_max_page" in capsys.readouterr().err
+
+
+def test_every_depth_ceiling_is_reachable_through_the_block():
+    """No ceiling may go back to hiding in a module constant: `sources._depth` is the
+    only reader, so anything it asks for must exist on the block."""
+    import inspect
+    import re as _re
+
+    from job_radar import sources as _sources
+
+    asked = set(_re.findall(r'_depth\("([a-z_]+)"\)', inspect.getsource(_sources)))
+    have = set(vars(config.HarvestDepth()))
+    assert asked, "no depth lookups found — did the accessor get renamed?"
+    assert asked <= have, f"sources asks for {sorted(asked - have)}, not on the block"

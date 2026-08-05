@@ -380,16 +380,19 @@ def test_google_jobs_pagination_terminates(monkeypatch):
 
     def paged(url, *a, **k):
         calls.append(url)
+        if "account.json" in url:  # the free quota probe, not a search
+            return {"plan_searches_left": 250}
         body = dict(SAMPLES["google_jobs"])
         # hand out a token twice, then stop
-        if len(calls) < 3:
-            body["serpapi_pagination"] = {"next_page_token": f"tok{len(calls)}"}
+        searches = len(_searches(calls))
+        if searches < 3:
+            body["serpapi_pagination"] = {"next_page_token": f"tok{searches}"}
         return body
 
     monkeypatch.setattr(sources, "get_json", paged)
     out = sources.search_google_jobs(["AI Engineer"])
-    assert len(calls) == 3, (
-        f"expected to stop when the token ran out, made {len(calls)}"
+    assert len(_searches(calls)) == 3, (
+        f"expected to stop when the token ran out, made {len(_searches(calls))}"
     )
     assert len(out) == 3
 
@@ -453,6 +456,13 @@ def test_adzuna_distance_guard_shares_the_remote_predicate(monkeypatch):
     assert "distance=" not in calls[0], f"radius sent with no place: {calls[0]}"
 
 
+def _searches(calls):
+    """Only the METERED search URLs. `search_google_jobs` also hits SerpApi's free
+    /account.json to check remaining quota before spending any, and that call is not
+    a search — asserting on calls[0] blindly would test the quota probe."""
+    return [u for u in calls if "engine=google_jobs" in u]
+
+
 def test_google_jobs_applies_the_work_from_home_filter(monkeypatch):
     """The adapter's own comment said Google treats "remote" as a filter, then it
     dropped the word and set NO filter -- so a remote search silently became an
@@ -462,8 +472,9 @@ def test_google_jobs_applies_the_work_from_home_filter(monkeypatch):
     monkeypatch.setattr(c, "location", "remote")
     calls = _capture(monkeypatch, {"jobs_results": []})
     sources.search_google_jobs(["AI Engineer"])
-    assert "ltype=1" in calls[0], f"no work-from-home filter: {calls[0]}"
-    assert "location=" not in calls[0], calls[0]
+    hit = _searches(calls)[0]
+    assert "ltype=1" in hit, f"no work-from-home filter: {hit}"
+    assert "location=" not in hit, hit
 
 
 def test_google_jobs_sends_a_place_instead_of_the_filter(monkeypatch):
@@ -472,8 +483,9 @@ def test_google_jobs_sends_a_place_instead_of_the_filter(monkeypatch):
     monkeypatch.setattr(c, "location", "Louisville, KY")
     calls = _capture(monkeypatch, {"jobs_results": []})
     sources.search_google_jobs(["AI Engineer"])
-    assert "location=Louisville%2C%20KY" in calls[0], calls[0]
-    assert "ltype=1" not in calls[0], "a place search must not also force WFH"
+    hit = _searches(calls)[0]
+    assert "location=Louisville%2C%20KY" in hit, hit
+    assert "ltype=1" not in hit, "a place search must not also force WFH"
 
 
 def _himalayas_lanes(calls):
@@ -488,8 +500,10 @@ def test_himalayas_search_lane_pages_with_page_not_offset(monkeypatch):
     """The SEARCH endpoint takes `page`. Sending `offset` to it is silently ignored
     and returns page 1 forever -- so the adapter took 20 rows per query."""
     _cfg()
-    monkeypatch.setattr(sources, "HIMALAYAS_MAX_PAGES", 3)
-    monkeypatch.setattr(sources, "HIMALAYAS_BROWSE_PAGES", 0)  # isolate the lane
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_max_pages", 3)
+    monkeypatch.setattr(
+        config.active().harvest_depth, "himalayas_browse_pages", 0
+    )  # isolate the lane
     full = {"jobs": [{"title": f"r{i}"} for i in range(sources.HIMALAYAS_PAGE)]}
     calls = _capture(monkeypatch, full)
     sources.search_himalayas(["AI Engineer"])
@@ -502,8 +516,8 @@ def test_himalayas_search_lane_pages_with_page_not_offset(monkeypatch):
 
 def test_himalayas_search_lane_stops_on_a_short_page(monkeypatch):
     _cfg()
-    monkeypatch.setattr(sources, "HIMALAYAS_MAX_PAGES", 10)
-    monkeypatch.setattr(sources, "HIMALAYAS_BROWSE_PAGES", 0)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_max_pages", 10)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_browse_pages", 0)
     calls = _capture(monkeypatch, {"jobs": [{"title": "only one"}]})
     sources.search_himalayas(["AI Engineer"])
     search, _ = _himalayas_lanes(calls)
@@ -515,8 +529,10 @@ def test_himalayas_browse_lane_walks_offset(monkeypatch):
     measured) where search walls at ~8,020. It is a SECOND lane, not a replacement:
     `q` does nothing on browse."""
     _cfg()
-    monkeypatch.setattr(sources, "HIMALAYAS_MAX_PAGES", 0)  # isolate the lane
-    monkeypatch.setattr(sources, "HIMALAYAS_BROWSE_PAGES", 3)
+    monkeypatch.setattr(
+        config.active().harvest_depth, "himalayas_max_pages", 0
+    )  # isolate the lane
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_browse_pages", 3)
     full = {"jobs": [{"title": f"r{i}"} for i in range(sources.HIMALAYAS_PAGE)]}
     calls = _capture(monkeypatch, full)
     sources.search_himalayas([])
@@ -533,8 +549,8 @@ def test_himalayas_browse_stops_when_the_rows_age_out(monkeypatch):
     engine will discard."""
     c = _cfg()
     monkeypatch.setattr(c, "max_age_days", 30)
-    monkeypatch.setattr(sources, "HIMALAYAS_MAX_PAGES", 0)
-    monkeypatch.setattr(sources, "HIMALAYAS_BROWSE_PAGES", 50)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_max_pages", 0)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_browse_pages", 50)
     stale = {"jobs": [{"title": "old", "pubDate": "2020-01-01"} for _ in range(20)]}
     calls = _capture(monkeypatch, stale)
     sources.search_himalayas([])
@@ -547,8 +563,8 @@ def test_himalayas_browse_respects_the_backstop_when_dates_are_missing(monkeypat
     is the backstop that keeps a date-parsing failure from becoming a 4,900-request
     walk."""
     _cfg()
-    monkeypatch.setattr(sources, "HIMALAYAS_MAX_PAGES", 0)
-    monkeypatch.setattr(sources, "HIMALAYAS_BROWSE_PAGES", 4)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_max_pages", 0)
+    monkeypatch.setattr(config.active().harvest_depth, "himalayas_browse_pages", 4)
     full = {"jobs": [{"title": f"r{i}"} for i in range(sources.HIMALAYAS_PAGE)]}
     calls = _capture(monkeypatch, full)
     sources.search_himalayas([])
@@ -987,7 +1003,7 @@ def _themuse_page(url):
 def test_themuse_stops_at_the_page_cap(monkeypatch):
     """Page 100 is a hard 400. Never walk past THEMUSE_PAGE_CAP however high
     THEMUSE_MAX_PAGES is set — and the cap applies PER CATEGORY SLICE."""
-    monkeypatch.setattr(sources, "THEMUSE_MAX_PAGES", 500)
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 500)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
     pages = []
 
@@ -1016,7 +1032,7 @@ def test_themuse_fans_out_over_every_category(monkeypatch):
     """
     from urllib.parse import unquote
 
-    monkeypatch.setattr(sources, "THEMUSE_MAX_PAGES", 1)
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
     urls = []
     monkeypatch.setattr(
@@ -1058,7 +1074,7 @@ def test_themuse_fans_out_over_every_category(monkeypatch):
 def test_themuse_dedups_a_job_that_spans_two_categories(monkeypatch):
     """A posting can carry several categories, so the same job legitimately comes
     back in more than one slice. Cross-slice dedup is required, not defensive."""
-    monkeypatch.setattr(sources, "THEMUSE_MAX_PAGES", 1)
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
     monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
     out = sources.search_themuse([])
@@ -1068,7 +1084,7 @@ def test_themuse_dedups_a_job_that_spans_two_categories(monkeypatch):
 def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
     """`levels` is a real seniority string. It was withheld while `seniority` was a
     contract key no adapter filled; the contract exists now."""
-    monkeypatch.setattr(sources, "THEMUSE_MAX_PAGES", 1)
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
     monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
     out = sources.search_themuse([])
@@ -1332,7 +1348,7 @@ def test_smartrecruiters_believes_total_found(monkeypatch):
 def test_smartrecruiters_honours_its_page_cap(monkeypatch):
     """Bosch alone is 48 requests and this runs per-company across a watchlist, so
     the loop is bounded."""
-    monkeypatch.setattr(sources, "SMARTRECRUITERS_MAX_PAGES", 3)
+    monkeypatch.setattr(config.active().harvest_depth, "smartrecruiters_max_pages", 3)
     full = {
         "totalFound": 99999,
         "content": [{"name": f"Role {i}", "id": str(i)} for i in range(100)],
@@ -2133,3 +2149,89 @@ def test_two_workday_openings_with_one_title_stay_two_rows():
     a, b = row("Buenos Aires", "R00333425"), row("Yokohama", "R00250899")
     assert dedup.dedup_key(a) != dedup.dedup_key(b)
     assert dedup.different_openings(a, b), "two requisition ids are two openings"
+
+
+# ── the SerpApi quota guard (Strand G) ──────────────────────────────────────
+def test_google_jobs_never_spends_past_the_plan_reserve(monkeypatch):
+    """The live risk this exists for: pages x title_queries searches per run, six
+    queries shipped, one page = 6/run = 180 of a 250/month free tier at daily
+    cadence. One more query or page overruns mid-month — and SerpApi reports
+    exhaustion as a JSON `error`, not an HTTP failure, so the adapter degraded into a
+    printed notice while the shortlist just got quieter."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(c, "serpapi_reserve", 25)
+    monkeypatch.setattr(c, "serpapi_max_searches_per_run", 100)
+    calls = []
+
+    def fake(url, *a, **k):
+        calls.append(url)
+        if "account.json" in url:
+            return {"plan_searches_left": 27}  # 27 - 25 reserved = 2 spendable
+        return {"jobs_results": []}
+
+    monkeypatch.setattr(sources, "get_json", fake)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    sources.search_google_jobs(["a", "b", "c", "d", "e", "f"])
+    assert len(_searches(calls)) == 2, (
+        f"spent {len(_searches(calls))} searches with only 2 above the reserve"
+    )
+
+
+def test_google_jobs_skips_entirely_when_the_plan_is_exhausted(monkeypatch):
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(c, "serpapi_reserve", 25)
+    calls = []
+
+    def fake(url, *a, **k):
+        calls.append(url)
+        if "account.json" in url:
+            return {"plan_searches_left": 10}  # below the reserve entirely
+        return {"jobs_results": []}
+
+    monkeypatch.setattr(sources, "get_json", fake)
+    assert sources.search_google_jobs(["a", "b"]) == []
+    assert _searches(calls) == [], "spent a metered search with no quota to spend"
+
+
+def test_a_failed_quota_check_falls_back_to_the_run_cap_not_to_zero(monkeypatch):
+    """None, not 0, when /account is unreachable: a network blip says nothing about
+    the quota, and treating it as empty would disable the adapter. The per-run cap
+    still bounds the damage."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(c, "serpapi_max_searches_per_run", 3)
+    calls = []
+
+    def fake(url, *a, **k):
+        if "account.json" in url:
+            raise OSError("account endpoint down")
+        calls.append(url)
+        return {"jobs_results": []}
+
+    monkeypatch.setattr(sources, "get_json", fake)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    sources.search_google_jobs(["a", "b", "c", "d", "e"])
+    assert len(_searches(calls)) == 3, "the per-run cap did not bound an unknown quota"
+
+
+def test_the_quota_probe_itself_is_free(monkeypatch):
+    """/account.json does not consume a search — verified live 2026-08-05, usage
+    stayed put across calls. That is what makes checking before every run affordable;
+    if it were metered the guard would cost the thing it protects."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    seen = []
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url, *a, **k: (
+            seen.append(url),
+            {"plan_searches_left": 250} if "account" in url else {"jobs_results": []},
+        )[1],
+    )
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    sources.search_google_jobs(["a"])
+    account_calls = [u for u in seen if "account.json" in u]
+    assert len(account_calls) == 1, "the quota is probed once per run, not per query"

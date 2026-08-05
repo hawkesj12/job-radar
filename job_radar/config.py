@@ -24,6 +24,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean from the environment. `0`/`false`/`no`/`off` are false; anything
+    else present is true. Same forgiving discipline as _env_int -- a bad value falls
+    back rather than crashing the CLI at import."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 # ── generic defaults (NOT tuned to any one person) ──────────────────────────
 DEFAULT_TITLE_QUERIES = [
     "AI Engineer",
@@ -211,6 +221,54 @@ DEFAULT_NON_US = [
 
 
 @dataclass
+class HarvestDepth:
+    """How deep each adapter walks its source, in ONE place.
+
+    These lived as nine module-level constants in `sources.py`, each reading its own
+    environment variable at IMPORT time -- which meant a YAML file could not set them
+    at all (the module is imported before any config is loaded), and the only way to
+    tune a harvest was to know nine undocumented variable names. The env vars still
+    work and still supply the defaults; they are now the fallback for one named block
+    rather than the only interface.
+
+    Every value is a CEILING, not a target. The etiquette rule this encodes: there is
+    no unbounded walk against anyone's API anywhere in this package, and every bound
+    is visible here instead of buried in a URL.
+    """
+
+    # depth adapters
+    smartrecruiters_max_pages: int = field(
+        default_factory=lambda: _env_int("SMARTRECRUITERS_MAX_PAGES", 10)
+    )
+    workday_max_pages: int = field(
+        default_factory=lambda: _env_int("WORKDAY_MAX_PAGES", 25)
+    )
+    # The two adapters that buy job descriptions ONE REQUEST PER ROLE. Turning these
+    # off is the single biggest lever on a harvest's request count; it costs the body,
+    # which is the entire input to the fit score.
+    workday_fetch_details: bool = field(
+        default_factory=lambda: _env_bool("WORKDAY_FETCH_DETAILS", True)
+    )
+    workday_detail_workers: int = field(
+        default_factory=lambda: _env_int("WORKDAY_DETAIL_WORKERS", 8)
+    )
+    rippling_fetch_details: bool = field(
+        default_factory=lambda: _env_bool("RIPPLING_FETCH_DETAILS", True)
+    )
+    # breadth adapters
+    himalayas_max_pages: int = field(
+        default_factory=lambda: _env_int("HIMALAYAS_MAX_PAGES", 10)
+    )
+    himalayas_browse_pages: int = field(
+        default_factory=lambda: _env_int("HIMALAYAS_BROWSE_PAGES", 50)
+    )
+    themuse_max_pages: int = field(
+        default_factory=lambda: _env_int("THEMUSE_MAX_PAGES", 5)
+    )
+    hn_threads: int = field(default_factory=lambda: _env_int("HN_THREADS", 2))
+
+
+@dataclass
 class LLMConfig:
     enabled: bool = False
     provider: str = "anthropic"  # "anthropic" | "openai" (OpenAI-compatible)
@@ -308,6 +366,22 @@ class Config:
     # tier is 250 searches/mo, and each PAGE is one search, so default to a single
     # page (~10 roles/query) and raise GOOGLE_JOBS_PAGES only when the quota allows.
     serpapi_key_env: str = "SERPAPI_KEY"
+    # THE QUOTA GUARD. google_jobs spends `pages x title_queries` SerpApi searches per
+    # run -- with the shipped six title queries and one page that is 6/run, i.e. 180
+    # of a 250/month free tier at daily cadence (72%). One extra title query or one
+    # extra page overruns it mid-month, and SerpApi reports exhaustion as a JSON
+    # `error` rather than an HTTP failure, so the adapter degrades into a printed
+    # notice and the shortlist just gets quieter. That is the failure this prevents.
+    #
+    # `serpapi_reserve` is left UNSPENT so an overrun cannot consume the last of the
+    # month; `serpapi_max_searches_per_run` bounds a single run regardless of what the
+    # account says. Set the reserve to 0 to spend the quota to the floor.
+    serpapi_max_searches_per_run: int = field(
+        default_factory=lambda: _env_int("SERPAPI_MAX_SEARCHES_PER_RUN", 12)
+    )
+    serpapi_reserve: int = field(
+        default_factory=lambda: _env_int("SERPAPI_RESERVE", 25)
+    )
     google_jobs_pages: int = field(
         default_factory=lambda: _env_int("GOOGLE_JOBS_PAGES", 1)
     )
@@ -342,6 +416,8 @@ class Config:
     user_agent: str = "job-radar/1.0 (https://github.com/hawkesj12/job-radar)"
     # ai
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # harvest depth — see HarvestDepth. YAML: `sources.harvest_depth.*`
+    harvest_depth: HarvestDepth = field(default_factory=HarvestDepth)
 
     def env(self, key: str) -> str:
         """Read a credential from the environment.
@@ -478,6 +554,26 @@ def load_config(path: str | os.PathLike | None) -> Config:
     if isinstance(srcs.get("google_jobs"), dict):
         cfg.serpapi_key_env = srcs["google_jobs"].get("key_env", cfg.serpapi_key_env)
         cfg.google_jobs_pages = srcs["google_jobs"].get("pages", cfg.google_jobs_pages)
+        cfg.serpapi_max_searches_per_run = srcs["google_jobs"].get(
+            "max_searches_per_run", cfg.serpapi_max_searches_per_run
+        )
+        cfg.serpapi_reserve = srcs["google_jobs"].get("reserve", cfg.serpapi_reserve)
+    if isinstance(srcs.get("harvest_depth"), dict):
+        # Only keys that exist on the dataclass, so a typo in YAML cannot invent a
+        # setting that silently does nothing -- it is reported instead.
+        for k, v in srcs["harvest_depth"].items():
+            if hasattr(cfg.harvest_depth, k):
+                setattr(cfg.harvest_depth, k, v)
+            else:
+                # Warn and continue, matching how this loader treats every other bad
+                # input: a malformed config must not crash the CLI. Silence would be
+                # worse than either -- a typo'd depth key would read as "that setting
+                # had no effect", which is indistinguishable from a quiet market.
+                print(
+                    f"  config: unknown sources.harvest_depth key {k!r} — ignored "
+                    f"(valid: {', '.join(sorted(vars(cfg.harvest_depth)))})",
+                    file=sys.stderr,
+                )
     if isinstance(srcs.get("usajobs"), dict):
         cfg.usajobs_results_per_page = srcs["usajobs"].get(
             "results_per_page", cfg.usajobs_results_per_page

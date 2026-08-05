@@ -14,7 +14,6 @@ opt-in extra, off by default; see the README.)
 from __future__ import annotations
 
 import atexit
-import os
 import re
 import threading
 import time
@@ -322,15 +321,12 @@ def fetch_ashby(slug: str):
 # Capped rather than exhaustive: Bosch alone would be 48 requests, and this runs
 # per-company across a watchlist. 10 pages = 1,000 roles/company, a 10x improvement
 # that stays bounded. Raise SMARTRECRUITERS_MAX_PAGES to widen it.
-SMARTRECRUITERS_MAX_PAGES = max(
-    1, int(os.environ.get("SMARTRECRUITERS_MAX_PAGES", "10"))
-)
 SMARTRECRUITERS_PAGE = 100  # the API's max; larger values are silently clamped
 
 
 def fetch_smartrecruiters(slug: str):
     out: list[dict] = []
-    for page in range(SMARTRECRUITERS_MAX_PAGES):
+    for page in range(_depth("smartrecruiters_max_pages")):
         offset = page * SMARTRECRUITERS_PAGE
         try:
             data = get_json(
@@ -504,7 +500,6 @@ def fetch_workable(slug: str):
 # and the budget is the gate, so the cap can move toward what the employer actually
 # has. Accenture reports total=2000; at 25 pages we see 500 of them and pay for
 # bodies only on the handful that pass the title filter.
-WORKDAY_MAX_PAGES = int(os.environ.get("WORKDAY_MAX_PAGES", "25"))
 WORKDAY_PAGE = 20
 # Workday's LIST endpoint returns no description at all — those live on a per-job
 # detail call, so bodies cost one request per role instead of one per twenty. Fetch
@@ -515,12 +510,6 @@ WORKDAY_PAGE = 20
 # the first thing to turn off for a tight harvest window — but off is an escape
 # hatch, not the normal state. Discovery does NOT pay this cost: sources.LIVENESS
 # answers "is this board real" without touching the detail endpoint at all.
-WORKDAY_FETCH_DETAILS = os.environ.get("WORKDAY_FETCH_DETAILS", "1") not in (
-    "0",
-    "false",
-    "no",
-)
-WORKDAY_DETAIL_WORKERS = int(os.environ.get("WORKDAY_DETAIL_WORKERS", "8"))
 _ET = ZoneInfo("America/New_York")  # every date in job-radar is Eastern
 _WD_POSTED = re.compile(r"Posting Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})")
 # A Workday requisition id as it appears in bulletFields: 'R00333425', 'R327553',
@@ -589,7 +578,6 @@ def _is_remote_query(cfg) -> bool:
 # Capped rather than exhaustive: 401 pages x N title queries is a lot of requests for
 # a board whose rows the relevance gate will mostly drop. 10 pages = 200 rows/query,
 # a 10x improvement that stays polite. Raise HIMALAYAS_MAX_PAGES to widen it.
-HIMALAYAS_MAX_PAGES = max(1, int(os.environ.get("HIMALAYAS_MAX_PAGES", "10")))
 HIMALAYAS_PAGE = 20  # the API's own page size on this endpoint
 # The browse lane's budget. THIS is what bounds it -- 50 pages x 20 = 1,000 of the
 # ~97,000 rows in the corpus. An earlier version of this comment said freshness was
@@ -598,7 +586,6 @@ HIMALAYAS_PAGE = 20  # the API's own page size on this endpoint
 # cannot reach, so the age stop in _himalayas_browse is a secondary guard that only
 # fires on a short window. Worth having anyway because browse is date-ordered: these
 # are the NEWEST 1,000, not an arbitrary slice.
-HIMALAYAS_BROWSE_PAGES = max(1, int(os.environ.get("HIMALAYAS_BROWSE_PAGES", "50")))
 
 
 # ── GOOGLE FOR JOBS (SerpApi) helpers ───────────────────────────────────────
@@ -633,6 +620,7 @@ _G_AGGREGATORS = (
     "trabajo.",
 )
 
+
 # THE ALLOWLIST, and the direction matters more than the contents.
 #
 # `direct_apply` used to be `not _is_aggregator(host)` against the hand-maintained
@@ -649,6 +637,20 @@ _G_AGGREGATORS = (
 # is reported as not-direct, which understates rather than overstates. Recognising a
 # new ATS is a one-line addition; recognising every aggregator on earth is not a
 # finishable task.
+def _depth(name: str):
+    """One harvest-depth ceiling, read from config AT CALL TIME.
+
+    Call time, not import time, and that is the whole point of the change. These were
+    nine module-level constants each reading its own environment variable as the
+    module loaded -- so a YAML config, which is parsed later, could never set any of
+    them. Tuning a harvest meant knowing nine undocumented variable names. They now
+    live in one named block (`config.HarvestDepth`, YAML `sources.harvest_depth.*`)
+    that still takes those same env vars as its defaults, so nothing that worked
+    before stopped working.
+    """
+    return getattr(config.active().harvest_depth, name)
+
+
 _ATS_HOSTS = (
     "greenhouse.io",
     "lever.co",
@@ -746,6 +748,52 @@ def _best_apply_link(apply_options: list, fallback: str = "", company: str = "")
     return links[0] if links else fallback
 
 
+def _serpapi_searches_left(key: str) -> int | None:
+    """Searches remaining on the SerpApi plan, or None if it cannot be determined.
+
+    `/account.json` is FREE -- it does not consume a search (verified: usage stayed
+    put across calls) -- which is what makes checking before every run affordable.
+
+    None, not 0, when the check fails: an unreachable account endpoint says nothing
+    about the quota, and treating it as empty would disable the adapter on a network
+    blip. The caller falls back to the per-run cap, which bounds the damage either way.
+    """
+    try:
+        d = get_json(f"https://serpapi.com/account.json?api_key={q(key)}")
+    except Exception:  # noqa: BLE001 -- a quota check must never sink the harvest
+        return None
+    left = d.get("plan_searches_left")
+    if left is None:
+        left = d.get("total_searches_left")
+    return int(left) if isinstance(left, (int, float)) else None
+
+
+def _serpapi_budget(cfg, key: str, planned: int) -> int:
+    """How many SerpApi searches this run may actually spend.
+
+    Never silently caps: when the budget is below what was planned, it says what was
+    dropped and why. A quiet trim here would read as "the market was quiet" -- the
+    exact ambiguity the run manifest exists to remove.
+    """
+    budget = min(planned, max(0, cfg.serpapi_max_searches_per_run))
+    left = _serpapi_searches_left(key)
+    if left is not None:
+        spendable = max(0, left - max(0, cfg.serpapi_reserve))
+        if spendable < budget:
+            print(
+                f"  google_jobs: {left} searches left on the plan, holding "
+                f"{cfg.serpapi_reserve} in reserve -- spending {spendable} of "
+                f"{planned} planned"
+            )
+            return spendable
+    if budget < planned:
+        print(
+            f"  google_jobs: capped at {budget} of {planned} planned searches "
+            "(serpapi_max_searches_per_run)"
+        )
+    return budget
+
+
 def search_google_jobs(queries):
     """Google for Jobs via SerpApi — keyed, queryable by title + location, exactly
     like search_adzuna/search_usajobs. Reaches the company-careers + enterprise-ATS
@@ -771,10 +819,26 @@ def search_google_jobs(queries):
     remote_query = _is_remote_query(cfg)
     where = "" if remote_query else cfg.location.strip()
     pages = max(1, getattr(cfg, "google_jobs_pages", 1))
+    # EVERY page is one metered search, so the spend is decided before the first
+    # request rather than discovered when SerpApi starts refusing.
+    budget = _serpapi_budget(cfg, key, len(queries) * pages)
+    if budget <= 0:
+        print("  google_jobs: no SerpApi quota available this run -- skipped")
+        return []
+    spent = 0
     out = []
     for qy in queries:
+        if spent >= budget:
+            print(
+                f"  google_jobs: budget spent after {spent} searches -- "
+                f"{len(queries) - queries.index(qy)} queries not run this time"
+            )
+            break
         token = ""
         for _ in range(pages):
+            if spent >= budget:
+                break
+            spent += 1
             url = (
                 f"https://serpapi.com/search.json?engine=google_jobs"
                 f"&q={q(qy)}&api_key={key}&hl=en"
@@ -913,13 +977,13 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
     `keep=None` preserves the old behaviour exactly (fetch every body), so a direct
     caller that does not filter is unaffected.
 
-    Returns at most WORKDAY_MAX_PAGES x WORKDAY_PAGE roles, silently truncated -- see
+    Returns at most workday_max_pages x WORKDAY_PAGE roles, silently truncated -- see
     the cap comment above.
     """
     base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
     out: list[dict] = []
     offset, total = 0, None
-    for _ in range(WORKDAY_MAX_PAGES):
+    for _ in range(_depth("workday_max_pages")):
         try:
             data = post_json(
                 f"{base}/jobs",
@@ -996,7 +1060,7 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
     # dropped by engine._consume moments later, after paying a request for it.
     if keep is not None:
         out = [r for r in out if keep(_title_of(r))]
-    if WORKDAY_FETCH_DETAILS and out:
+    if _depth("workday_fetch_details") and out:
         _workday_add_details(base, out)
     for r in out:
         r.pop("_wd_path", None)
@@ -1025,14 +1089,16 @@ def _detail_pool() -> ThreadPoolExecutor:
     count changes (tests do exactly that)."""
     global _DETAIL_POOL, _DETAIL_POOL_SIZE
     with _DETAIL_POOL_LOCK:
-        if _DETAIL_POOL is None or _DETAIL_POOL_SIZE != WORKDAY_DETAIL_WORKERS:
+        if _DETAIL_POOL is None or _DETAIL_POOL_SIZE != _depth(
+            "workday_detail_workers"
+        ):
             if _DETAIL_POOL is not None:
                 _DETAIL_POOL.shutdown(wait=False)
             _DETAIL_POOL = ThreadPoolExecutor(
-                max_workers=WORKDAY_DETAIL_WORKERS,
+                max_workers=_depth("workday_detail_workers"),
                 thread_name_prefix="wd-detail",
             )
-            _DETAIL_POOL_SIZE = WORKDAY_DETAIL_WORKERS
+            _DETAIL_POOL_SIZE = _depth("workday_detail_workers")
         return _DETAIL_POOL
 
 
@@ -1139,11 +1205,6 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
 # half: Rippling's own board is 748 roles, i.e. 1 list + 748 detail requests. Set
 # RIPPLING_FETCH_DETAILS=0 for a tight harvest window. Discovery never pays it --
 # live_rippling below answers "is this board real" from the list alone.
-RIPPLING_FETCH_DETAILS = os.environ.get("RIPPLING_FETCH_DETAILS", "1") not in (
-    "0",
-    "false",
-    "no",
-)
 RIPPLING_API = "https://api.rippling.com/platform/api/ats/v1/board"
 
 
@@ -1210,7 +1271,7 @@ def _rippling_detail(slug: str, row: dict) -> None:
 def fetch_rippling(slug: str, keep=None):
     """Rippling ATS board -- keyless JSON array, one request for the whole board.
 
-    Bodies and dates are NOT on the list endpoint; see RIPPLING_FETCH_DETAILS above
+    Bodies and dates are NOT on the list endpoint; see rippling_fetch_details above
     for what fetching them costs. Rippling's own board is 739 roles, so a full fetch
     is 740 requests and 739 of them are bodies.
 
@@ -1238,7 +1299,7 @@ def fetch_rippling(slug: str, keep=None):
         )
     if keep is not None:  # gate before the bodies — see the docstring
         out = [r for r in out if keep(_title_of(r))]
-    if RIPPLING_FETCH_DETAILS and out:
+    if _depth("rippling_fetch_details") and out:
         list(_detail_pool().map(lambda r: _rippling_detail(slug, r), out))
     for r in out:
         r.pop("_uuid", None)
@@ -1649,7 +1710,7 @@ def search_himalayas(queries, strict: bool = False):
     out: list[dict] = []
     seen: set[str] = set()  # spans both lanes and every query
     for qy in queries:
-        for page in range(1, HIMALAYAS_MAX_PAGES + 1):
+        for page in range(1, _depth("himalayas_max_pages") + 1):
             try:
                 data = get_json(
                     f"https://himalayas.app/jobs/api/search"
@@ -1685,7 +1746,7 @@ def _himalayas_browse(out: list, strict: bool = False, cfg=None, seen=None) -> N
     having: the rows this takes are the FRESHEST rows in the corpus, not an arbitrary
     slice of it.
 
-    WHAT ACTUALLY BOUNDS IT: `HIMALAYAS_BROWSE_PAGES` (default 50 = 1,000 rows). Be
+    WHAT ACTUALLY BOUNDS IT: `himalayas_browse_pages` (default 50 = 1,000 rows). Be
     precise about this, because an earlier version of this comment claimed "the age
     gate is the budget" and that was FALSE at every shipped setting. Do the
     arithmetic: 50 pages x 20 = offset 980, and a 60-day row (the default
@@ -1703,7 +1764,7 @@ def _himalayas_browse(out: list, strict: bool = False, cfg=None, seen=None) -> N
     # given it the global default's age window instead of its own.
     cfg = cfg or config.active()
     cutoff = cfg.max_age_days
-    for page in range(HIMALAYAS_BROWSE_PAGES):
+    for page in range(_depth("himalayas_browse_pages")):
         offset = page * HIMALAYAS_PAGE
         try:
             data = get_json(
@@ -1969,7 +2030,6 @@ def search_adzuna(queries):
 # How many "Who is Hiring?" threads to read. Two, because one is the start-of-month
 # cliff: on the 1st the newest thread is nearly empty and the prior month's 245 rows
 # vanish. The Algolia search already returns four, so this only costs the fetch.
-HN_THREADS = max(1, int(os.environ.get("HN_THREADS", "2")))
 
 
 def search_hn_whoishiring(queries):
@@ -1989,7 +2049,7 @@ def search_hn_whoishiring(queries):
     # the yield and removes the start-of-month cliff. The search above already returns
     # four matching threads, so the extra breadth is free apart from the fetch.
     threads = [h for h in hits if "who is hiring" in (h.get("title") or "").lower()][
-        :HN_THREADS
+        : _depth("hn_threads")
     ]
     if not threads:
         return []
@@ -2429,7 +2489,6 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
 # freshness cut has to happen at ingest -- you cannot page to the fresh part.
 # max(1, ...) like adzuna_pages and usajobs_max_pages: a cap of 0 would make zero
 # requests and return [], which is indistinguishable from an empty source.
-THEMUSE_MAX_PAGES = max(1, int(os.environ.get("THEMUSE_MAX_PAGES", "5")))
 THEMUSE_PAGE_CAP = 99
 
 
@@ -2479,7 +2538,7 @@ def search_themuse(queries):
 
     FANS OUT over the 20-value category taxonomy, and that is the whole yield of this
     adapter. The unfiltered feed hard-caps at page 99 = 2,000 rows, and this adapter
-    used to page ONLY that feed at THEMUSE_MAX_PAGES=5 -- **100 rows out of ~36,060
+    used to page ONLY that feed at themuse_max_pages=5 -- **100 rows out of ~36,060
     reachable.** The cap applies PER SLICE, and the slices are near-disjoint, so
     querying each category is the only way past 2,000.
 
@@ -2488,12 +2547,12 @@ def search_themuse(queries):
     returns 20/20 Healthcare rows with zero overlap against the unfiltered page. The
     trap has been corrected in catalog/themuse.md; do not re-add it.
 
-    Cost is THEMUSE_MAX_PAGES x 20 categories requests per run (default 5 -> 100
+    Cost is themuse_max_pages x 20 categories requests per run (default 5 -> 100
     requests, ~2,000 rows). `seen` dedups across slices because a job can carry two
     categories.
     """
     out, seen = [], set()
-    pages = min(THEMUSE_MAX_PAGES, THEMUSE_PAGE_CAP + 1)
+    pages = min(_depth("themuse_max_pages"), THEMUSE_PAGE_CAP + 1)
     for category in THEMUSE_CATEGORIES:
         for page in range(pages):
             try:
