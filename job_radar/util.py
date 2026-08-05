@@ -261,6 +261,17 @@ def today_et() -> str:
     return datetime.now(_ET).strftime("%Y-%m-%d")
 
 
+def now_et() -> str:
+    """Now, as an ET timestamp. Stamped on every harvested row.
+
+    It is the ANCHOR a relative date needs. Workday sends "Posted 26 Days Ago" and
+    Google sends "3 days ago"; the absolute date we compute from those only means
+    something relative to WHEN it was computed. Store a row and read it a week later
+    and, without this, nothing in it says the arithmetic was done last Tuesday.
+    """
+    return datetime.now(_ET).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def age_int(posted: str):
     if not posted:
         return None

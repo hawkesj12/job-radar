@@ -2105,3 +2105,153 @@ def test_harvest_leaks_no_private_keys(monkeypatch):
     assert not private, (
         f"private keys crossed the package boundary: {sorted(set(private))}"
     )
+
+
+# ── the record shape: dedup key, locations, title decomposition ─────────────
+def test_two_cities_are_two_jobs():
+    """MEASURED, not assumed. Without location in the key, every opening a company
+    posts under one title in several cities collapses to one row and the rest are
+    discarded with their apply URLs. On a live Greenhouse board (databricks, 810
+    postings, 2026-08-05) that was 250 postings gone, 83 of them distinct jobs —
+    "Delivery Solutions Architect" was eight openings across eight countries and
+    seven vanished."""
+    austin = {
+        "company": "Acme",
+        "title": "AI Engineer",
+        "location": "Austin, TX",
+        "url": "https://x/1",
+    }
+    nyc = {
+        "company": "Acme",
+        "title": "AI Engineer",
+        "location": "New York, NY",
+        "url": "https://x/2",
+    }
+    assert dedup.dedup_key(austin) != dedup.dedup_key(nyc)
+
+
+def test_work_arrangement_words_do_not_split_a_place():
+    """ "Remote - India" and "India" are the same place. If work-arrangement words
+    discriminated in the key, a source that decorates its location string would
+    split a role away from a source that does not."""
+    a = {
+        "company": "Acme",
+        "title": "Engineer",
+        "location": "Remote - India",
+        "url": "",
+    }
+    b = {"company": "Acme", "title": "Engineer", "location": "India", "url": ""}
+    assert dedup.dedup_key(a) == dedup.dedup_key(b)
+
+
+def test_one_posting_in_several_cities_stays_one_row():
+    """The other half of the same problem. Greenhouse separates several places on
+    ONE posting with `;` — 143 of 810 on the measured board. That is one job id, so
+    it must stay one row; only the FIRST place enters the key and the rest ride in
+    `locations`."""
+    p = engine._coerce(
+        {
+            "company": "Acme",
+            "title": "Account Executive",
+            "location": "Bengaluru, India; Mumbai, India",
+            "url": "https://x/1",
+        }
+    )
+    assert [x["raw"] for x in p["locations"]] == ["Bengaluru, India", "Mumbai, India"]
+    assert dedup.normalize_location(p["location"]) == "bengaluru india"
+
+
+def test_gh_jid_is_recognised_on_a_custom_domain():
+    """Greenhouse customers routinely serve the board from their own domain —
+    `databricks.com/company/careers/open-positions/job?gh_jid=8559344002`. Because
+    ats_from_url only matched boards.greenhouse.io, job_ref returned None there, so
+    the "two different ids are two openings" veto was silently OFF on the largest
+    boards in the corpus. The parameter is unambiguous wherever it appears."""
+    u = "https://databricks.com/company/careers/open-positions/job?gh_jid=8559344002"
+    assert dedup.ats_from_url(u) is None  # still not a board URL — slug is unknowable
+    assert dedup.job_ref(u) == ("greenhouse", "", "8559344002")
+
+
+def test_two_job_ids_at_one_company_are_two_rows():
+    """The strongest evidence available, and it used to veto only the FUZZY pass
+    while the exact-key branch merged the same postings anyway."""
+    a = {
+        "company": "Databricks",
+        "title": "Solutions Architect",
+        "location": "United States",
+        "url": "https://databricks.com/careers/job?gh_jid=8559344002",
+    }
+    b = {
+        "company": "Databricks",
+        "title": "Solutions Architect",
+        "location": "United States",
+        "url": "https://databricks.com/careers/job?gh_jid=8428882002",
+    }
+    assert dedup.dedup_key(a) != dedup.dedup_key(b)
+
+
+def test_a_url_without_an_id_still_merges_across_sources():
+    """The id is additive, never required. An aggregator redirect carries no id and
+    must still match the employer's copy — that cross-source merge is the product."""
+    ats = {
+        "company": "Acme",
+        "title": "AI Engineer",
+        "location": "Austin, TX",
+        "url": "https://boards.greenhouse.io/acme/jobs/123",
+    }
+    agg = {
+        "company": "Acme",
+        "title": "AI Engineer",
+        "location": "Austin, TX",
+        "url": "https://remoteok.com/l/999",
+    }
+    assert dedup.dedup_key(agg).count("|") == 2  # no id component
+    assert dedup.dedup_key(ats) != dedup.dedup_key(agg)  # ats copy carries its id
+
+
+def test_title_root_separates_decoration_from_the_role():
+    from job_radar import vocab
+
+    d = vocab.decompose_title("Senior AI Engineer II, Ads (Remote)")
+    assert d["title_root"] == "AI Engineer"
+    assert d["seniority"] == "senior"
+    assert d["title_level"] == "II"
+    assert "ads" in d["title_qualifiers"]
+
+
+def test_a_rank_word_that_is_the_job_is_not_stripped():
+    """The rule that makes the parse safe: a seniority word is decoration ONLY when
+    it leads the title and something real follows. Without the head-noun test,
+    "Director of Engineering" becomes "of Engineering" and "Associate" becomes "" —
+    a wrong root silently mis-matches every consumer that groups on it."""
+    from job_radar import vocab
+
+    for t in (
+        "Director of Engineering",
+        "Team Lead",
+        "Chief of Staff",
+        "VP of Sales",
+        "Associate",
+        "Principal",
+        "Lead",
+    ):
+        assert vocab.decompose_title(t)["title_root"] == t, f"{t} lost its head noun"
+    # ...but a genuine leading modifier still comes off
+    assert vocab.decompose_title("Senior Director of Data Science")["title_root"] == (
+        "Director of Data Science"
+    )
+
+
+def test_hybrid_is_expressible_and_unknown_is_not_onsite():
+    r = engine._coerce({"title": "Engineer", "remote_type": "hybrid"})
+    assert r["remote_type"] == "hybrid"
+    assert r["remote"] is False  # derived: hybrid is not fully remote
+    assert engine._coerce({"title": "Engineer"})["remote"] is None  # unknown != False
+
+
+def test_absent_optional_text_is_none_not_empty_string():
+    """`posted: ""` meant "we could not parse a date", which a consumer cannot tell
+    from a job that has no date — the same lie as remote: False for unknown."""
+    r = engine._coerce({"title": "Engineer", "posted": "", "salary": "", "text": ""})
+    assert r["posted"] is None and r["salary"] is None and r["text"] is None
+    assert r["title"] == "Engineer"  # required fields stay strings

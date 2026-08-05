@@ -11,7 +11,7 @@ import re
 import urllib.error
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from . import config
+from . import config, vocab
 from .dedup import find_hit_key, norm
 from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
@@ -22,7 +22,7 @@ from .sources import (
     enabled_breadth,
     enabled_depth,
 )
-from .util import age_int
+from .util import age_int, now_et
 
 # A valid ATS slug is the last path segment of a board URL — alphanumerics plus
 # -, _, . only. Reject anything else so a hand-edited watchlist can't inject path
@@ -59,19 +59,7 @@ def _src_pref(p) -> int:
 # posting killed the whole run, discarded a completed network harvest, and skipped
 # the "keep your existing shortlist" guard on the way out. Coerce once, here, at the
 # only boundary every posting from every adapter has to cross.
-_TEXT_FIELDS = (
-    "title",
-    "company",
-    "location",
-    "url",
-    "posted",
-    "text",
-    "department",
-    "employment_type",
-    "salary",
-    "industry",
-    "source",
-)
+_REQUIRED_TEXT = ("title", "company", "url", "source", "industry", "employment_type")
 
 
 # The keys added in 0.7.0, and their UNKNOWN value. `None` is the default on every
@@ -87,38 +75,137 @@ _TEXT_FIELDS = (
 #   tags        list[str] | None
 #   everything else  str | None
 _CONTRACT_FIELDS = (
-    "function",  # the JOB FAMILY ("Healthcare & Nursing Jobs")
-    "org_unit",  # the company's own team ("Engineering - Pipeline")
-    "employer_org",  # the employing organisation -- NEVER a category
+    # what the job is
+    "title_root",  # the matchable role, decoration stripped -- vocab.decompose_title
+    "title_level",  # I | II | III | IV
+    "title_qualifiers",  # list[str] | None -- domain/geo decoration
+    "category",  # the job family. NOT an O*NET-SOC code; free text from the source.
+    "tags",  # list[str] | None -- skills the source itself extracted
+    # who
+    "parent_company",  # umbrella org, when the source distinguishes one
+    "team",  # the group inside the company
+    # where
+    "locations",  # list[dict] | None -- every place, each with its own apply url
     "city",
     "state",
     "country",
-    "remote",  # bool | None
-    "remote_basis",  # "source_field" | "location_rule" | "text" | None
-    "tags",  # list[str] | None
-    "seniority",  # the source's own level string, verbatim
+    "remote_type",  # remote | hybrid | onsite | None
+    "remote_region",  # where a remote worker may sit, when stated
+    "remote_basis",  # stated | location | text | None
+    # money
+    "salary_min",  # float | None -- what an employer COMMITTED to
+    "salary_max",
+    "salary_currency",
+    "salary_period",  # year | month | week | day | hour | fixed | None
+    "salary_basis",  # stated | parsed | None
+    "salary_estimated_min",  # a MODEL's guess. Never the same column as a commitment.
+    "salary_estimated_max",
+    # terms
+    "employment_type_raw",  # what the vendor actually said
+    "seniority",
+    "seniority_basis",  # stated | title | None
+    # when
+    "posted_basis",  # stated | relative | None
+    "expires",
+    "harvested_at",
+    # provenance
+    "direct_apply",  # bool -- the url reaches the EMPLOYER, not an aggregator
+    "remote",  # bool | None -- DERIVED from remote_type; see _coerce
 )
+
+# Fields whose ABSENCE is meaningful and must survive as None rather than "".
+# `posted: ""` used to mean "we could not parse a date", which is the same lie as
+# `remote: False` for unknown -- a consumer cannot tell it from a job with no date.
+# These move out of the str-coerced tier. The four genuinely required fields
+# (title, url, company, source) stay strings: _consume drops any row missing a url,
+# and a posting with no title is not a posting.
+# `text` deliberately keeps its name. `body` reads better, but it is a released,
+# README-documented field with call sites in the only consumer, and renaming it buys
+# a nicer word and nothing else. If it ever moves it moves at 1.0 with `department`.
+_NULLABLE_TEXT = ("posted", "salary", "text", "location", "department")
 
 
 def _coerce(p: dict) -> dict:
     """Enforce the record contract at the one boundary every posting crosses.
 
-    Two jobs, and they are opposites on purpose. The legacy text fields are FORCED to
-    `str` (a present-but-null title from any of ~500 third parties used to raise on the
-    first `.lower()` and kill an entire harvest). The 0.7.0 contract fields are merely
-    ENSURED PRESENT, defaulting to None, and are never coerced -- their types carry
-    meaning that `str()` would destroy.
+    Everything that makes the record a contract rather than a pile of vendor JSON
+    happens here, because this is the only place every posting from every adapter
+    has to pass through. An adapter fills what its API sends; this makes the result
+    uniform.
+
+    Four jobs:
+
+    1. REQUIRED fields are forced to `str`. A present-but-null title from any of
+       ~500 third parties used to raise on the first `.lower()` and kill an entire
+       harvest.
+    2. OPTIONAL text is normalized to None, not "". `posted: ""` meant "we could not
+       parse a date", which a consumer cannot tell from a job that has no date --
+       the same lie as `remote: False` for unknown.
+    3. Contract fields are ensured present and default to None, and are NEVER
+       coerced: `str(None)` is "None" and `str(["a"])` is a repr, which is exactly
+       the stringly-typed arrival the contract exists to prevent.
+    4. Derived fields are computed from what the adapter did send -- the title
+       decomposition, and `seniority` when the source stayed silent.
     """
-    for k in _TEXT_FIELDS:
+    for k in _REQUIRED_TEXT:
         v = p.get(k)
         if not isinstance(v, str):
             p[k] = "" if v is None else str(v)
+    for k in _NULLABLE_TEXT:
+        v = p.get(k)
+        if v is None or v == "":
+            p[k] = None
+        elif not isinstance(v, str):
+            p[k] = str(v)
     for k in _CONTRACT_FIELDS:
         p.setdefault(k, None)
     # A source that sends a single tag as a bare string still satisfies "list[str] |
     # None" downstream if we normalize here rather than making every consumer guess.
     if isinstance(p.get("tags"), str):
         p["tags"] = [p["tags"]] if p["tags"] else None
+
+    # DERIVED. The title decomposition runs for every adapter, because no source
+    # sends a root -- it is ours to produce, and producing it once here beats every
+    # consumer reimplementing it differently. `title` itself is never modified.
+    parsed = vocab.decompose_title(p.get("title", ""))
+    p["title_root"] = parsed["title_root"]
+    p["title_level"] = p.get("title_level") or parsed["title_level"]
+    p["title_qualifiers"] = p.get("title_qualifiers") or parsed["title_qualifiers"]
+    # A STATED seniority always wins; the title is the fallback, and says so.
+    if p.get("seniority"):
+        p.setdefault("seniority_basis", "stated")
+        p["seniority_basis"] = p["seniority_basis"] or "stated"
+    elif parsed["seniority"]:
+        p["seniority"] = parsed["seniority"]
+        p["seniority_basis"] = "title"
+
+    # `remote` is DERIVED from remote_type, not stored beside it. Two homes for one
+    # fact is how a hybrid role ends up reported as `remote: False`, which reads as
+    # on-site to anything that only checks the flag.
+    rt = p.get("remote_type")
+    p["remote"] = None if rt is None else rt == "remote"
+
+    # `locations` -- every place ONE posting names. Greenhouse separates them with
+    # `;` ("Berlin, Germany; Munich, Germany") and 143 of 810 postings on one measured
+    # board do this. That is a single job id, so it stays a single row; the places
+    # ride here instead of forcing a split. An adapter that already built a
+    # structured list (usajobs PositionLocation[], rippling workLocations[]) keeps it.
+    if p.get("locations") is None:
+        parts = [x.strip() for x in (p.get("location") or "").split(";") if x.strip()]
+        if len(parts) > 1:
+            p["locations"] = [{"raw": x, "url": p.get("url")} for x in parts]
+        elif parts:
+            p["locations"] = [
+                {
+                    "raw": parts[0],
+                    "city": p.get("city"),
+                    "state": p.get("state"),
+                    "country": p.get("country"),
+                    "url": p.get("url"),
+                }
+            ]
+
+    p["harvested_at"] = p.get("harvested_at") or now_et()
     return p
 
 

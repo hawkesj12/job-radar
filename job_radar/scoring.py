@@ -107,7 +107,11 @@ def is_remote(p: dict, cfg=None) -> bool:
     cfg = cfg or config.active()
     if not cfg.remote_only:
         return True
-    flag = p.get("remote")
+    # remote_type, not `remote`: the bool is DERIVED from this in engine._coerce and
+    # is not populated yet when this gate runs. Reading the enum also makes the gate
+    # hybrid-aware for free -- a hybrid role is not remote, and now says so.
+    rt = p.get("remote_type")
+    flag = None if rt is None else rt == "remote"
     if flag is None:
         if not remote_posting(
             p.get("title", ""), p.get("location", ""), p.get("text", "")

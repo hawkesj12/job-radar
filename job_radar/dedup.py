@@ -133,13 +133,28 @@ _JOB_REF = {
 }
 
 
+# `gh_jid` on ANY host. Greenhouse customers commonly serve the board from their own
+# domain -- databricks.com/company/careers/open-positions/job?gh_jid=8559344002 -- and
+# ats_from_url only matches boards.greenhouse.io, so job_ref returned None and the
+# "two different job ids are two openings" veto could not fire on the biggest boards
+# in the corpus. Measured on databricks (810 postings): every residual collision after
+# location joined the key was a pair of DISTINCT gh_jids that looked like duplicates
+# purely because the parameter was invisible. The parameter is unambiguous wherever it
+# appears; the host it appears on is not part of what makes it a job id.
+_GH_JID = re.compile(r"[?&]gh_jid=(\d+)")
+
+
 def job_ref(url: str):
     """`(ats, slug, ref)` when a URL identifies one specific posting on a known
     board, else None. None is the safe answer -- it disables the veto rather than
     guessing."""
     got = ats_from_url(url)
     if not got:
-        return None
+        m = _GH_JID.search(url or "")
+        # Slug unknown on a custom domain, and that is fine: `different_openings`
+        # only ever compares postings already inside one company block, so the
+        # company is established before the ref is consulted.
+        return ("greenhouse", "", m.group(1)) if m else None
     rx = _JOB_REF.get(got[0])
     m = rx.search(url.lower()) if rx else None
     if not m:
@@ -190,8 +205,68 @@ def normalize_title(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
 
 
+# Work-arrangement words carry no PLACE information, so they must not discriminate
+# in the key: "Remote - India" and "India" are the same place. Stripped before the
+# location joins the key, so a source that decorates its location string does not
+# split a role away from a source that does not.
+_LOC_NOISE = re.compile(
+    r"\b(remote|onsite|on site|hybrid|wfh|telecommute|anywhere|flexible)\b"
+)
+
+
+def normalize_location(loc: str) -> str:
+    """A location string -> a comparable key component.
+
+    Only the FIRST place when a posting lists several. Greenhouse separates them
+    with `;` ("Berlin, Germany; Munich, Germany") and that is ONE posting with one
+    job id -- it must not key differently from the same role elsewhere, and its
+    other places are carried in `locations[]` rather than in the key.
+    """
+    first = (loc or "").split(";")[0]
+    first = _LOC_NOISE.sub(" ", first.lower())
+    return re.sub(r"[^a-z0-9]+", " ", first).strip()
+
+
 def dedup_key(p: dict) -> str:
-    return norm(p.get("company", "")) + "|" + normalize_title(p.get("title", ""))
+    """`company|title|location` -- the store's primary key.
+
+    LOCATION IS PART OF IT, and that was measured rather than assumed. Without it,
+    every opening a company posts under one title in several cities collapses into a
+    single row and the rest are DISCARDED along with their apply URLs. On a live
+    Greenhouse board (databricks, 810 postings, 2026-08-05): 250 postings dropped, 83
+    of them distinct jobs in different cities, each with its own Greenhouse job id --
+    "Delivery Solutions Architect" was eight separate openings across Canada, London,
+    Brisbane, Seoul, Singapore, Paris, Tokyo and Stockholm, and seven vanished. That
+    is the exact failure this module's docstring says the design avoids: a wrong
+    merge deletes a job the user wanted and hides the evidence.
+
+    The objection to doing this was that it would break CROSS-SOURCE merging. It does
+    not, measured: across RemoteOK, Jobicy, Remotive and Arbeitnow (249 postings)
+    there were ZERO collisions on `company|title` to break. And it could not key on
+    the structured `city` instead, because that is populated for 0 of those 249 --
+    the raw string, normalized, is the only location those boards actually send.
+
+    Re-keying costs nothing: `shortlist.upsert` falls back to matching on URL, so an
+    existing row keeps its `status` and `first_seen` through the change (verified).
+    """
+    ref = job_ref(p.get("url", ""))
+    key = (
+        norm(p.get("company", ""))
+        + "|"
+        + normalize_title(p.get("title", ""))
+        + "|"
+        + normalize_location(p.get("location", ""))
+    )
+    # THE BOARD'S OWN JOB ID, when the URL carries one. Two different ids on one board
+    # are two openings by definition -- the strongest evidence available here, and it
+    # was being used only to veto the FUZZY pass while the exact-key branch merged
+    # them anyway. On databricks that left 21 postings discarded AFTER location was in
+    # the key, every one of them a pair of distinct gh_jids.
+    #
+    # A URL that carries no id contributes nothing, which is what keeps cross-source
+    # merging intact: an aggregator redirect yields no ref and still matches the
+    # employer's copy on company|title|location.
+    return key + ("|" + ref[2] if ref else "")
 
 
 def company_block(p: dict) -> str:

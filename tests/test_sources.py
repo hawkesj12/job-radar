@@ -1075,9 +1075,11 @@ def test_every_contract_key_is_present_even_when_unknown(monkeypatch):
     from job_radar import engine
 
     r = engine._coerce({"title": "x", "source": "test"})
+    derived = {"title_root", "harvested_at", "remote"}  # computed, not defaulted
     for k in engine._CONTRACT_FIELDS:
         assert k in r, f"{k} missing from the record contract"
-        assert r[k] is None, f"{k} defaulted to {r[k]!r}, not None"
+        if k not in derived:
+            assert r[k] is None, f"{k} defaulted to {r[k]!r}, not None"
 
 
 def test_unknown_remote_is_none_not_false(monkeypatch):
@@ -1086,6 +1088,7 @@ def test_unknown_remote_is_none_not_false(monkeypatch):
     from job_radar import engine
 
     r = engine._coerce({"title": "Engineer", "text": "no arrangement stated"})
+    assert r["remote_type"] is None
     assert r["remote"] is None
     assert r["remote"] is not False
 
@@ -1095,9 +1098,10 @@ def test_coerce_does_not_stringify_the_typed_fields():
     None becomes the string "None" and a list becomes its repr."""
     from job_radar import engine
 
-    r = engine._coerce({"title": None, "remote": True, "tags": ["a", "b"]})
-    assert r["title"] == ""  # legacy field: coerced
-    assert r["remote"] is True  # typed field: untouched
+    r = engine._coerce({"title": None, "remote_type": "remote", "tags": ["a", "b"]})
+    assert r["title"] == ""  # required field: coerced to str
+    assert r["remote_type"] == "remote"  # typed field: untouched
+    assert r["remote"] is True  # derived from remote_type
     assert r["tags"] == ["a", "b"]
     assert engine._coerce({"tags": "solo"})["tags"] == ["solo"]  # scalar -> list
 
@@ -1130,10 +1134,14 @@ def test_usajobs_employer_is_not_a_category(monkeypatch):
 
 
 def test_lever_workplace_type_is_read_not_inferred():
-    assert sources._lever_remote("remote")["remote"] is True
-    assert sources._lever_remote("hybrid")["remote"] is False
-    assert sources._lever_remote("")["remote"] is None  # unknown, not False
-    assert sources._lever_remote("something new")["remote"] is None
+    assert sources._lever_remote("remote")["remote_type"] == "remote"
+    # hybrid is now EXPRESSIBLE. It used to collapse to `remote: False`, which reads
+    # as on-site to anything checking only the flag — a third of the middle ground
+    # reported as its opposite.
+    assert sources._lever_remote("hybrid")["remote_type"] == "hybrid"
+    assert sources._lever_remote("onsite")["remote_type"] == "onsite"
+    assert sources._lever_remote("")["remote_type"] is None  # unknown, not onsite
+    assert sources._lever_remote("something new")["remote_type"] is None
 
 
 def test_ashby_place_reads_the_schema_org_block():

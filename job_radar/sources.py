@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from . import config
+from .vocab import remote_type
 from .util import (
     NET_ERRORS,
     age_int,
@@ -57,7 +58,7 @@ def fetch_greenhouse(slug: str):
                 "url": j.get("absolute_url", ""),
                 "posted": to_date(j.get("updated_at") or j.get("first_published")),
                 "department": depts[0].get("name", "") if depts else "",
-                "org_unit": (depts[0].get("name") if depts else None) or None,
+                "team": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
@@ -66,21 +67,29 @@ def fetch_greenhouse(slug: str):
     return out
 
 
+def _rt(is_remote, is_hybrid=None) -> str | None:
+    """A source's remote/hybrid BOOLEANS -> the remote_type enum.
+
+    Two booleans, three states: SmartRecruiters sends `remote` and `hybrid` side by
+    side, and `remote=False, hybrid=True` is a real, common posting that a single
+    bool reports as "not remote" -- indistinguishable from on-site.
+    """
+    if is_hybrid:
+        return "hybrid"
+    if is_remote is None:
+        return None
+    return "remote" if is_remote else "onsite"
+
+
 def _lever_remote(workplace_type) -> dict:
-    """Lever `categories`/`workplaceType` -> {remote, remote_basis}.
+    """Lever `workplaceType` -> {remote_type, remote_basis}.
 
     Lever states the work arrangement outright ("remote" / "hybrid" / "on-site"), so
     there is no need to infer it from prose. An unrecognised or absent value stays
-    None -- unknown, not False -- and falls through to the text rule in the gate.
+    None -- unknown, NOT onsite -- and falls through to the text rule in the gate.
     """
-    v = (workplace_type or "").strip().lower()
-    if not v:
-        return {"remote": None, "remote_basis": None}
-    if v in ("remote", "fully remote", "remote-first"):
-        return {"remote": True, "remote_basis": "source_field"}
-    if v in ("on-site", "onsite", "hybrid", "in-office"):
-        return {"remote": False, "remote_basis": "source_field"}
-    return {"remote": None, "remote_basis": None}
+    rt = remote_type(workplace_type)
+    return {"remote_type": rt, "remote_basis": "stated" if rt else None}
 
 
 def fetch_lever(slug: str):
@@ -103,7 +112,7 @@ def fetch_lever(slug: str):
                 "url": j.get("hostedUrl", ""),
                 "posted": to_date(j.get("createdAt")),
                 "department": cats.get("team") or cats.get("department", ""),
-                "org_unit": cats.get("team") or cats.get("department") or None,
+                "team": cats.get("team") or cats.get("department") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
                 # that this adapter never read -- remoteness was being re-derived from
                 # the description while the source stated it outright.
@@ -154,12 +163,12 @@ def fetch_ashby(slug: str):
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
                 "department": j.get("department", "") or j.get("team", ""),
-                "org_unit": j.get("department") or j.get("team") or None,
+                "team": j.get("department") or j.get("team") or None,
                 # `isRemote` is a real boolean on every Ashby posting. Structured
                 # geography lives at address.postalAddress -- present in 657 of 737
                 # measured, and never read until now.
-                "remote": bool(j["isRemote"]) if "isRemote" in j else None,
-                "remote_basis": "source_field" if "isRemote" in j else None,
+                "remote_type": _rt(j.get("isRemote")),
+                "remote_basis": "stated" if "isRemote" in j else None,
                 **_ashby_place(j.get("address")),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
@@ -240,14 +249,14 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 # string, fully structured geography, and an actual remote BOOLEAN --
                 # all present on every posting, all previously collapsed into one
                 # location string and one `department`.
-                "function": (j.get("function") or {}).get("label") or None,
-                "org_unit": (j.get("department") or {}).get("label") or None,
+                "category": (j.get("function") or {}).get("label") or None,
+                "team": (j.get("department") or {}).get("label") or None,
                 "seniority": (j.get("experienceLevel") or {}).get("label") or None,
                 "city": loc.get("city") or None,
                 "state": loc.get("region") or None,
                 "country": loc.get("country") or None,
-                "remote": bool(loc["remote"]) if "remote" in loc else None,
-                "remote_basis": "source_field" if "remote" in loc else None,
+                "remote_type": _rt(loc.get("remote"), loc.get("hybrid")),
+                "remote_basis": "stated" if "remote" in loc else None,
                 "employment_type": (j.get("typeOfEmployment") or {}).get("label", ""),
                 "salary": "",
                 "text": "",
@@ -1040,9 +1049,9 @@ def search_remotive(queries, strict: bool = False):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("publication_date")),
                 "department": j.get("category", ""),
-                "function": j.get("category") or None,
-                "remote": True,  # a remote-only board by definition
-                "remote_basis": "source_field",
+                "category": j.get("category") or None,
+                "remote_type": "remote",  # a remote-only board by definition
+                "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "employment_type": j.get("job_type", ""),
                 "salary": j.get("salary", "") or salary_from_text(text),
@@ -1076,10 +1085,10 @@ def search_jobicy(queries):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("pubDate")),
                 "department": _joined(j.get("jobIndustry")),
-                "function": _joined(j.get("jobIndustry")) or None,
+                "category": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
-                "remote": True,  # a remote-only board by definition
-                "remote_basis": "source_field",
+                "remote_type": "remote",  # a remote-only board by definition
+                "remote_basis": "stated",
                 "employment_type": _joined(j.get("jobType")),
                 "salary": salary_from_text(text),
                 "text": text,
@@ -1105,8 +1114,8 @@ def search_arbeitnow(queries):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("created_at")),
                 "department": "",
-                "remote": True,  # the adapter already filtered on j["remote"] above
-                "remote_basis": "source_field",
+                "remote_type": "remote",  # the adapter already filtered on j["remote"] above
+                "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "employment_type": ", ".join(jt)
                 if isinstance(jt, list)
@@ -1135,8 +1144,8 @@ def search_remoteok(queries):
                 "posted": to_date(j.get("date") or j.get("epoch")),
                 "department": "",
                 "employment_type": "",
-                "remote": True,  # a remote-only board by definition
-                "remote_basis": "source_field",
+                "remote_type": "remote",  # a remote-only board by definition
+                "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "salary": salary_range(j.get("salary_min"), j.get("salary_max")),
                 "text": text,
@@ -1274,7 +1283,7 @@ def _himalayas_rows(jobs, out, seen=None):
                 "url": url,
                 "posted": to_date(j.get("pubDate")),
                 "department": "",
-                "function": ", ".join(
+                "category": ", ".join(
                     x
                     for x in (j.get("parentCategories") or j.get("categories") or [])
                     if isinstance(x, str)
@@ -1284,8 +1293,8 @@ def _himalayas_rows(jobs, out, seen=None):
                     x for x in (j.get("seniority") or []) if isinstance(x, str)
                 )
                 or None,
-                "remote": True,  # a remote-only board by definition
-                "remote_basis": "source_field",
+                "remote_type": "remote",  # a remote-only board by definition
+                "remote_basis": "stated",
                 "tags": [x for x in (j.get("categories") or []) if isinstance(x, str)]
                 or None,
                 "employment_type": j.get("employmentType", ""),
@@ -1390,12 +1399,12 @@ def search_adzuna(queries):
                         "department": (j.get("category") or {}).get("label", ""),
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
                         # -- one of the four different things `department` carried.
-                        "function": (j.get("category") or {}).get("label") or None,
+                        "category": (j.get("category") or {}).get("label") or None,
                         "city": city,
                         "state": state,
                         "country": country,
-                        "remote": is_remote,
-                        "remote_basis": "location_rule" if is_remote else None,
+                        "remote_type": "remote" if is_remote else None,
+                        "remote_basis": "location" if is_remote else None,
                         "employment_type": j.get("contract_time", ""),
                         "salary": salary_range(
                             j.get("salary_min"), j.get("salary_max")
@@ -1547,8 +1556,8 @@ def search_braintrust(queries):
                     # unusable downstream. It now says what it is.
                     "department": "",
                     "seniority": j.get("level") or None,
-                    "remote": True,  # a remote freelance network by definition
-                    "remote_basis": "source_field",
+                    "remote_type": "remote",  # a remote freelance network by definition
+                    "remote_basis": "stated",
                     "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
                     or None,
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
@@ -1699,10 +1708,10 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # downstream store ended up with employer names among its most
                 # common "categories". The three keys below say what each thing is.
                 "department": d.get("DepartmentName", ""),
-                "employer_org": d.get("DepartmentName") or None,
-                "org_unit": d.get("SubAgency") or None,
+                "parent_company": d.get("DepartmentName") or None,
+                "team": d.get("SubAgency") or None,
                 # OPM occupational series -- a real, coded job family.
-                "function": ", ".join(
+                "category": ", ".join(
                     c.get("Name", "")
                     for c in (d.get("JobCategory") or [])
                     if c.get("Name")
@@ -1865,7 +1874,7 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 # A job FAMILY ("Data Science"), not an org unit -- see
                 # catalog/_SCHEMA.md on why that distinction is load-bearing.
                 "department": "; ".join(x for x in cats if x),
-                "function": "; ".join(x for x in cats if x) or None,
+                "category": "; ".join(x for x in cats if x) or None,
                 # `levels` is a real seniority string ("Senior Level"). It was held
                 # back while `seniority` was a strand-B key not yet on any adapter;
                 # the contract exists now, so it ships.
