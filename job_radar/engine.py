@@ -17,6 +17,7 @@ from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
 from .sources import (
     DEPTH_ACCEPTS_KEEP,
+    DIRECT_APPLY_SOURCES,
     DEPTH_ALL,
     DEPTH_EXTRA_FIELDS,
     enabled_breadth,
@@ -158,7 +159,13 @@ def _coerce(p: dict) -> dict:
         elif not isinstance(v, str):
             p[k] = str(v)
     for k in _CONTRACT_FIELDS:
-        p.setdefault(k, None)
+        # `""` is NOT a legal contract value. These fields are typed `X | None`, and
+        # an adapter can easily hand over an empty string by accident -- `to_date`
+        # returns "" for an unparseable or absent date, so `expires` arrived as ""
+        # on every posting whose deadline was null. An empty string that means
+        # "absent" is the same lie the whole contract exists to remove.
+        v = p.get(k)
+        p[k] = None if v is None or v == "" else v
     # A source that sends a single tag as a bare string still satisfies "list[str] |
     # None" downstream if we normalize here rather than making every consumer guess.
     if isinstance(p.get("tags"), str):
@@ -218,6 +225,17 @@ def _coerce(p: dict) -> dict:
         norm, raw = vocab.employment_type(p.get("employment_type"))
         p["employment_type"] = norm or ""
         p["employment_type_raw"] = raw
+
+    # `direct_apply` -- does this url reach the EMPLOYER, or an aggregator that will
+    # bounce you onward? It is the product's whole differentiator, and _src_pref has
+    # been computing exactly this distinction for the dedup tiebreak since 0.5.0 and
+    # throwing it away. A DEPTH source IS the employer's applicant-tracking system,
+    # so its link is direct by construction; an aggregator serves a redirect.
+    # google_jobs decides for itself (see _best_apply_link) and is left alone here.
+    if p.get("direct_apply") is None and p.get("source"):
+        p["direct_apply"] = (
+            p["source"] in DEPTH_ALL or p["source"] in DIRECT_APPLY_SOURCES
+        )
 
     p["harvested_at"] = p.get("harvested_at") or now_et()
     return p

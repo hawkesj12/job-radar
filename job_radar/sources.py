@@ -58,6 +58,11 @@ def fetch_greenhouse(slug: str):
                 "location": (j.get("location") or {}).get("name", ""),
                 "url": j.get("absolute_url", ""),
                 "posted": to_date(j.get("updated_at") or j.get("first_published")),
+                # Present on every Greenhouse posting and NULL on all 397 of the
+                # board measured 2026-08-05 -- the key exists, the data usually does
+                # not. Mapped anyway: it costs nothing, other boards may fill it, and
+                # to_date returns "" for a null so an absent deadline stays absent.
+                "expires": to_date(j.get("application_deadline")),
                 "department": depts[0].get("name", "") if depts else "",
                 "team": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
@@ -457,6 +462,12 @@ def _google_posted(text: str) -> str:
     return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def _is_aggregator(url: str) -> bool:
+    """Does this apply link land on an aggregator rather than the employer?"""
+    host = urlparse(url or "").netloc.lower()
+    return bool(host) and any(agg in host for agg in _G_AGGREGATORS)
+
+
 def _best_apply_link(apply_options: list, fallback: str = "") -> str:
     """Pick the direct-to-employer apply link from Google's apply_options, else the
     first option, else `fallback`. Google orders these by its own preference, so the
@@ -525,9 +536,16 @@ def search_google_jobs(queries):
                         "title": j.get("title", ""),
                         "company": j.get("company_name", ""),
                         "location": j.get("location", ""),
-                        "url": _best_apply_link(
-                            j.get("apply_options"), j.get("share_link", "")
+                        "url": (
+                            _url := _best_apply_link(
+                                j.get("apply_options"), j.get("share_link", "")
+                            )
                         ),
+                        # _best_apply_link ALREADY made this judgement to pick the
+                        # url -- it prefers the first non-aggregator option. Saying
+                        # so costs one call and turns an internal preference into a
+                        # fact a consumer can filter on.
+                        "direct_apply": not _is_aggregator(_url),
                         "posted": _google_posted(ext.get("posted_at", "")),
                         # ALWAYS relative -- Google states recency as "2 days ago",
                         # never a date. The absolute value above is arithmetic done
@@ -927,6 +945,22 @@ DEPTH_EXTRA_FIELDS = {"workday": ("host", "site")}
 # signature inspection: the engine should read a registry, not guess from a function
 # object, and adding an adapter to this set is the whole opt-in.
 DEPTH_ACCEPTS_KEEP = frozenset({"workday", "rippling"})
+
+# Sources whose apply URL reaches the place an application is actually SUBMITTED,
+# rather than a page that links onward. schema.org's `directApply` asks exactly this
+# -- "can you complete an application from this URL" -- and it is the distinction the
+# whole product is built on.
+#
+# Every DEPTH source qualifies by construction: the url IS the employer's applicant-
+# tracking system. Two breadth sources also qualify and would be wrong to exclude
+# merely for being breadth:
+#   usajobs     applications for federal roles are submitted ON usajobs.gov. It is
+#               the government's own system, not a board that points at one.
+#   braintrust  the application is completed on Braintrust; the client is hidden by
+#               design, so there is no other destination to be redirected to.
+# Everything else serves a redirect: adzuna's field is literally `redirect_url`.
+# google_jobs is decided PER ROW by _best_apply_link and never falls through to this.
+DIRECT_APPLY_SOURCES = frozenset({"usajobs", "braintrust"})
 
 
 # ── LIVENESS: does this board exist? -- live_<ats>(slug, **extra) -> int ─────
@@ -1454,6 +1488,7 @@ def search_adzuna(queries):
                         "location": loc.get("display_name", ""),
                         "url": j.get("redirect_url", ""),
                         "posted": to_date(j.get("created")),
+                        "expires": to_date(j.get("deadline")),  # 1 of 20 populated
                         "department": (j.get("category") or {}).get("label", ""),
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
                         # -- one of the four different things `department` carried.
@@ -1782,6 +1817,11 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 ),
                 "url": d.get("PositionURI", ""),
                 "posted": to_date(d.get("PublicationStartDate")),
+                # Every federal posting carries a close date (10/10 measured
+                # 2026-08-05, some only days out) and it was being discarded. A job
+                # that shut yesterday is worse than no job: it wastes the one thing
+                # the user actually spends, which is the time to read and apply.
+                "expires": to_date(d.get("ApplicationCloseDate")),
                 # PRESERVED byte-identical (deprecated, removed at 1.0) -- but it
                 # was never a department. "Department of Veterans Affairs" is the
                 # EMPLOYER, and pouring it into a category column is how a

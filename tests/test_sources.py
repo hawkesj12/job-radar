@@ -1075,7 +1075,8 @@ def test_every_contract_key_is_present_even_when_unknown(monkeypatch):
     from job_radar import engine
 
     r = engine._coerce({"title": "x", "source": "test"})
-    derived = {"title_root", "harvested_at", "remote"}  # computed, not defaulted
+    # computed from other fields, so not None even on a bare record
+    derived = {"title_root", "harvested_at", "remote", "direct_apply"}
     for k in engine._CONTRACT_FIELDS:
         assert k in r, f"{k} missing from the record contract"
         if k not in derived:
@@ -1757,3 +1758,77 @@ def test_employment_type_is_normalized_once_for_every_adapter():
         assert r["employment_type"] in vocab.EMPLOYMENT_TYPES
     silent = engine._coerce({"title": "x"})
     assert silent["employment_type"] == "" and silent["employment_type_raw"] is None
+
+
+def test_direct_apply_asks_whether_you_can_actually_apply_there(monkeypatch):
+    """schema.org's question — "can you complete an application from this URL" — not
+    "is it a depth adapter". The first version of this rule was `source in DEPTH_ALL`
+    and it marked USAJOBS false, which is wrong: federal applications are SUBMITTED
+    on usajobs.gov. It is the government's own system, not a board pointing at one."""
+    from job_radar import engine
+
+    for src, want in [
+        ("greenhouse", True),  # the employer's own ATS
+        ("workday", True),
+        ("usajobs", True),  # applications are submitted here
+        ("braintrust", True),  # client hidden by design; nowhere else to go
+        ("remoteok", False),  # serves a redirect
+        ("adzuna", False),  # its field is literally named redirect_url
+    ]:
+        r = engine._coerce({"title": "x", "source": src})
+        assert r["direct_apply"] is want, f"{src} -> {r['direct_apply']}"
+
+
+def test_google_jobs_decides_direct_apply_per_row(monkeypatch):
+    """_best_apply_link already prefers the first non-aggregator option to CHOOSE the
+    url — it just discarded the reasoning. A row whose only option is LinkedIn is not
+    a direct apply, whatever its source."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda k: "test-key")
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    payload = {
+        "jobs_results": [
+            {
+                "title": "A",
+                "company_name": "Co",
+                "share_link": "https://g/1",
+                "apply_options": [{"link": "https://boards.greenhouse.io/co/jobs/1"}],
+            },
+            {
+                "title": "B",
+                "company_name": "Co",
+                "share_link": "https://g/2",
+                "apply_options": [{"link": "https://www.linkedin.com/jobs/view/2"}],
+            },
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: payload)
+    from job_radar import engine
+
+    out = [engine._coerce(r) for r in sources.search_google_jobs(["x"])]
+    assert out[0]["direct_apply"] is True, "an ATS link is a direct apply"
+    assert out[1]["direct_apply"] is False, "a LinkedIn redirect is not"
+
+
+def test_a_missing_deadline_stays_absent(monkeypatch):
+    """Greenhouse sends `application_deadline` on every posting and it was NULL on
+    all 397 of the board measured 2026-08-05 — the key exists, the data does not.
+    An absent deadline must not become a fake date."""
+    fake = {
+        "jobs": [
+            {
+                "title": "Engineer",
+                "absolute_url": "https://x/1",
+                "application_deadline": None,
+                "updated_at": "2026-08-01",
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: fake)
+    from job_radar import engine
+
+    r = engine._coerce(sources.fetch_greenhouse("acme")[0])
+    assert r["expires"] is None
+    fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00Z"
+    r = engine._coerce(sources.fetch_greenhouse("acme")[0])
+    assert r["expires"] == "2026-09-30"
