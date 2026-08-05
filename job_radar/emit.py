@@ -18,7 +18,11 @@ file is still valid up to the last complete line.
 
 Two shapes are emitted:
 
-  * `records()`  -- one object per role, nested (location and salary are objects)
+  * `records()`  -- one object per role. `location` is nested; `salary` is NOT --
+    it is still the display string the adapters produce. An earlier version of this
+    line said "location and salary are objects", which was true of neither the code
+    below nor any release. Structuring salary is real work (currency, period, and
+    whether anyone actually stated it) and is not done yet.
   * `manifest()` -- ONE object per harvest describing the run itself
 
 The manifest matters more than it looks. A store fed only rows cannot answer "why
@@ -40,9 +44,16 @@ _ET = ZoneInfo("America/New_York")  # every timestamp in job-radar is Eastern
 def _nested(r: dict) -> dict:
     """One harvested posting -> the emitted record.
 
-    Nests the fields that belong together (location, salary) and keeps the derived
-    `*_basis` next to the value it explains, so a consumer that disagrees with our
-    inference can override it rather than having to re-derive everything.
+    Nests `location`, and keeps each derived `*_basis` next to the value it explains
+    so a consumer that disagrees with our inference can override it rather than
+    re-deriving everything.
+
+    NOTE the shape split, because two docs in this repo describe it differently and
+    only one of them is the wire format: `engine.harvest()` returns a FLAT dict (that
+    is what a library consumer like jobfitr receives, and what engine._coerce enforces
+    key-by-key). This function is the only place that nests anything, and it applies
+    only to NDJSON. If those two ever need to agree, this mapping is the one place to
+    change.
 
     `department` rides along unchanged. It is deprecated, not gone: jobfitr pins a
     released version and reads it today, so removing it here would break a consumer

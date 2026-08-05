@@ -2073,3 +2073,35 @@ def test_every_starter_entry_declares_its_required_fields():
         assert c.get("slug"), f"{c} has no slug"
         for f in sources.DEPTH_EXTRA_FIELDS.get(c["ats"], ()):
             assert c.get(f), f"{c['name']} ({c['ats']}) is missing {f}"
+
+
+def test_harvest_leaks_no_private_keys(monkeypatch):
+    """`_blk` and `_nt` are de-dup scratch — a company block and a normalized title
+    that `_consume` stashes so the fuzzy pass does not re-derive them per comparison.
+
+    They were reaching every consumer. jobfitr stores what `harvest` returns, so two
+    private keys were crossing a package boundary; anything a consumer can read, it
+    can come to depend on, and then it is public whether it was meant to be or not.
+    """
+    from job_radar import engine, sources
+
+    c = _cfg()
+    c.remote_only = False
+    c.breadth_sources = []
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda u, *a, **k: {
+            "totalFound": 1,
+            "content": [{"name": "AI Engineer", "id": "1"}],
+        },
+    )
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    rows, _, _ = engine.harvest(
+        c, companies=[{"name": "Visa", "ats": "smartrecruiters", "slug": "Visa"}]
+    )
+    assert rows, "no rows to check"
+    private = [k for r in rows for k in r if k.startswith("_")]
+    assert not private, (
+        f"private keys crossed the package boundary: {sorted(set(private))}"
+    )

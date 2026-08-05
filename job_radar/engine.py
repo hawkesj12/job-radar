@@ -345,4 +345,13 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
     # Score desc, with source preference breaking exact-score ties (Google's
     # lower-noise, direct-link results edge out an equal-scoring aggregator row).
     rows = sorted(hits.values(), key=lambda p: (p["score"], _src_pref(p)), reverse=True)
+    # Strip the de-dup scratch before handing rows to a caller. `_blk` (company block)
+    # and `_nt` (normalized title) are stashed by _consume so the fuzzy pass does not
+    # re-derive them per comparison; they are an implementation detail of THIS
+    # function and were leaking into every consumer's record — jobfitr stores what
+    # harvest returns, so two private keys were crossing a package boundary and would
+    # have had to be supported forever once anyone read them.
+    for r in rows:
+        r.pop("_blk", None)
+        r.pop("_nt", None)
     return rows, discovered, errors
