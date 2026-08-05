@@ -1,62 +1,94 @@
 # job-radar
 
-**Scan the open job market in about a minute** — your watchlist of companies plus eleven aggregator APIs, straight from company applicant-tracking-system feeds — scored for fit, de-duplicated, and (optionally) semantically ranked by an LLM. It remembers what you've seen and applied to, so every run shows you what's _new_. Start with the ~20-company starter list and grow your watchlist to hundreds with one `seed` command.
+**A CLI and Python library that turns nineteen job-board APIs into one record shape.**
 
-Not another board to scroll. A radar that harvests the market _for_ you and routes you to the source.
+Every job board answers the same question in a different vocabulary. Greenhouse calls the body `content`, Lever calls it `descriptionPlain`, Ashby calls it `descriptionPlain` but nests compensation three levels down, and Workday doesn't return a body at all until you ask a second endpoint. job-radar knows all nineteen dialects, asks each one correctly, and hands you back a single normalized record — de-duplicated across sources, with the employer's own apply link preferred over an aggregator's redirect.
+
+It ships with a working job-search tool on top of that engine. But the engine is the product: harvesting, normalizing, de-duplicating, and knowing what each API will and won't do.
+
+"One record shape" means every adapter emits the same keys with the same types, and that an unknown is always `None` rather than a plausible-looking guess. It does not mean every source fills every key — what each one actually sends is measured per source in `catalog/`, and what is still missing is named in [Known limits](#known-limits-of-the-record-shape).
 
 ```
 pipx install job-radar                      # or: pip install job-radar
-job-radar init                              # write a starter job-radar.yaml + watchlist.json here
-# edit job-radar.yaml to make it yours
-job-radar                                   # scan → ranked shortlist.csv
-job-radar apply <id>                        # mark a role applied (it stops resurfacing)
-job-radar list                              # see your current shortlist
-job-radar --version                         # which version am I running?
+job-radar init                              # write a starter config + watchlist here
+job-radar                                   # harvest → ranked shortlist.csv
 ```
 
-Runs on Linux, macOS, and Windows, Python 3.10 or newer.
+Runs on Linux, macOS, and Windows, Python 3.10 or newer. Apache-2.0.
 
-## What it does
+## The record it produces
 
-1. **Harvests two ways.** _Depth_ — polls each company on your watchlist directly via its public ATS feed (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday), so you see roles the hour they post. Workday is the enterprise one: it reaches the manufacturers, insurers, hospitals, municipalities and national labs that never appear on the startup boards. _Breadth_ — queries aggregator APIs (Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Adzuna, USAJOBS, Google for Jobs, Hacker News "Who is Hiring," Braintrust, TechTree) across the whole market. Google for Jobs is the meta-aggregator: it indexes company career sites and enterprise ATSs (Workday, iCIMS) that no single feed exposes, and job-radar **prefers** its direct-to-employer apply link over an aggregator redirect — Google often lists LinkedIn or Indeed first, so the first non-aggregator option wins; if a listing offers only aggregators, you get the best of those.
-2. **Scores every role on one comparable scale** — a transparent, weighted keyword model you fully control in the config, with BM25 length normalization (`length_norm_b`, `avg_jd_tokens`, `score_k1`) so a long, thorough job description isn't punished for its length and a keyword-stuffed one-liner can't win on brevity. **Each keyword counts once, however many times it appears**, so a posting can't buy rank by repeating "AI" forty times — there's no term-frequency component to inflate. The weights are yours and hand-set; there's no IDF either, so a keyword's value is what you say it is, not how rare it happens to be. Tuned for _recall_ by design (catch everything that might fit); the optional LLM re-rank below is the _precision_ layer.
-3. **De-duplicates** the same role across sources into one entry — and, just as importantly, _doesn't_ merge roles that only look alike. A level (`II` vs `III`), a trailing qualifier (`, Ads`, `(EU)`), or two different job ids on one board mean two openings, and each keeps its own apply link. String similarity alone used to decide this, which meant the outcome tracked how _long_ a title suffix was rather than what it said. It errs toward showing you both: a wrong merge deletes a job you wanted, a wrong split shows a row you can ignore.
-4. **Grows its own watchlist two ways** — _reactively_, when a job links to a company's ATS that company is auto-added; and _proactively_, `job-radar seed greenhouse` (also `lever`, `ashby`, `workable`, `smartrecruiters`, `workday`) does one Common Crawl pass to enumerate the companies hosting a public board on that ATS and bulk-adds them — up to `--max` per run (default 500). Add `--verify` to probe each board and keep only the live ones. A couple of `seed` runs build out a several-hundred-company watchlist.
-5. **Remembers.** One upserted `shortlist.csv` tracks `first_seen`, `status`, and every role's score. `apply`/`dismiss` are sticky — applied roles persist and stop resurfacing.
+Every adapter, whatever it was handed, emits the same dict:
 
-## Optional: LLM semantic fit-ranking
+| field                          | what it holds                                                    |
+| ------------------------------ | ---------------------------------------------------------------- |
+| `title` · `company` · `url`    | the role, the employer, the apply link (direct-to-employer first) |
+| `posted`                       | `YYYY-MM-DD`, or `""` — never a vendor's arbitrary string        |
+| `text`                         | the full description, HTML stripped and whitespace collapsed     |
+| `salary` · `employment_type`   | normalized range; full-time / contract, where the source says    |
+| `source`                       | which adapter produced this record                               |
+| **`function`**                 | the job family — "Healthcare & Nursing Jobs"                     |
+| **`org_unit`**                 | the company's own team — "Engineering - Pipeline"                |
+| **`employer_org`**             | the employing organisation. Never a category.                    |
+| **`city` · `state` · `country`** | structured geography, where the source sends it                |
+| **`remote`**                   | `True` / `False` / **`None`** — see below                        |
+| **`remote_basis`**             | how we decided: `source_field` · `location_rule` · `text`        |
+| **`tags`** · **`seniority`**   | skills list; the source's own level string, verbatim             |
+| `location`                     | the raw location string, kept alongside the parsed fields        |
+| `department`                   | **deprecated** — see below. Removed at 1.0.                      |
 
-Keyword scoring is fast and free but blind to _meaning_ — a perfect role that phrases things differently scores low. Add an API key and job-radar re-ranks the **top of your list** for semantic fit (0–100) with a one-line _why it fits / what's missing_ note:
+**`None` is not `False` and not `""`.** `remote: None` means the source did not say,
+which is a different fact from "this role is not remote". That distinction is the
+whole point of the contract — it is what lets a consumer write `WHERE remote IS NOT
+NULL` and mean it, instead of inheriting a guess. Every unknown is `None`.
 
-```yaml
-llm:
-  enabled: true
-  provider: anthropic # or an OpenAI-compatible endpoint
-  api_key_env: ANTHROPIC_API_KEY
-  rerank_top_n: 25
-```
+**Every derived value carries its basis.** `remote` is a real boolean on some sources
+(SmartRecruiters' `location.remote`, Ashby's `isRemote`, Lever's `workplaceType`) and
+inferred from prose on others. `remote_basis` says which, so a consumer that
+disagrees with the inference can override it rather than re-deriving everything.
 
-Off by default (the tool runs free with no key), cost-bounded to the top-N, one request per run.
+**`department` is deprecated because it was four different things.** It held an org
+unit on Greenhouse and Ashby, a job function on Adzuna (`IT Jobs`), a seniority level
+on Braintrust, and *the employer* on USAJOBS (`Department of Veterans Affairs`) — so
+a consumer pouring it into one column got a category dimension it could not filter
+on. It is still emitted byte-identically; use `function` / `org_unit` /
+`employer_org` / `seniority` instead.
 
-## Make it yours
+Type safety is enforced at one boundary rather than trusted from ~500 third parties: every field above is coerced to `str` inside `harvest` before anything reads it, because a JSON `null` arriving as `None` used to crash the whole harvest on the first `.lower()`.
 
-Everything is in one file — `job-radar.yaml`. Set your **target titles**, tune the **fit-weight keywords** (add your industry, your city), and adjust **filters** (`max_age_days`, `min_score`, remote-only, excluded locations). See `job-radar.example.yaml` for every knob.
+`posted` is validated, not passed through. Anything that isn't date-shaped becomes `""`, because eighteen adapters route third-party strings into that column and a blank date is safer than a vendor's ten arbitrary characters.
 
-**Or let AI write it for you (easiest).** Paste [`prompts/build-config-with-ai.md`](prompts/build-config-with-ai.md) into any AI assistant (Claude, ChatGPT). It interviews you about the job you want in plain English, then hands you a ready-to-save `job-radar.yaml` — no YAML editing required.
+The engine then adds `score`, `signals`, `sources` (the set of adapters that saw this role), and `dedup_key`.
 
-## Scope — tuned for remote/tech, generalizes to anyone
+## Three lanes, nineteen adapters
 
-Out of the box it's tuned for **remote software/AI** roles, because the shipped example config and the free/keyless sources are remote-tech boards. But nothing about the engine is tech-specific — you generalize it in three steps:
+**Depth — 8 adapters, keyless.** Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday, Rippling, Teamtailor. One request per company for six of them; Workday and Rippling additionally fetch one detail call per role, because neither returns a description on its list endpoint. These are the employer's own applicant-tracking system, so the record is canonical: the real apply URL, the full description, the accurate department. You see a role the hour it posts. Workday is the enterprise one — it reaches the manufacturers, insurers, hospitals, municipalities, and national labs that never appear on the startup boards.
 
-- **Any field:** change `signal_titles` + `fit_weights` in the config to your field's language (nursing, finance, trades…). No code.
-- **On-site / any location:** set `remote_only: false` and `location: "Your City, ST"`.
-- **Any field _and_ location, for real:** turn on the **general sources** — **Adzuna**, **USAJOBS**, and **Google for Jobs** (every field, any location, where the whole market lives). Adzuna and USAJOBS keys are free; Google for Jobs goes through SerpApi, whose free tier is 250 searches a month — each page of results is one search, so `GOOGLE_JOBS_PAGES` defaults to 1.
+**Breadth — 8 keyless adapters, whole-market.** Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Hacker News "Who is Hiring", Braintrust, The Muse. The Muse is the least tech-skewed source here — 11% tech titles when measured — which is why it is carried despite having no title search.
 
-Honest limits: the tool's _superpower_ — harvesting a role the hour it posts, direct from a company's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems; for other fields you lean on the general aggregators. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
+**Keyed search — 3 adapters, title and location queryable.** Adzuna, USAJOBS, and Google for Jobs via SerpApi. This is the only lane that can serve a per-request live fetch, and the only one that reaches every field and location rather than remote-tech. All three degrade to a printed notice and an empty list when their key is unset, so the tool always runs free.
+
+**Liveness — the cheap question.** Six of the eight depth adapters have a second, minimal variant that answers "does this board exist and have roles?" without downloading the board. It matters more than it sounds: answering that with the full adapter cost **210 requests** for a Workday tenant, against **1** for the liveness call, and roughly twenty times the bytes for a Greenhouse board (figures under Legal & etiquette). Callers never pick — `liveness_for(ats)` hands back the cheap variant where one exists and transparently falls back where it doesn't.
+
+## Building the company universe
+
+The depth lane's bottleneck was never fetching. It was **supply**: every per-company fetch needs a slug you already know.
+
+`job_radar.discover` solves that two ways, and both end at the same gate.
+
+**Mine.** Common Crawl has already crawled the web and published a queryable URL index, so every company hosting a public board is already in it as a `boards.greenhouse.io/{slug}` URL. One HTTP call per ATS enumerates them. We aren't crawling anyone — we query an index someone else built and published for this purpose.
+
+**Resolve a name.** For companies the index never saw, `from_names(["Cloudflare", "DoubleVerify"])` generates candidate slugs and tests them.
+
+**Then probe — and this is what makes bulk mining safe.** Every candidate is hit against its real ATS API and kept only if it returns at least one live role. A dead, churned, or misparsed slug returns nothing and costs one cheap request.
+
+**And where the ATS will say who owns a board, check identity too.** A probe proves `jobs.lever.co/capital` is a real board with real jobs. It does not prove it belongs to Capital One — it doesn't. Liveness and identity are different questions, and conflating them files a stranger's jobs under a real employer, invisibly. Greenhouse is the one ATS that answers the second question, so the riskiest slug guesses are generated only for it.
+
+`probe` reports _why_ each candidate failed, split into terminal (`refused`, `wrong-owner`, `unsupported`) and retryable (`throttled`, `missing`, `empty`, `error`). The split is load-bearing: 429 means slow down, not go away, and a caller that blacklists on it will discard hundreds of good employers in one bad run.
 
 ## Use it as a library
 
-The CLI is one caller; the engine underneath is importable, and it doesn't touch your disk. `harvest` takes your companies as **data** — either a `watchlist.json` path or a plain list — and _returns_ everything it produced, including the companies it discovered along the way. Persisting them is the caller's job (the CLI appends them to `watchlist.json`; an app might write them to its own database).
+The engine doesn't touch your disk. `harvest` takes companies as **data** and _returns_ everything it produced, including companies it discovered along the way — persisting them is the caller's job.
 
 ```python
 from job_radar import config, engine
@@ -71,22 +103,134 @@ rows, discovered, errors = engine.harvest(companies=[
 ])
 ```
 
-`job_radar.discover` builds the company universe in bulk: mine the Common Crawl index for every board on an ATS, or resolve a company **name** to its slug for employers the index never saw. Every candidate is proven by a live probe, and — where the ATS will tell us who owns a board — checked for **identity**, not just liveness. A probe proves `jobs.lever.co/capital` is a real board with real jobs; it does not prove it belongs to Capital One.
+That signature is deliberate. The engine used to append discovered companies straight into the caller's `watchlist.json`, which made a library function silently write a file it didn't own — and left a store-backed consumer with nowhere to put them. Whoever owns the universe decides.
 
-> Upgrading from 0.2.x: `job_radar.store` is now `job_radar.shortlist`.
+`errors` is a list, never an exception: one dead aggregator must not sink a harvest. Pass `--strict` on the CLI to make any source failure a nonzero exit instead.
+
+## The source catalog
+
+Every one of these APIs behaves in some way its documentation won't tell you. The Muse advertises 404,460 listings and hard-caps at page 99, so 2,000 is all you can reach. USAJOBS silently ignores a misspelled parameter, forever — your typo is a permanent no-op with no error. None of that is written down anywhere; all of it was found by probing.
+
+The mirror of that is worth stating too, because it's the more common failure: **most "the API is broken" findings turn out to be our own bug.** `where=remote` returns zero rows from Adzuna — not because Adzuna is wrong, but because `where` is a place hierarchy and "remote" isn't a place. That's a caller error, not an API defect — and it's live in this codebase right now, queued for the next release.
+
+`catalog/` is where both kinds of knowledge live — one profile per source, with machine-readable frontmatter covering auth, endpoint, query capabilities, measured limits, field paths, and **license as a contract**: the deciding clauses quoted rather than paraphrased, with a `read_at` date, because terms change silently and a summary drifts toward what the reader hoped it said.
+
+It's early — three profiles so far, and the rest queued in `catalog/INDEX.md` alongside every source that's been probed, whatever came of it. The schema and the probe procedure are the durable parts; the profiles accumulate.
+
+The rule that orders everything else: **probe the junk parameter first.** An API that 400s on `?zzz_not_real=1` validates its input, so every parameter that returns a count is real and your measurements are trustworthy. An API that silently ignores it will accept your typo forever and tell you nothing. That single boolean decides what every other number about that source is worth.
+
+## How much it retrieves
+
+Every source has a ceiling, and most of them are not obvious from the API's own
+documentation. job-radar pages to a **bounded, configurable** depth rather than an
+accidental one — the caps are visible knobs, not hidden in a URL.
+
+| source | per run | why it stops there |
+| --- | --- | --- |
+| depth boards | the whole board | one request each; SmartRecruiters pages at 100 |
+| himalayas | the fresh window | browse is date-ordered, so it pages until rows exceed `max_age_days` |
+| themuse | 20 categories x 5 pages | the vendor caps each slice at page 99; the slices are near-disjoint |
+| adzuna / usajobs | 3 pages/query | vendor page sizes of 50 and 500 |
+| google_jobs | 1 page/query | metered — SerpApi's free tier is 250 searches a **month** |
+| remotive / remoteok / jobicy | one request | that is the entire corpus |
+
+Tunable per source: `SMARTRECRUITERS_MAX_PAGES`, `HIMALAYAS_MAX_PAGES`,
+`HIMALAYAS_BROWSE_PAGES`, `THEMUSE_MAX_PAGES`, `WORKDAY_MAX_PAGES`, `HN_THREADS`, and
+`sources.usajobs.max_pages` / `sources.adzuna.pages` in the config.
+
+**Two adapters buy job descriptions one request at a time** — Workday and Rippling
+return no body on their list endpoint. Those are gated: the relevance filter runs
+against the titles the list already returned, so a harvest never pays for a
+description it is about to discard. Measured across ten enterprise employers, that is
+every role for roughly half the requests the previous truncated version cost.
+
+## Known limits of the record shape
+
+Stated plainly, because they're the difference between "normalized" and "actually comparable":
+
+- **Structured location is per-source, not universal.** Adzuna, USAJOBS, SmartRecruiters and Ashby send real `city`/`state`/`country` and those are now mapped. Greenhouse is free text with full state names and no `, XX`; Lever, RemoteOK, Remotive, HN and Braintrust are free text too. `location` always carries the raw string, so nothing is lost — but do not assume `state` is populated. One Greenhouse posting can also name several places at once, separated by `;`, and only the first is parsed.
+- **`department` still exists.** Deprecated, emitted byte-identically, removed at 1.0. It is the one contract field whose meaning varies by source; `function` / `org_unit` / `employer_org` / `seniority` are the replacements.
+- **SmartRecruiters returns no body** through its list endpoint, so `text` and `salary` are empty for that adapter.
+- **Workday truncates at 200 roles per employer** by default, silently, in Workday's own ordering rather than newest-first. Raise `WORKDAY_MAX_PAGES` to widen it.
+
+## Structured output for a database
+
+`shortlist.csv` is the human artifact. For a machine consumer, ask for NDJSON — one
+JSON object per line, streaming, appendable, and typed, so `remote: null` survives as
+null instead of collapsing into an empty CSV cell.
+
+```
+job-radar --format ndjson --all > jobs.ndjson
+```
+
+Rows go to **stdout**, the run manifest and progress to **stderr**, so the redirect
+above produces a clean file with no status lines to grep out. `--all` emits every
+tracked role rather than just the surfaced shortlist, which is usually what a store
+wants — it does its own filtering.
+
+```json
+{"id":"a3f9c21","dedup_key":"anthropic|ai engineer","title":"AI Engineer, Applied",
+ "company":"Anthropic","function":"Engineering","org_unit":"Applied AI",
+ "seniority":"Senior","tags":["python","llm"],
+ "location":{"raw":"San Francisco, CA","city":"San Francisco","state":"CA","country":"US"},
+ "remote":false,"remote_basis":"source_field","posted":"2026-08-01",
+ "url":"https://job-boards.greenhouse.io/anthropic/jobs/4020123","source":"greenhouse"}
+```
+
+Each run also emits **one manifest object to stderr** describing the run itself —
+row counts per source, which adapters failed, how many companies were discovered, and
+the filter config that produced it. A store fed only rows cannot answer "why did
+Tuesday have four hundred fewer jobs"; that information used to exist only as text
+printed to a terminal and then lost.
+
+## The job-search tool on top
+
+The CLI is one consumer of the engine, and a complete one.
+
+```
+job-radar                    # harvest, score, dedup, update the shortlist
+job-radar list               # show the current shortlist
+job-radar apply <id>         # mark a role applied (it stops resurfacing)
+job-radar dismiss <id>
+job-radar seed greenhouse    # bulk-add companies from Common Crawl
+job-radar --version
+```
+
+**Scoring** is a transparent weighted keyword model you fully control in `job-radar.yaml`, with BM25 length normalization so a long, thorough description isn't punished for its length. Each keyword counts **once** however many times it appears, so a posting can't buy rank by repeating "AI" forty times. Weights are yours and hand-set — there's no IDF, so a keyword is worth what you say it's worth. Tuned for recall by design.
+
+**De-duplication** merges the same role across sources into one entry, and — just as importantly — _doesn't_ merge roles that only look alike. A level (`II` vs `III`), a trailing qualifier (`, Ads`, `(EU)`), or two different job ids on one board mean two openings. The bias is deliberate: a wrong merge deletes a role you wanted and hides the evidence, while a wrong split shows a row you can ignore. When the marks disagree, it splits.
+
+**The store** is one upserted `shortlist.csv` tracking `first_seen`, `status`, and every score. `apply`/`dismiss` are sticky — those rows persist even after the role leaves the market, so your application history is never lost. Writes are atomic and lock-serialized on both POSIX and Windows.
+
+**Optional LLM re-ranking.** With an API key, the top of the list is re-scored for semantic fit (0–100) with a one-line why-it-fits note. Off by default, stdlib HTTP only, one request per run, bounded to `rerank_top_n`. It's a precision layer over what already cleared the bar, not a recall layer.
+
+## Configuration
+
+Everything is in one file — `job-radar.yaml`. Set your **target titles**, tune the **fit-weight keywords**, and adjust **filters** (`max_age_days`, `min_score`, remote-only, excluded locations). `job-radar init` writes a fully commented starter config into your folder with every knob on its default; that file is the reference (it ships at [`job_radar/data/job-radar.example.yaml`](job_radar/data/job-radar.example.yaml)).
+
+Out of the box the defaults are tuned for **remote software/AI** roles, because the keyless sources are remote-tech boards. Nothing about the engine is tech-specific: change `signal_titles` + `fit_weights` to your field's language, set `remote_only: false` and a real `location`, and turn on the keyed lane (Adzuna, USAJOBS, Google for Jobs) where the whole market lives.
+
+A config file found in the current directory is honored, but **not** its `llm.base_url` or `*_key_env` keys — those choose which host a request goes to and which secret rides along, which is enough to POST your `ANTHROPIC_API_KEY` to a stranger's server. Naming the file with `--config` is the opt-in.
 
 ## Legal & etiquette
 
-This is a **personal job-search tool**, not a data-resale product, and it's built to be a good citizen:
+This is a **personal job-search tool and a harvesting library**, not a data-resale product, and it's built to be a good citizen:
 
-- **Default sources are official, public, no-auth APIs**, used exactly as their vendors document them — Greenhouse, Lever, and Ashby publish these job-board endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter by default.
-- **It caps its own request volume.** Remotive is hard-capped at 4 calls per run (its documented limit), and the paged sources pause between requests. Not every adapter is throttled — the per-company ATS feeds are one request each, so the volume comes from the size of your watchlist rather than from hammering any single provider. It sends a self-identifying `User-Agent` so providers can see and contact the caller.
-- **It asks for the smallest thing that answers the question.** Checking whether a company's board exists costs **one** request, not a full download of every job on it — for a Workday employer that is 1 request instead of 210, and for a large Greenhouse board roughly 280 KB instead of 5.6 MB (measured 2026-07-31; the ~20x ratio is the durable part — the absolute sizes track whatever that board is doing today). Discovery is where a tool like this can be rude at scale, so that's where the restraint matters most.
-- **Attribution:** **RemoteOK** and **Remotive** require that, if you _republish_ their listings, you credit them and link back to the original job URL (job-radar keeps the direct source URL for exactly this). Honor their terms if you share `shortlist.csv` publicly.
-- **API keys** (Adzuna, USAJOBS, SerpApi, the LLM) are read from environment variables only and never logged or committed. Note that Adzuna's and SerpApi's keys travel in the request URL per their API designs.
-- **Google for Jobs is reached through SerpApi**, a commercial API that is licensed to query Google — job-radar does not scrape Google itself. It is off unless you set `SERPAPI_KEY`, and metered, so it stays a deliberate opt-in rather than a default cost.
+- **Default sources are official, public, no-auth APIs**, used as their vendors document them — Greenhouse, Lever, and Ashby publish these endpoints _for_ programmatic use. Consuming a public API is distinct from scraping behind a login, and job-radar does none of the latter.
+- **It caps its own request volume.** Remotive is hard-capped at 4 calls per run, and the paged sources pause between requests. Not every adapter is throttled — the per-company feeds are one request each, so volume tracks your watchlist size rather than hammering any provider. It sends a self-identifying `User-Agent`.
+- **It asks for the smallest thing that answers the question.** Checking whether a board exists costs one request, not a full download — for a Workday employer that's 1 instead of 210, and for a large Greenhouse board roughly 280 KB instead of 5.6 MB (measured 2026-07-31; the ~20x ratio is the durable part). Discovery is where a tool like this can be rude at scale, so that's where the restraint matters most.
+- **Attribution:** **RemoteOK** and **Remotive** require that if you _republish_ their listings you credit them and link back to the original job URL. Honor their terms if you share output publicly.
+- **API keys** are read from environment variables only and never logged or committed. Adzuna's and SerpApi's keys travel in the request URL per their API designs.
+- **Google for Jobs is reached through SerpApi**, a commercial SERP API — job-radar does not scrape Google itself. Know what that lane is, though: SerpApi scrapes Google's results, it is not licensed by Google, and Google sued it. In July 2026 a federal court dismissed Google's DMCA claims, holding that plain search results — URLs, snippets, index data — aren't works protected by copyright. The dismissal was partial: Google was given leave to amend the portion covering results that contain copyrighted content, and is doing so. The case is unresolved. It's off unless `SERPAPI_KEY` is set, and it's the one lane here whose legal footing is contested rather than merely constrained.
+- **The rights split matters more than the rate limits.** ATS boards are published by employers _so that_ they're aggregated. The keyed search APIs are commercially constrained. Violating a licence produces no 429 — nothing breaks, and you find out later. That's why `catalog/` records terms as quoted contract text.
 
-One honest exception to "used as documented": **Workday**. Its CxS endpoint is public and no-auth — it's the same one Workday's own hosted careers-site widget calls — but Workday doesn't publish third-party API documentation for it the way Greenhouse and Lever do. It's a public endpoint used as its own front end uses it, which is a weaker claim than the others on this list, and worth knowing before you point it at hundreds of employers.
+One honest exception to "used as documented": **Workday**. Its CxS endpoint is public and no-auth — the same one Workday's own careers-site widget calls — but Workday doesn't publish third-party API documentation for it the way Greenhouse and Lever do. It's a public endpoint used as its own front end uses it, which is a weaker claim than the others here, and worth knowing before you point it at hundreds of employers.
+
+## Honest limits
+
+The superpower — harvesting a role the hour it posts, direct from the employer's ATS — is strongest in tech, because Greenhouse/Lever/Ashby are tech-company systems. Other fields lean on the keyed lane. And the truly local, unposted, word-of-mouth job isn't in any structured feed, so no tool reaches it. Everything that _is_ posted online, this can find.
+
+> Upgrading from 0.2.x: `job_radar.store` is now `job_radar.shortlist`.
 
 ## License
 

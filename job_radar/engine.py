@@ -15,7 +15,13 @@ from . import config
 from .dedup import find_hit_key, norm
 from .funnel import funnel
 from .scoring import is_remote, relevant, score_and_signals
-from .sources import DEPTH_ALL, DEPTH_EXTRA_FIELDS, enabled_breadth, enabled_depth
+from .sources import (
+    DEPTH_ACCEPTS_KEEP,
+    DEPTH_ALL,
+    DEPTH_EXTRA_FIELDS,
+    enabled_breadth,
+    enabled_depth,
+)
 from .util import age_int
 
 # A valid ATS slug is the last path segment of a board URL — alphanumerics plus
@@ -68,11 +74,51 @@ _TEXT_FIELDS = (
 )
 
 
+# The keys added in 0.7.0, and their UNKNOWN value. `None` is the default on every
+# one of them, and that is the whole point of the contract: `None` means "the source
+# did not say", which is a different fact from `False` and from `""`. A consumer must
+# be able to write `WHERE remote IS NOT NULL` and mean it. Defaulting an unknown to a
+# plausible value is how a downstream store ends up asserting things nobody measured.
+#
+# Deliberately NOT in _TEXT_FIELDS: coercing these to `str` would turn None into the
+# string "None" and a list into its repr, which is exactly the stringly-typed arrival
+# the contract exists to prevent. They are typed:
+#   remote      bool | None
+#   tags        list[str] | None
+#   everything else  str | None
+_CONTRACT_FIELDS = (
+    "function",  # the JOB FAMILY ("Healthcare & Nursing Jobs")
+    "org_unit",  # the company's own team ("Engineering - Pipeline")
+    "employer_org",  # the employing organisation -- NEVER a category
+    "city",
+    "state",
+    "country",
+    "remote",  # bool | None
+    "remote_basis",  # "source_field" | "location_rule" | "text" | None
+    "tags",  # list[str] | None
+    "seniority",  # the source's own level string, verbatim
+)
+
+
 def _coerce(p: dict) -> dict:
+    """Enforce the record contract at the one boundary every posting crosses.
+
+    Two jobs, and they are opposites on purpose. The legacy text fields are FORCED to
+    `str` (a present-but-null title from any of ~500 third parties used to raise on the
+    first `.lower()` and kill an entire harvest). The 0.7.0 contract fields are merely
+    ENSURED PRESENT, defaulting to None, and are never coerced -- their types carry
+    meaning that `str()` would destroy.
+    """
     for k in _TEXT_FIELDS:
         v = p.get(k)
         if not isinstance(v, str):
             p[k] = "" if v is None else str(v)
+    for k in _CONTRACT_FIELDS:
+        p.setdefault(k, None)
+    # A source that sends a single tag as a bare string still satisfies "list[str] |
+    # None" downstream if we normalize here rather than making every consumer guess.
+    if isinstance(p.get("tags"), str):
+        p["tags"] = [p["tags"]] if p["tags"] else None
     return p
 
 
@@ -215,6 +261,13 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
             if not val or not _SLUG_RE.match(str(val)):
                 return (c, None, f"{name} ({ats}): missing/invalid {field}={val!r}")
             extra[field] = val
+        # Hand the relevance gate DOWN to the adapters that buy bodies one request at
+        # a time (workday, rippling). They apply it to the list titles before the
+        # detail pass, so the harvest stops paying for descriptions it is about to
+        # discard here in _consume moments later. Same predicate, same result set,
+        # roughly half the requests -- see fetch_workday's docstring for the numbers.
+        if ats in DEPTH_ACCEPTS_KEEP:
+            extra["keep"] = lambda t: relevant(t, cfg)
         try:
             return (c, fetch(slug, **extra), None)
         except urllib.error.HTTPError as e:

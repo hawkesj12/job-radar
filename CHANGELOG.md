@@ -6,7 +6,188 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A structured record contract — ten new keys, every unknown `None`.** `function`
+  (the job family), `org_unit` (the company's own team), `employer_org` (the
+  employing organisation), `city` / `state` / `country`, `remote` + `remote_basis`,
+  `tags`, and `seniority`. Sources that already sent this data were discarding it:
+  SmartRecruiters alone carries a real job function, org unit, seniority string,
+  structured geography and a remote **boolean** on every posting, and the adapter
+  used none of it.
+
+  Two rules make this a contract rather than a rename. **`None` is not `False` and
+  not `""`** — it means the source did not say, so a consumer can write
+  `WHERE remote IS NOT NULL` instead of inheriting a guess. And **every derived value
+  carries its basis**: `remote_basis` records whether remoteness came from a source
+  field, a location rule, or the description, so a consumer that disagrees can
+  override it rather than re-deriving everything.
+
+- **`--format ndjson`** — the machine-facing output. One JSON object per line to
+  stdout, the run manifest and progress to stderr, so `job-radar --format ndjson
+  --all > jobs.ndjson` produces a clean file. CSV cannot represent a list, a boolean,
+  or the difference between "unknown" and "empty", which is exactly what the contract
+  above turns on.
+
+- **A run manifest**, one object per harvest: row counts per source, which adapters
+  failed, companies discovered, and the filter config that produced the run. A store
+  fed only rows cannot answer "why did Tuesday have four hundred fewer jobs".
+
+- **Three new adapters, each rights-checked before a line was written** (`catalog/`):
+  - **Rippling** (depth, keyless). List endpoint returns five fields and no body or
+    date; `RIPPLING_FETCH_DETAILS=1` (the default) fetches one detail call per role to
+    fill `text`, `posted`, `employment_type` and the full multi-location list — the same
+    trade Workday makes, and for the same reason. `live_rippling` answers liveness from
+    the list alone: **1 request instead of 749** on Rippling's own 748-role board.
+  - **Teamtailor** (depth, keyless). One request; the JSON Feed carries body and date,
+    and its `_jobposting` schema.org block supplies location and employment type.
+    Deliberately has **no** `live_*` variant — the feed is a single document, so a
+    liveness call and a full fetch are the same request, and `liveness_for()` falls back
+    to counting a full fetch (as it already does for Ashby).
+  - **The Muse** (breadth, keyless). The least tech-skewed source in the catalog — 11%
+    tech titles measured — carried for the non-tech coverage nothing else provides. It
+    has **no title search**, verified across nine parameter names, so `queries` is
+    accepted for signature parity and never reaches the URL. Bounded by
+    `THEMUSE_MAX_PAGES` (default 5) and hard-stopped at the vendor's page-99 cap.
+
+### Changed
+
+- **Workday and Rippling no longer buy job descriptions they are about to discard.**
+  Both fetch one detail request per role for the body, and the relevance gate ran
+  afterwards — so a harvest paid for the full description of every role it rejected on
+  the title alone. The gate now runs first, inside the adapter, against titles the list
+  endpoint already returned. Measured across the ten shipped Workday employers:
+
+  | | requests | roles |
+  | --- | ---: | ---: |
+  | before (cap 200, bodies for all) | 1,663 | 1,583 of 6,922 |
+  | after (bodies after the gate) | **903** | **6,922** |
+
+  Every role, for roughly half the requests the truncated version cost. `keep=None`
+  preserves the old behaviour for a direct caller. Because of it, `WORKDAY_MAX_PAGES`
+  rises from 10 to 25 (200 → 500 roles/employer): the cap was standing in for a request
+  budget, and the gate is now what bounds the cost.
+
+### Deprecated
+
+- **`department`.** It carried four different things depending on the source — an org
+  unit on Greenhouse and Ashby, a job function on Adzuna, a seniority level on
+  Braintrust, and the **employer** on USAJOBS — so a consumer pouring it into one
+  column got a category dimension it could not filter on. Still emitted
+  byte-identically, and a test pins that. Use `function` / `org_unit` /
+  `employer_org` / `seniority`. Removed at 1.0.
+
+### Removed
+
+- **The TechTree adapter (`search_techtree`)**, and its entry in `BREADTH_ALL`, the shipped
+  example config, the live canary's whole-board list, and its parser test. Removed for two
+  measured reasons rather than a judgement call: the feed carries **personal data** — every
+  row's `delivery_owner` names an individual — and **60 of 76 postings are anonymised**, with
+  `company_name` reading "TechTree's client", which collapses unrelated employers in any
+  dedup keyed on company. It was also the stalest breadth source measured (45-day median,
+  74% inside 100 days) and not a remote board (24 of 76 remote). Its terms additionally read
+  as prohibiting this use; that reading is contested and is recorded in full, both sides, in
+  `catalog/techtree.md`. Breadth stays at **8** keyless adapters — TechTree out, The Muse
+  in, in the same release; the record shape,
+  scoring, dedup and every other adapter are untouched.
+
+- **The repo-root copies of `job-radar.example.yaml` and `watchlist.example.json`.**
+  Each example file existed twice — once at the root, once under `job_radar/data/` —
+  and only the packaged copy is what the wheel ships and `job-radar init` writes. The
+  two had already drifted once (a 2026-07-18 fix corrected the packaged watchlist and
+  left the root one pointing at five boards that now 404), and the guard against that
+  was a test pinning them byte-equal. Deleting the second copy removes the failure
+  mode instead of policing it. **Nothing a user receives changed**: `init` read the
+  packaged copy before and reads it now.
+- **`prompts/build-config-with-ai.md`**, the paste-into-an-AI config interview, and
+  the README paragraph advertising it. It carried a third copy of the adapter lists,
+  which drifted 19 days behind and handed people a config with `workday`,
+  `google_jobs` and `usajobs` silently switched off — the same bug 0.5.0 fixed in the
+  shipped example. A doc that generates config is config, and this one had no reason
+  to be a separate copy of it.
+- `_resolve_config` no longer probes `./job-radar.example.yaml` as a fallback
+  candidate. It existed for running from a clone with the root copy present; with
+  that copy gone it could only match a file the user placed there. The generic
+  defaults it falls through to are the same configuration the example encodes.
+
+### Fixed
+
+- **SmartRecruiters returned 100 rows of every board, however large.** The API clamps
+  `limit` at 100 and says nothing — `?limit=200` returns 100 rows and echoes
+  `limit: 100` — and the adapter made a single call. Measured on a real board
+  (`boschgroup`): **100 of 4,716 postings, 97.9% dropped**, silently, on every run.
+  The module already knew the true number: `live_smartrecruiters` reads `totalFound`
+  and feeds discovery's role-count sort while the fetch returned 100 — two functions
+  in one file disagreeing by 46x. Now pages with `&offset=`, bounded by
+  `SMARTRECRUITERS_MAX_PAGES` (default 10 = 1,000 roles/company).
+
+- **The Muse fetched 100 rows out of ~36,060.** The unfiltered feed hard-caps at page
+  99 = 2,000 rows, and the cap applies **per category slice** — so the 20-category
+  fan-out is the only way past it, and it was never implemented. What blocked it was a
+  wrong entry in our own catalog claiming category filtering was unreliable;
+  re-measured, `category=Healthcare` returns 20/20 Healthcare rows with zero overlap
+  against the unfiltered page. The trap is corrected in `catalog/themuse.md`. The Muse
+  also now emits `seniority` from its `levels` field.
+
+- **Himalayas was paged on the wrong endpoint.** This source has two, with different
+  pagination: `/jobs/api/search` takes `page` and walls at ~8,020 rows;
+  `/jobs/api` takes `offset` and walks the whole corpus (**96,934** measured). Sending
+  `offset` to the search endpoint is silently ignored and returns page 1 forever. A
+  browse lane is added alongside the search lane (`q` does nothing on browse, so it
+  cannot replace it). Because browse is **date-ordered** — measured offset 0 → median
+  age 0 days, 20,000 → 8 days, 60,000 → 28 days — the age gate is the budget: it pages
+  until rows exceed `max_age_days` rather than guessing a page count.
+
+- **USAJOBS never sent `&Page=`.** One request per keyword, so anything over one page
+  was truncated — `SearchResultCountAll` reports the true total and nothing read it.
+  Measured in `catalog/usajobs.md`: "medical assistant" 736 and "registered nurse" 620
+  against a 500-row page, i.e. 236 and 120 postings lost invisibly. Now pages, bounded
+  by `sources.usajobs.max_pages` (default 3), with the politeness pause applied between
+  pages as well as between queries.
+
+- **Hacker News read one thread.** On the 1st of a month that thread is nearly empty
+  and the entire prior month vanished. The Algolia search already returns four, so
+  reading the two newest costs one request: measured 2026-08-04, 138 rows became 383.
+
+- **Adzuna returned ZERO rows whenever the configured location was "remote".**
+  `where` resolves against a place hierarchy, so the word was being sent as a town
+  name — and zero rows is indistinguishable from "no such jobs" behind the adapter's
+  error handling. Measured on `what="AI Engineer"`, US: `where=remote` → 0;
+  `where=""` → 55,052 at **2%** actually remote; `what_and=remote` → 15,500 at
+  **84%**. Blanking `where` was the tempting wrong fix; the remote keyword filter is
+  the right one. Real places are unaffected and compose with it.
+
+- **The Adzuna radius guard tested the wrong thing.** It checked
+  `location != "remote"` on its own, so "anywhere" slipped through and a `distance`
+  was sent with no place to anchor it. Both branches now share one predicate.
+
+- **Adzuna nationwide postings are recognised as remote.** `location.area == ["US"]`
+  exactly means nationwide, and the adapter kept only `display_name` — which for
+  those rows is the bare string `"US"`, invisible to any text rule. `area[1]` is also
+  a real US state in 246 of 246 rows sampled, and was being thrown away.
+
+- **Google for Jobs named a remote filter and never applied it.** The adapter's own
+  comment said Google treats "remote" as a filter rather than a place, then dropped
+  the word and set nothing — so a remote search silently ran unfiltered and
+  nationwide. It now sets SerpApi's documented `ltype=1` work-from-home filter.
+
+- **The remote gate ignored every structured remote signal.** `is_remote` re-derived
+  remoteness from prose even when the source stated it outright. A structured flag now
+  wins, and `None` still falls through to the text rule — unknown is not `False`.
+  Without this the mapped `remote` field would have been decorative.
+
+- **Remotive was called four times per run, identically.** Every parameter on that
+  endpoint is ignored, so `?search={query}` filtered nothing and the four calls were
+  four copies of one request. Remotive's own notice advises a maximum of **four
+  requests per day**; four per run is 96 on an hourly schedule. Now one unfiltered
+  request, which returns the whole 31-row corpus anyway.
+
+- **Himalayas was under-fetched by roughly 60x.** The adapter sent `limit=20` and no
+  page parameter, taking 20 rows per query out of a measured 8,020 reachable. The
+  trap: this source has two endpoints with different pagination models — `/jobs/api`
+  takes `offset`, `/jobs/api/search` takes `page`, and sending `offset` to the search
+  endpoint is silently ignored and returns page 1 forever. Now pages properly,
+  bounded by `HIMALAYAS_MAX_PAGES` (default 10 = 200 rows/query).
 
 ## [0.6.0] - 2026-07-31
 
@@ -75,7 +256,7 @@ and how much memory it uses.
   most once, so there is no term frequency to saturate — repeating a keyword can
   never raise a score (measured 26 / 26 / 25 / 22 at 1x / 5x / 50x / 500x, falling
   only because repetition lengthens the document). `score_k1` is real but it is a
-  *gain* on length normalization. Counting each keyword once is a deliberate
+  _gain_ on length normalization. Counting each keyword once is a deliberate
   anti-keyword-stuffing choice and is unchanged; only the description of it was
   false. This also corrects the 0.5.2 entry below, which claimed the BM25 label was
   "true for the first time" — the length-normalization half was, the

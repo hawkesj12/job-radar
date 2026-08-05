@@ -5,7 +5,7 @@ DEPTH  -- per-company ATS feeds (Greenhouse/Lever/Ashby/SmartRecruiters/Workable
           no-auth JSON endpoints.
 BREADTH -- keyword aggregators + whole-board feeds searched across the whole
           market (Remotive/USAJOBS/Jobicy/Arbeitnow/RemoteOK/Himalayas/Adzuna/
-          Google for Jobs/HN/Braintrust/TechTree). All official public APIs.
+          Google for Jobs/HN/Braintrust). All official public APIs.
 
 Every source is a documented public API -- no scraping. (Scraper sources are an
 opt-in extra, off by default; see the README.)
@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from . import config
 from .util import (
     NET_ERRORS,
+    age_int,
     clean,
     get_json,
     post_json,
@@ -56,12 +57,30 @@ def fetch_greenhouse(slug: str):
                 "url": j.get("absolute_url", ""),
                 "posted": to_date(j.get("updated_at") or j.get("first_published")),
                 "department": depts[0].get("name", "") if depts else "",
+                "org_unit": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
             }
         )
     return out
+
+
+def _lever_remote(workplace_type) -> dict:
+    """Lever `categories`/`workplaceType` -> {remote, remote_basis}.
+
+    Lever states the work arrangement outright ("remote" / "hybrid" / "on-site"), so
+    there is no need to infer it from prose. An unrecognised or absent value stays
+    None -- unknown, not False -- and falls through to the text rule in the gate.
+    """
+    v = (workplace_type or "").strip().lower()
+    if not v:
+        return {"remote": None, "remote_basis": None}
+    if v in ("remote", "fully remote", "remote-first"):
+        return {"remote": True, "remote_basis": "source_field"}
+    if v in ("on-site", "onsite", "hybrid", "in-office"):
+        return {"remote": False, "remote_basis": "source_field"}
+    return {"remote": None, "remote_basis": None}
 
 
 def fetch_lever(slug: str):
@@ -84,12 +103,30 @@ def fetch_lever(slug: str):
                 "url": j.get("hostedUrl", ""),
                 "posted": to_date(j.get("createdAt")),
                 "department": cats.get("team") or cats.get("department", ""),
+                "org_unit": cats.get("team") or cats.get("department") or None,
+                # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
+                # that this adapter never read -- remoteness was being re-derived from
+                # the description while the source stated it outright.
+                **_lever_remote(j.get("workplaceType")),
                 "employment_type": cats.get("commitment", ""),
                 "salary": salary,
                 "text": text,
             }
         )
     return out
+
+
+def _ashby_place(address) -> dict:
+    """Ashby `address.postalAddress` -> {city, state, country}. schema.org shape:
+    addressLocality / addressRegion / addressCountry."""
+    pa = (address or {}).get("postalAddress") if isinstance(address, dict) else None
+    if not isinstance(pa, dict):
+        return {"city": None, "state": None, "country": None}
+    return {
+        "city": pa.get("addressLocality") or None,
+        "state": pa.get("addressRegion") or None,
+        "country": pa.get("addressCountry") or None,
+    }
 
 
 def fetch_ashby(slug: str):
@@ -117,6 +154,13 @@ def fetch_ashby(slug: str):
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
                 "department": j.get("department", "") or j.get("team", ""),
+                "org_unit": j.get("department") or j.get("team") or None,
+                # `isRemote` is a real boolean on every Ashby posting. Structured
+                # geography lives at address.postalAddress -- present in 657 of 737
+                # measured, and never read until now.
+                "remote": bool(j["isRemote"]) if "isRemote" in j else None,
+                "remote_basis": "source_field" if "isRemote" in j else None,
+                **_ashby_place(j.get("address")),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
                 "text": text,
@@ -125,12 +169,56 @@ def fetch_ashby(slug: str):
     return out
 
 
+# SmartRecruiters pages at 100 and CLAMPS SILENTLY. Measured 2026-08-04 on
+# `boschgroup`: `?limit=200` returns 100 rows AND echoes `limit: 100` in the response
+# -- no error, no warning. So the single `?limit=100` call this adapter used to make
+# was taking 100 of 4,716 rows and reporting success: **97.9% of that board, gone.**
+#
+# The sharpest part is that the module already knew. `live_smartrecruiters` below
+# returns `totalFound` (4,716) and that number feeds discovery's `-roles` sort, while
+# this fetch returned 100. Two functions in one file, disagreeing by 46x. The LIVENESS
+# comment even warns that "a capped or estimated number would silently reorder the
+# review queue" -- the concern was applied to liveness and never to the fetch.
+#
+# `offset` paging works and has no depth ceiling (verified to offset=4700 -> 16 rows).
+# Capped rather than exhaustive: Bosch alone would be 48 requests, and this runs
+# per-company across a watchlist. 10 pages = 1,000 roles/company, a 10x improvement
+# that stays bounded. Raise SMARTRECRUITERS_MAX_PAGES to widen it.
+SMARTRECRUITERS_MAX_PAGES = int(os.environ.get("SMARTRECRUITERS_MAX_PAGES", "10"))
+SMARTRECRUITERS_PAGE = 100  # the API's max; larger values are silently clamped
+
+
 def fetch_smartrecruiters(slug: str):
-    data = get_json(
-        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100"
-    )
-    out = []
-    for j in data.get("content", []):
+    out: list[dict] = []
+    for page in range(SMARTRECRUITERS_MAX_PAGES):
+        offset = page * SMARTRECRUITERS_PAGE
+        try:
+            data = get_json(
+                f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+                f"?limit={SMARTRECRUITERS_PAGE}&offset={offset}"
+            )
+        except NET_ERRORS:
+            # Page 1 is different: with nothing collected there is no partial result
+            # to salvage, and swallowing it would report a live board as empty. Same
+            # discipline as fetch_workday's mid-walk guard.
+            if not out:
+                raise
+            break
+        content = data.get("content", [])
+        _smartrecruiters_rows(slug, content, out)
+        if len(content) < SMARTRECRUITERS_PAGE:
+            break  # short page -> the tail of the board
+        total = data.get("totalFound")
+        if isinstance(total, int) and offset + SMARTRECRUITERS_PAGE >= total:
+            break  # the API told us where the end is; believe it
+        time.sleep(0.2)  # be polite between pages of one board
+    return out
+
+
+def _smartrecruiters_rows(slug: str, content, out) -> None:
+    """Map one page of SmartRecruiters postings into `out` (split out so the paging
+    loop above reads as paging rather than as parsing)."""
+    for j in content:
         loc = j.get("location") or {}
         parts = [loc.get("city", ""), loc.get("region", ""), loc.get("country", "")]
         loctext = ", ".join(p for p in parts if p)
@@ -143,12 +231,24 @@ def fetch_smartrecruiters(slug: str):
                 "url": f"https://jobs.smartrecruiters.com/{slug}/{j.get('id', '')}",
                 "posted": to_date(j.get("releasedDate") or j.get("createdOn")),
                 "department": (j.get("department") or {}).get("label", ""),
+                # The most structured source in the set, and the adapter used almost
+                # none of it: a real job family, a real org unit, a real seniority
+                # string, fully structured geography, and an actual remote BOOLEAN --
+                # all present on every posting, all previously collapsed into one
+                # location string and one `department`.
+                "function": (j.get("function") or {}).get("label") or None,
+                "org_unit": (j.get("department") or {}).get("label") or None,
+                "seniority": (j.get("experienceLevel") or {}).get("label") or None,
+                "city": loc.get("city") or None,
+                "state": loc.get("region") or None,
+                "country": loc.get("country") or None,
+                "remote": bool(loc["remote"]) if "remote" in loc else None,
+                "remote_basis": "source_field" if "remote" in loc else None,
                 "employment_type": (j.get("typeOfEmployment") or {}).get("label", ""),
                 "salary": "",
                 "text": "",
             }
         )
-    return out
 
 
 def fetch_workable(slug: str):
@@ -193,7 +293,14 @@ def fetch_workable(slug: str):
 # is TRUNCATED, not flagged. NVIDIA reports total=2000 and returns 200 here.
 # Ordering is Workday's own (not newest-first), so the 200 you keep are not
 # necessarily the 200 you want. Raise WORKDAY_MAX_PAGES to widen it.
-WORKDAY_MAX_PAGES = int(os.environ.get("WORKDAY_MAX_PAGES", "10"))
+# Raised from 10 to 25 (200 -> 500 roles/employer) ONLY because the detail pass is
+# now gated (see fetch_workday's `keep`). The cap was never really a coverage
+# decision -- it was standing in for a request budget, because every listed role cost
+# a body whether or not it was wanted. With the gate in front, list pages are cheap
+# and the budget is the gate, so the cap can move toward what the employer actually
+# has. Accenture reports total=2000; at 25 pages we see 500 of them and pay for
+# bodies only on the handful that pass the title filter.
+WORKDAY_MAX_PAGES = int(os.environ.get("WORKDAY_MAX_PAGES", "25"))
 WORKDAY_PAGE = 20
 # Workday's LIST endpoint returns no description at all — those live on a per-job
 # detail call, so bodies cost one request per role instead of one per twenty. Fetch
@@ -229,6 +336,45 @@ def _relative_posted(text: str) -> str:
     n, unit = int(m.group(1)), m.group(2).lower()
     days = n * {"day": 1, "week": 7, "month": 30}[unit]
     return (datetime.now(_ET) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+# ── "is this a remote search, or a place search?" ───────────────────────────
+# ONE predicate, three callers (adzuna x2, google_jobs). Every keyed search API
+# here distinguishes a PLACE from the WORK ARRANGEMENT, and every one of them
+# fails silently when you confuse the two: Adzuna resolves `where` against a place
+# hierarchy and returns 0 rows for "remote"; Google treats it as a filter and
+# ignores it as a location. Both look like "no such jobs" from the caller's side.
+#
+# This lived as a literal tuple inside search_google_jobs while search_adzuna had
+# no equivalent at all, which is exactly how the two drifted.
+_NON_PLACE = ("", "remote", "anywhere", "any")
+
+
+def _is_remote_query(cfg) -> bool:
+    """True when the configured location names a work ARRANGEMENT, not a place."""
+    return cfg.location.strip().lower() in _NON_PLACE
+
+
+# Himalayas paging. The adapter sent `limit=20` and no page parameter at all, so it
+# took the first 20 rows per query out of a measured 8,020 reachable (401 pages x 20)
+# -- an under-fetch of roughly 60x on the largest keyless breadth source in the set.
+#
+# The trap that made this easy to miss, from catalog/himalayas.md: this source has TWO
+# endpoints with DIFFERENT pagination models. `/jobs/api` (browse) takes `offset`;
+# `/jobs/api/search` takes `page`. Sending `offset` to the search endpoint is silently
+# ignored and you get page 1 forever -- which is what the catalog's own first probe
+# did, so `max_page` was briefly recorded as unknown for that reason rather than a
+# measured ceiling.
+#
+# Capped rather than exhaustive: 401 pages x N title queries is a lot of requests for
+# a board whose rows the relevance gate will mostly drop. 10 pages = 200 rows/query,
+# a 10x improvement that stays polite. Raise HIMALAYAS_MAX_PAGES to widen it.
+HIMALAYAS_MAX_PAGES = int(os.environ.get("HIMALAYAS_MAX_PAGES", "10"))
+HIMALAYAS_PAGE = 20  # the API's own page size on this endpoint
+# The browse lane's hard backstop. Not the real budget -- freshness is (see
+# _himalayas_browse) -- but a date-parsing failure must not turn a 96,000-row corpus
+# into an unbounded walk. 50 pages = 1,000 rows.
+HIMALAYAS_BROWSE_PAGES = int(os.environ.get("HIMALAYAS_BROWSE_PAGES", "50"))
 
 
 # ── GOOGLE FOR JOBS (SerpApi) helpers ───────────────────────────────────────
@@ -314,10 +460,13 @@ def search_google_jobs(queries):
             "  google_jobs: no SERPAPI_KEY set -- skipped (the free sources still run)"
         )
         return []
-    # Google for Jobs treats 'remote' as a filter, not a place; pass a real location
-    # through and drop the non-place words (mirrors jobfitr's live-path handling).
-    loc = cfg.location.strip()
-    where = "" if loc.lower() in ("", "remote", "anywhere", "any") else loc
+    # Google for Jobs treats 'remote' as a FILTER, not a place. This dropped the word
+    # and then set no filter at all, so a remote search silently became an unfiltered
+    # nationwide one -- and because it still returned rows, nothing looked broken.
+    # `ltype=1` is SerpApi's documented work-from-home filter; it is the other half of
+    # the sentence the comment here has always started.
+    remote_query = _is_remote_query(cfg)
+    where = "" if remote_query else cfg.location.strip()
     pages = max(1, getattr(cfg, "google_jobs_pages", 1))
     out = []
     for qy in queries:
@@ -329,6 +478,8 @@ def search_google_jobs(queries):
             )
             if where:
                 url += f"&location={q(where)}"
+            else:
+                url += "&ltype=1"  # work-from-home filter (SerpApi, documented)
             if token:
                 url += f"&next_page_token={q(token)}"
             try:
@@ -366,7 +517,7 @@ def search_google_jobs(queries):
     return out
 
 
-def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
+def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
     """Workday CxS job feed. Unlike every other ATS here, Workday needs a THREE-part
     key: tenant (`slug`), the numbered host shard (`wd1`..`wd103`), and the site slug
     — `nvidia`+`wd5`+`NVIDIAExternalCareerSite`. The site slug is unguessable, which
@@ -375,14 +526,29 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
     Reaches the enterprise/government/healthcare employers the startup ATSs never
     see.
 
-    Descriptions ARE fetched, by default. They do not exist on the list endpoint,
-    so each role costs one additional detail request (WORKDAY_FETCH_DETAILS=0 turns
-    that off). Budget one request per role, not per page: a 200-role employer is
-    ~10 list calls + ~200 detail calls. The rationale for paying that is at
-    WORKDAY_FETCH_DETAILS above -- a body-less job is unrankable and unreadable.
+    Descriptions ARE fetched, by default. They do not exist on the list endpoint, so
+    each role costs one additional detail request (WORKDAY_FETCH_DETAILS=0 turns that
+    off) -- and that detail pass is the single most expensive thing in a harvest.
 
-    Returns at most WORKDAY_MAX_PAGES x WORKDAY_PAGE (default 200) roles, silently
-    truncated -- see the cap comment above.
+    `keep(title) -> bool` is what makes the cost sane. The list endpoint returns the
+    title; the caller's relevance gate reads only the title; so the gate can run
+    BEFORE the bodies are bought instead of after. The engine passes
+    `scoring.relevant` (see engine._fetch_company). Measured across the ten shipped
+    Workday employers:
+
+        cap 200, bodies for all      1,663 requests -> 1,583 roles (23% of 6,922)
+        uncapped, bodies for all     7,272 requests -> 6,922 roles
+        uncapped, bodies after keep    903 requests -> 6,922 roles
+
+    i.e. every role, for roughly half the requests the truncated version costs today.
+    That is why the page cap could be raised: the cap was standing in for a request
+    budget, and `keep` is the thing that actually bounds it.
+
+    `keep=None` preserves the old behaviour exactly (fetch every body), so a direct
+    caller that does not filter is unaffected.
+
+    Returns at most WORKDAY_MAX_PAGES x WORKDAY_PAGE roles, silently truncated -- see
+    the cap comment above.
     """
     base = f"https://{slug}.{host}.myworkdayjobs.com/wday/cxs/{slug}/{site}"
     out: list[dict] = []
@@ -451,6 +617,12 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = ""):
         if len(postings) < WORKDAY_PAGE or offset >= total:
             break
 
+    # THE GATE RUNS BEFORE THE BODIES ARE BOUGHT. Filtering here rather than in the
+    # engine is not a layering violation -- `keep` reads the title, and the title is
+    # already in hand from the list endpoint. Everything this drops would have been
+    # dropped by engine._consume moments later, after paying a request for it.
+    if keep is not None:
+        out = [r for r in out if keep(r.get("title", ""))]
     if WORKDAY_FETCH_DETAILS and out:
         _workday_add_details(base, out)
     for r in out:
@@ -529,6 +701,143 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
     list(_detail_pool().map(_one, rows))
 
 
+# Rippling's LIST endpoint returns five fields and no body or date -- those live on a
+# per-job detail call, exactly like Workday. Same reasoning applies (a body-less job is
+# unrankable and unreadable), so details are ON by default and this is the expensive
+# half: Rippling's own board is 748 roles, i.e. 1 list + 748 detail requests. Set
+# RIPPLING_FETCH_DETAILS=0 for a tight harvest window. Discovery never pays it --
+# live_rippling below answers "is this board real" from the list alone.
+RIPPLING_FETCH_DETAILS = os.environ.get("RIPPLING_FETCH_DETAILS", "1") not in (
+    "0",
+    "false",
+    "no",
+)
+RIPPLING_API = "https://api.rippling.com/platform/api/ats/v1/board"
+
+
+def _rippling_detail(slug: str, row: dict) -> None:
+    """Fill one row from the detail endpoint. Best-effort: a failure leaves the row
+    with its list fields rather than sinking the whole board."""
+    try:
+        d = get_json(f"{RIPPLING_API}/{slug}/jobs/{row['_uuid']}")
+    except NET_ERRORS:
+        return
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(d, dict):
+        # The list endpoint returns an array and the detail endpoint an object. A
+        # vendor that ever serves the wrong one here must cost this row its body,
+        # not sink the whole board with an AttributeError -- the same reasoning as
+        # engine._coerce, applied one layer earlier.
+        return
+    desc = d.get("description")
+    if isinstance(desc, dict):
+        # Two HTML blocks: `company` is boilerplate repeated across every role,
+        # `role` is the actual posting. Order matters -- role first, so a truncated
+        # body keeps the part that describes the job.
+        row["text"] = clean(
+            " ".join(x for x in (desc.get("role"), desc.get("company")) if x)
+        )
+    elif isinstance(desc, str):
+        row["text"] = clean(desc)
+    row["posted"] = to_date(d.get("createdOn")) or row["posted"]
+    et = d.get("employmentType")
+    if isinstance(et, dict):
+        # INVERTED, and not a typo: `id` holds the human string ("Salaried,
+        # full-time") while `label` holds the code ("SALARIED_FT"). The list
+        # endpoint's `department` uses the opposite convention.
+        row["employment_type"] = et.get("id") or et.get("label") or ""
+    locs = d.get("workLocations")
+    if isinstance(locs, list) and locs:
+        # One posting can list several places; the list endpoint shows only one.
+        row["location"] = "; ".join(str(x) for x in locs if x)
+    row["salary"] = salary_from_text(row["text"])
+
+
+def fetch_rippling(slug: str, keep=None):
+    """Rippling ATS board -- keyless JSON array, one request for the whole board.
+
+    Bodies and dates are NOT on the list endpoint; see RIPPLING_FETCH_DETAILS above
+    for what fetching them costs. Rippling's own board is 739 roles, so a full fetch
+    is 740 requests and 739 of them are bodies.
+
+    `keep(title) -> bool` runs BEFORE the detail pass, for the same reason it does in
+    fetch_workday: the list endpoint already carries the title, and the relevance gate
+    reads nothing else. `keep=None` fetches every body, as before.
+    """
+    rows = get_json(f"{RIPPLING_API}/{slug}/jobs")
+    out = []
+    for j in rows if isinstance(rows, list) else []:
+        dept = j.get("department") or {}
+        loc = j.get("workLocation") or {}
+        out.append(
+            {
+                "_uuid": j.get("uuid", ""),
+                "title": j.get("name", ""),
+                "location": loc.get("label", "") if isinstance(loc, dict) else "",
+                "url": j.get("url", ""),
+                "posted": "",
+                "department": dept.get("label", "") if isinstance(dept, dict) else "",
+                "employment_type": "",
+                "salary": "",
+                "text": "",
+            }
+        )
+    if keep is not None:  # gate before the bodies — see the docstring
+        out = [r for r in out if keep(r.get("title", ""))]
+    if RIPPLING_FETCH_DETAILS and out:
+        list(_detail_pool().map(lambda r: _rippling_detail(slug, r), out))
+    for r in out:
+        r.pop("_uuid", None)
+    return out
+
+
+def fetch_teamtailor(slug: str):
+    """Teamtailor career-site feed -- JSON Feed, one request, body and date included.
+
+    Each item also carries `_jobposting`, a schema.org JobPosting used here only for
+    the fields the feed itself omits. The feed's own `title` is the COMPANY name,
+    which almost no other ATS reports (see catalog/teamtailor.md).
+    """
+    data = get_json(f"https://{slug}.teamtailor.com/jobs.json")
+    out = []
+    for j in data.get("items", []) if isinstance(data, dict) else []:
+        jp = j.get("_jobposting") or {}
+        loc = ""
+        place = jp.get("jobLocation") if isinstance(jp, dict) else None
+        if isinstance(place, dict):
+            addr = place.get("address") or {}
+            if isinstance(addr, dict):
+                parts = [
+                    addr.get("addressLocality", ""),
+                    addr.get("addressRegion", ""),
+                    addr.get("addressCountry", ""),
+                ]
+                loc = ", ".join(str(p) for p in parts if p)
+        if isinstance(jp, dict) and jp.get("jobLocationType") == "TELECOMMUTE":
+            loc = (loc + " (Remote)").strip()
+        text = clean(
+            j.get("content_html", "")
+            or (jp.get("description", "") if isinstance(jp, dict) else "")
+        )
+        out.append(
+            {
+                "title": j.get("title", ""),
+                "location": loc,
+                "url": j.get("url", ""),
+                "posted": to_date(j.get("date_published")),
+                "department": "",
+                "employment_type": (
+                    jp.get("employmentType", "") if isinstance(jp, dict) else ""
+                )
+                or "",
+                "salary": salary_from_text(text),
+                "text": text,
+            }
+        )
+    return out
+
+
 DEPTH_ALL: dict[str, Callable[..., list]] = {
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
@@ -536,12 +845,22 @@ DEPTH_ALL: dict[str, Callable[..., list]] = {
     "smartrecruiters": fetch_smartrecruiters,
     "workable": fetch_workable,
     "workday": fetch_workday,
+    "rippling": fetch_rippling,
+    "teamtailor": fetch_teamtailor,
 }
 
 # Adapters needing more than a bare slug. engine._fetch_company passes these extra
 # watchlist fields through as kwargs; every other adapter keeps the fetch(slug)
 # contract the funnel's probe depends on.
 DEPTH_EXTRA_FIELDS = {"workday": ("host", "site")}
+
+# Adapters that accept a `keep(title) -> bool` predicate and apply it BEFORE their
+# per-role detail pass. Only the two adapters that buy bodies one request at a time
+# need it; everywhere else the whole board arrives in one call and there is nothing
+# to defer. Declared here, like DEPTH_EXTRA_FIELDS, rather than discovered by
+# signature inspection: the engine should read a registry, not guess from a function
+# object, and adding an adapter to this set is the whole opt-in.
+DEPTH_ACCEPTS_KEEP = frozenset({"workday", "rippling"})
 
 
 # ── LIVENESS: does this board exist? -- live_<ats>(slug, **extra) -> int ─────
@@ -611,12 +930,23 @@ def live_workday(slug: str, host: str = "wd1", site: str = "") -> int:
 # Ashby is deliberately absent: measured 2026-07-22, its posting-api returns the
 # whole board (1.98 MB / 120 jobs) with or without includeCompensation, so there
 # is no cheaper variant to call. It falls back to the full adapter below.
+def live_rippling(slug: str) -> int:
+    # The list endpoint alone: one request, no per-role detail calls. That gap is the
+    # whole point -- a full fetch of a 748-role board costs 749 requests, liveness
+    # costs 1. Teamtailor deliberately has NO cheap variant: its feed is a single
+    # document, so a liveness call and a full fetch are the same request, and
+    # liveness_for() falls back to counting a full fetch (same as ashby).
+    rows = get_json(f"{RIPPLING_API}/{slug}/jobs")
+    return len(rows) if isinstance(rows, list) else 0
+
+
 LIVENESS: dict[str, Callable[..., int]] = {
     "greenhouse": live_greenhouse,
     "lever": live_lever,
     "smartrecruiters": live_smartrecruiters,
     "workable": live_workable,
     "workday": live_workday,
+    "rippling": live_rippling,
 }
 
 
@@ -639,32 +969,57 @@ def liveness_for(ats: str):
 
 # ── BREADTH: keyword aggregators -- search_<src>(queries) -> [posting] ───────
 def search_remotive(queries, strict: bool = False):
+    """ONE request. `queries` is accepted for signature parity and deliberately never
+    reaches the URL.
+
+    This used to loop `queries[:4]` sending `?search={query}`, with a comment calling
+    the cap "polite". Both halves were wrong, measured 2026-08-03 (catalog/remotive.md):
+
+      * `search` DOES NOTHING. `?search=nurse`, `?search=engineer` and `?limit=5` each
+        return the identical 31 rows as the bare endpoint -- every parameter is
+        ignored. So those were four IDENTICAL requests, not four searches, and the
+        adapter had no way to know it was not filtering.
+      * 31 rows is the WHOLE corpus, not a page. `total-job-count` says 31 too.
+      * Remotive's own notice advises a maximum of FOUR REQUESTS PER DAY and warns of
+        blocking. Four per RUN is 96/day on an hourly schedule -- the "polite" cap was
+        24x the vendor's stated limit.
+
+    One unfiltered request returns everything there is, is 4x cheaper, and is the only
+    version that fits inside what Remotive asks for. The engine's own relevance gate
+    does the filtering `search=` never did.
+    """
+    try:
+        data = get_json("https://remotive.com/api/remote-jobs")
+    except NET_ERRORS:
+        if strict:  # see the note on `strict` in search_himalayas
+            raise
+        return []
     out = []
-    for qy in queries[:4]:  # Remotive: <=4 calls per run (be a polite API citizen)
-        try:
-            data = get_json(f"https://remotive.com/api/remote-jobs?search={q(qy)}")
-        except NET_ERRORS:
-            if strict:  # see the note on `strict` in search_himalayas
-                raise
-            continue
-        for j in data.get("jobs", []):
-            text = clean(j.get("description", ""))
-            out.append(
-                {
-                    "title": j.get("title", ""),
-                    "company": j.get("company_name", ""),
-                    "location": (j.get("candidate_required_location") or "")
-                    + " (Remote)",
-                    "url": j.get("url", ""),
-                    "posted": to_date(j.get("publication_date")),
-                    "department": j.get("category", ""),
-                    "employment_type": j.get("job_type", ""),
-                    "salary": j.get("salary", "") or salary_from_text(text),
-                    "text": text,
-                    "source": "remotive",
-                }
-            )
-        time.sleep(1)
+    for j in data.get("jobs", []):
+        text = clean(j.get("description", ""))
+        out.append(
+            {
+                "title": j.get("title", ""),
+                "company": j.get("company_name", ""),
+                # NOT the job's location -- `candidate_required_location` is where a
+                # candidate may LIVE ("USA, UK", "Anywhere"). Kept because it is the
+                # only geography Remotive sends, and every row here is remote by
+                # definition (it is a remote-only board), so the " (Remote)" suffix is
+                # accurate even though the place is a hiring region, not a workplace.
+                "location": (j.get("candidate_required_location") or "") + " (Remote)",
+                "url": j.get("url", ""),
+                "posted": to_date(j.get("publication_date")),
+                "department": j.get("category", ""),
+                "function": j.get("category") or None,
+                "remote": True,  # a remote-only board by definition
+                "remote_basis": "source_field",
+                "tags": [t for t in (j.get("tags") or []) if t] or None,
+                "employment_type": j.get("job_type", ""),
+                "salary": j.get("salary", "") or salary_from_text(text),
+                "text": text,
+                "source": "remotive",
+            }
+        )
     return out
 
 
@@ -691,6 +1046,10 @@ def search_jobicy(queries):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("pubDate")),
                 "department": _joined(j.get("jobIndustry")),
+                "function": _joined(j.get("jobIndustry")) or None,
+                "seniority": _joined(j.get("jobLevel")) or None,
+                "remote": True,  # a remote-only board by definition
+                "remote_basis": "source_field",
                 "employment_type": _joined(j.get("jobType")),
                 "salary": salary_from_text(text),
                 "text": text,
@@ -716,6 +1075,9 @@ def search_arbeitnow(queries):
                 "url": j.get("url", ""),
                 "posted": to_date(j.get("created_at")),
                 "department": "",
+                "remote": True,  # the adapter already filtered on j["remote"] above
+                "remote_basis": "source_field",
+                "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "employment_type": ", ".join(jt)
                 if isinstance(jt, list)
                 else (jt or ""),
@@ -743,6 +1105,9 @@ def search_remoteok(queries):
                 "posted": to_date(j.get("date") or j.get("epoch")),
                 "department": "",
                 "employment_type": "",
+                "remote": True,  # a remote-only board by definition
+                "remote_basis": "source_field",
+                "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "salary": salary_range(j.get("salary_min"), j.get("salary_max")),
                 "text": text,
                 "source": "remoteok",
@@ -762,34 +1127,145 @@ def search_himalayas(queries, strict: bool = False):
     go red. `strict=True` re-raises instead, which is what lets the canary
     distinguish the two. The engine never passes it.
     """
-    out = []
+    out: list[dict] = []
     for qy in queries:
+        for page in range(1, HIMALAYAS_MAX_PAGES + 1):
+            try:
+                data = get_json(
+                    f"https://himalayas.app/jobs/api/search"
+                    f"?q={q(qy)}&limit={HIMALAYAS_PAGE}&page={page}"
+                )
+            except NET_ERRORS:
+                if strict:
+                    raise
+                break  # a dead page ends this query; other queries still run
+            jobs = data.get("jobs") or []
+            _himalayas_rows(jobs, out)
+            if len(jobs) < HIMALAYAS_PAGE:
+                break  # short page -> no more results for this query
+            time.sleep(0.5)  # be polite between pages of the same query
+    _himalayas_browse(out, strict)
+    return out
+
+
+def _himalayas_browse(out: list, strict: bool = False) -> None:
+    """The BROWSE lane -- the whole corpus, newest first.
+
+    Himalayas has TWO endpoints with different pagination, and picking the wrong one
+    costs an order of magnitude. `/jobs/api/search` takes `page` and walls at ~8,020
+    rows. `/jobs/api` takes `offset` and walks the entire corpus -- `totalCount`
+    reported 96,934 when this was measured. Sending `offset` to the SEARCH endpoint is
+    silently ignored and returns page 1 forever, which is the trap that hid this.
+
+    `q` does nothing here, so this cannot replace the search lane; it is a SECOND
+    lane that sweeps the market while the search lane answers the title queries.
+
+    THE BUDGET IS FRESHNESS, NOT A PAGE COUNT, because browse is date-ordered --
+    measured 2026-08-05: offset 0 -> median age 0 days, 20,000 -> 8 days, 60,000 ->
+    28 days. So paging until the rows are older than `max_age_days` fetches exactly
+    the window the engine would keep and stops, instead of guessing a page cap and
+    either truncating the fresh part or paying for rows the age gate will discard.
+    HIMALAYAS_BROWSE_PAGES remains a hard backstop so a date-parsing failure cannot
+    turn this into an unbounded 4,900-request walk.
+    """
+    cfg = config.active()
+    cutoff = cfg.max_age_days
+    for page in range(HIMALAYAS_BROWSE_PAGES):
+        offset = page * HIMALAYAS_PAGE
         try:
-            data = get_json(f"https://himalayas.app/jobs/api/search?q={q(qy)}&limit=20")
+            data = get_json(
+                f"https://himalayas.app/jobs/api?limit={HIMALAYAS_PAGE}&offset={offset}"
+            )
         except NET_ERRORS:
             if strict:
                 raise
-            continue
-        for j in data.get("jobs", []):
-            text = clean(j.get("description") or j.get("excerpt", ""))
-            regions = j.get("locationRestrictions") or []
-            loc = (", ".join(regions) if regions else "") + " (Remote)"
-            out.append(
-                {
-                    "title": j.get("title", ""),
-                    "company": j.get("companyName", ""),
-                    "location": loc.strip(),
-                    "url": j.get("applicationLink") or j.get("guid", ""),
-                    "posted": to_date(j.get("pubDate")),
-                    "department": "",
-                    "employment_type": j.get("employmentType", ""),
-                    "salary": salary_range(j.get("minSalary"), j.get("maxSalary")),
-                    "text": text,
-                    "source": "himalayas",
-                }
-            )
+            return
+        jobs = data.get("jobs") or []
+        if not jobs:
+            return
+        before = len(out)
+        _himalayas_rows(jobs, out)
+        # Stop once the NEWEST row on this page is already past the age gate. Reading
+        # the newest rather than the median is deliberate: the feed is ordered, so if
+        # the best row here is too old, everything after it is too.
+        ages = [
+            a
+            for a in (age_int(r.get("posted", "")) for r in out[before:])
+            if a is not None
+        ]
+        if ages and min(ages) > cutoff:
+            return
+        total = data.get("totalCount")
+        if isinstance(total, int) and offset + HIMALAYAS_PAGE >= total:
+            return  # the envelope announces the end; believe it
         time.sleep(0.5)
-    return out
+
+
+def _himalayas_rows(jobs, out):
+    """Map one page of Himalayas jobs into `out` (split out so the paging loop above
+    reads as paging rather than as parsing)."""
+    for j in jobs:
+        text = clean(j.get("description") or j.get("excerpt", ""))
+        regions = j.get("locationRestrictions") or []
+        loc = (", ".join(regions) if regions else "") + " (Remote)"
+        out.append(
+            {
+                "title": j.get("title", ""),
+                "company": j.get("companyName", ""),
+                "location": loc.strip(),
+                "url": j.get("applicationLink") or j.get("guid", ""),
+                "posted": to_date(j.get("pubDate")),
+                "department": "",
+                "function": ", ".join(
+                    x
+                    for x in (j.get("parentCategories") or j.get("categories") or [])
+                    if isinstance(x, str)
+                )
+                or None,
+                "seniority": ", ".join(
+                    x for x in (j.get("seniority") or []) if isinstance(x, str)
+                )
+                or None,
+                "remote": True,  # a remote-only board by definition
+                "remote_basis": "source_field",
+                "tags": [x for x in (j.get("categories") or []) if isinstance(x, str)]
+                or None,
+                "employment_type": j.get("employmentType", ""),
+                "salary": salary_range(j.get("minSalary"), j.get("maxSalary")),
+                "text": text,
+                "source": "himalayas",
+            }
+        )
+
+
+def _adzuna_place(area):
+    """Adzuna's `location.area` -> (city, state, country, remote|None).
+
+    `area` is a HIERARCHY, outermost first, and its depth varies:
+
+        ['US']                                                 -> nationwide
+        ['US','Texas','Howard County','Big Spring']            -> depth 4
+        ['US','New York','New York City','Manhattan','Prince'] -> depth 5
+
+    Two things make it worth reading. `area[1]` is a real US state in 246 of 246
+    sampled rows -- structured geography this adapter previously discarded in favour
+    of `display_name`, which is "City, County" and carries no state at all. And
+    `area == ['US']` EXACTLY means nationwide, i.e. remote: 23 of 50 rows in a
+    remote-filtered sample. Those rows' `display_name` is the bare string "US", which
+    no text rule can read as remote -- so the signal existed and was invisible.
+
+    Depth 5 shifts city one slot, so branch on length rather than indexing blindly.
+    Returns None (not "") for anything the array does not contain: unknown is not
+    empty.
+    """
+    if not isinstance(area, list) or not area:
+        return None, None, None, None
+    country = area[0] or None
+    if len(area) == 1:
+        return None, None, country, True  # nationwide == remote
+    state = area[1] or None
+    city = area[-1] if len(area) >= 4 else None
+    return city, state, country, None
 
 
 def search_adzuna(queries):
@@ -798,10 +1274,29 @@ def search_adzuna(queries):
     if not (app_id and app_key):
         print("  adzuna: no API keys set -- skipped (the free sources still run)")
         return []
+    # `where` resolves against Adzuna's PLACE HIERARCHY, so "remote" is not a value it
+    # can take -- it returns 0 rows, which is indistinguishable from "no such jobs"
+    # behind the `except NET_ERRORS: break` below. Measured 2026-08-03 on
+    # what="AI Engineer", US:
+    #
+    #     where=remote           ->      0 rows
+    #     where="" (the tempting fix) -> 55,052 rows, 2% actually remote
+    #     what_and=remote        -> 15,500 rows, 84% actually remote
+    #
+    # So blanking `where` is NOT the fix: it trades zero results for a nationwide
+    # scatter that the remote gate then throws away. `what_and` is a keyword AND and
+    # is the only remote filter Adzuna offers. Real places still work and compose
+    # with it (Louisville, KY -> 102; + what_and=remote -> 37).
+    remote_query = _is_remote_query(cfg)
+    where = "" if remote_query else cfg.location.strip()
+    remote_filter = "&what_and=remote" if remote_query else ""
     # A radius (miles) around `location`; Adzuna's `distance` is in km. Only when
-    # searching a real place (not "remote") and the user asked for one.
+    # searching a real place and the user asked for one. Shares `remote_query` with
+    # the branch above so the two cannot drift -- this used to test
+    # `cfg.location.lower() != "remote"` on its own, which let "anywhere" through as
+    # if it were a town.
     dist = ""
-    if cfg.radius_miles > 0 and cfg.location.lower() != "remote":
+    if cfg.radius_miles > 0 and not remote_query:
         dist = f"&distance={round(cfg.radius_miles * 1.60934)}"
     # Adzuna caps a page at 50; walk `adzuna_pages` pages per query so a selective
     # downstream filter (remote-only) still has a deep pool to carve from. Stop a
@@ -814,21 +1309,35 @@ def search_adzuna(queries):
                 data = get_json(
                     f"https://api.adzuna.com/v1/api/jobs/us/search/{page}"
                     f"?app_id={app_id}&app_key={app_key}&what={q(qy)}"
-                    f"&where={q(cfg.location)}{dist}&results_per_page=50&content-type=application/json"
+                    f"{f'&where={q(where)}' if where else ''}{remote_filter}{dist}"
+                    f"&results_per_page=50&content-type=application/json"
                 )
             except NET_ERRORS:
                 break  # a dead page ends this query; other queries still run
             results = data.get("results", [])
             for j in results:
                 text = clean(j.get("description", ""))
+                loc = j.get("location") or {}
+                city, state, country, is_remote = _adzuna_place(loc.get("area"))
                 out.append(
                     {
                         "title": j.get("title", ""),
                         "company": (j.get("company") or {}).get("display_name", ""),
-                        "location": (j.get("location") or {}).get("display_name", ""),
+                        # `display_name` is "City, County" and carries NO state, which
+                        # is why 39% of a downstream corpus was unparseable. The `area`
+                        # array beside it has the state; see _adzuna_place.
+                        "location": loc.get("display_name", ""),
                         "url": j.get("redirect_url", ""),
                         "posted": to_date(j.get("created")),
                         "department": (j.get("category") or {}).get("label", ""),
+                        # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
+                        # -- one of the four different things `department` carried.
+                        "function": (j.get("category") or {}).get("label") or None,
+                        "city": city,
+                        "state": state,
+                        "country": country,
+                        "remote": is_remote,
+                        "remote_basis": "location_rule" if is_remote else None,
                         "employment_type": j.get("contract_time", ""),
                         "salary": salary_range(
                             j.get("salary_min"), j.get("salary_max")
@@ -843,6 +1352,12 @@ def search_adzuna(queries):
     return out
 
 
+# How many "Who is Hiring?" threads to read. Two, because one is the start-of-month
+# cliff: on the 1st the newest thread is nearly empty and the prior month's 245 rows
+# vanish. The Algolia search already returns four, so this only costs the fetch.
+HN_THREADS = int(os.environ.get("HN_THREADS", "2"))
+
+
 def search_hn_whoishiring(queries):
     """HN's monthly 'Who is Hiring?' thread via the free Algolia API. Posts follow
     a loose 'COMPANY | ROLE | LOCATION | TYPE | url' convention; parse those."""
@@ -853,16 +1368,28 @@ def search_hn_whoishiring(queries):
         ).get("hits", [])
     except NET_ERRORS:
         return []
-    thread = next(
-        (h for h in hits if "who is hiring" in (h.get("title") or "").lower()), None
-    )
-    if not thread:
+    # TWO threads, not one. This took only the newest, and the failure shape is ugly:
+    # on the 1st of a month it switches to a thread with almost nothing in it and
+    # silently drops the entire prior month. Measured 2026-08-04 (August thread one
+    # day old): Aug 138 parsable rows, Jul 245 -- so one extra request nearly triples
+    # the yield and removes the start-of-month cliff. The search above already returns
+    # four matching threads, so the extra breadth is free apart from the fetch.
+    threads = [h for h in hits if "who is hiring" in (h.get("title") or "").lower()][
+        :HN_THREADS
+    ]
+    if not threads:
         return []
-    try:
-        tree = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}")
-    except NET_ERRORS:
-        return []
-    out = []
+    out: list[dict] = []
+    for thread in threads:
+        try:
+            tree = get_json(f"https://hn.algolia.com/api/v1/items/{thread['objectID']}")
+        except NET_ERRORS:
+            continue  # one dead thread must not cost the other
+        _hn_rows(tree, out)
+    return out
+
+
+def _hn_rows(tree, out: list) -> None:
     for c in tree.get("children", []):
         text = clean(c.get("text"))
         parts = [p.strip() for p in text.split("|")]
@@ -889,7 +1416,6 @@ def search_hn_whoishiring(queries):
                 "source": "hn",
             }
         )
-    return out
 
 
 def _names(v):
@@ -958,7 +1484,15 @@ def search_braintrust(queries):
                     ).strip(),
                     "url": f"https://app.usebraintrust.com/jobs/{j.get('id')}/",
                     "posted": to_date(j.get("created")),
+                    # `level` was going into `department` -- a seniority filed as a
+                    # category, one of the four meanings that made that column
+                    # unusable downstream. It now says what it is.
                     "department": "",
+                    "seniority": j.get("level") or None,
+                    "remote": True,  # a remote freelance network by definition
+                    "remote_basis": "source_field",
+                    "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
+                    or None,
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
                     "salary": _bt_rate(j),
                     "text": text,
@@ -1002,57 +1536,23 @@ _CC_NAME = {
 }
 
 
-def search_techtree(queries):
-    """TechTree -- an AI-native recruiting platform whose public board API fronts
-    roles for hidden client companies the ATS/keyword feeds structurally miss."""
-    data = get_json(
-        "https://jobs.techtree.dev/api/public-job-posting?visibility=job_board_only"
-    )
-    out = []
-    for j in data.get("jobs", []):
-        parts = []
-        for loc in j.get("locations") or []:
-            if not isinstance(loc, dict):
-                continue
-            lbl = loc.get("display_label") or ""
-            name = _CC_NAME.get((loc.get("country") or "").upper(), "")
-            piece = lbl
-            if name and name.lower() not in lbl.lower():
-                piece = f"{lbl}, {name}".strip(", ") if lbl else name
-            if piece:
-                parts.append(piece)
-        location = "; ".join(dict.fromkeys(parts))
-        if j.get("workplace_type") == "Remote":
-            location = (location + " (Remote)").strip()
-        reqs, skills = j.get("requirements") or [], j.get("skills") or []
-        text = clean(
-            " ".join(
-                str(x)
-                for x in (
-                    j.get("short_description", ""),
-                    j.get("description", ""),
-                    j.get("company_overview", ""),
-                    " ".join(str(r) for r in reqs),
-                    " ".join(str(s) for s in skills),
-                )
-                if x
-            )
-        )
-        out.append(
-            {
-                "title": j.get("title", ""),
-                "company": j.get("company_name", "") or "TechTree's client",
-                "location": location,
-                "url": j.get("application_url", ""),
-                "posted": to_date(j.get("posted_date") or j.get("created_at")),
-                "department": j.get("level", ""),
-                "employment_type": j.get("job_type", ""),
-                "salary": salary_range(j.get("salary_min"), j.get("salary_max")),
-                "text": text,
-                "source": "techtree",
-            }
-        )
-    return out
+def _usajobs_place(locations) -> dict:
+    """USAJOBS `PositionLocation[]` -> {city, state, country}.
+
+    Structured geography, already present, previously discarded in favour of the
+    `PositionLocationDisplay` blob. One posting can list MANY locations (a federal
+    role open in twelve cities), so this takes the first and leaves the full list in
+    the display string rather than inventing a multi-value shape the contract does
+    not yet have.
+    """
+    first = (locations or [{}])[0] if isinstance(locations, list) else {}
+    if not isinstance(first, dict):
+        return {"city": None, "state": None, "country": None}
+    return {
+        "city": first.get("CityName") or None,
+        "state": first.get("CountrySubDivisionCode") or None,
+        "country": first.get("CountryCode") or None,
+    }
 
 
 def search_usajobs(queries):
@@ -1071,62 +1571,240 @@ def search_usajobs(queries):
     rad = f"&Radius={cfg.radius_miles}" if (is_place and cfg.radius_miles > 0) else ""
     remote = "" if is_place else "&RemoteIndicator=True"
     rpp = max(1, getattr(cfg, "usajobs_results_per_page", 500))
+    # This adapter built ONE url per query and never paged, so any keyword with more
+    # than `rpp` matches was silently truncated -- and USAJOBS reports the true count
+    # in `SearchResultCountAll`, which nothing read. Measured in catalog/usajobs.md:
+    # "medical assistant" 736 and "registered nurse" 620 against a 500-row page, i.e.
+    # 236 and 120 postings dropped, invisibly, on every run.
+    #
+    # The docs are explicit: "Specific pages are retrieved by passing the 'Page'
+    # parameter with the number of the paged result desired" (worked example
+    # ?Page=3&ResultsPerPage=50 -> results 151-200).
+    max_pages = max(1, getattr(cfg, "usajobs_max_pages", 3))
     out = []
     for qy in queries:
-        url = (
-            f"https://data.usajobs.gov/api/Search?Keyword={q(qy)}"
-            f"&ResultsPerPage={rpp}{loc}{rad}{remote}"
-        )
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Host": "data.usajobs.gov",
-                "User-Agent": email,
-                "Authorization-Key": key,
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
-                import json as _json
-
-                data = _json.loads(r.read().decode("utf-8", "replace"))
-        except NET_ERRORS:
-            continue
-        for it in (data.get("SearchResult") or {}).get("SearchResultItems", []):
-            d = it.get("MatchedObjectDescriptor") or {}
-            pay = (d.get("PositionRemuneration") or [{}])[0]
-            out.append(
-                {
-                    "title": d.get("PositionTitle", ""),
-                    "company": d.get("OrganizationName", ""),
-                    "location": (
-                        d.get("PositionLocationDisplay", "")
-                        + (" (Remote)" if remote else "")
-                    ),
-                    "url": d.get("PositionURI", ""),
-                    "posted": to_date(d.get("PublicationStartDate")),
-                    "department": d.get("DepartmentName", ""),
-                    "employment_type": ", ".join(
-                        s.get("Name", "") for s in (d.get("PositionSchedule") or [])
-                    ),
-                    "salary": salary_range(
-                        pay.get("MinimumRange"), pay.get("MaximumRange")
-                    ),
-                    "text": clean(
-                        (d.get("UserArea") or {})
-                        .get("Details", {})
-                        .get("JobSummary", "")
-                    ),
-                    "source": "usajobs",
-                }
+        for page in range(1, max_pages + 1):
+            url = (
+                f"https://data.usajobs.gov/api/Search?Keyword={q(qy)}"
+                f"&ResultsPerPage={rpp}&Page={page}{loc}{rad}{remote}"
             )
-        # Every other multi-call source pauses between queries (remotive 1.0s,
-        # himalayas/adzuna/google_jobs 0.5s, braintrust 0.4s); this one looped a
-        # federal API with no pause at all, while asking for the largest page in
-        # the codebase (ResultsPerPage up to 500). README's "it rate-limits itself"
-        # was true of every source except the heaviest one.
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Host": "data.usajobs.gov",
+                    "User-Agent": email,
+                    "Authorization-Key": key,
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
+                    import json as _json
+
+                    data = _json.loads(r.read().decode("utf-8", "replace"))
+            except NET_ERRORS:
+                break  # a dead page ends this query; other queries still run
+            result = data.get("SearchResult") or {}
+            _usajobs_rows(result, remote, out)
+            got = len(result.get("SearchResultItems") or ())
+            if got < rpp:
+                break  # short page -> the tail of this keyword
+            total = result.get("SearchResultCountAll")
+            if isinstance(total, int) and page * rpp >= total:
+                break  # the API told us the true total; believe it
+            # Every other multi-call source pauses between requests. This one hits a
+            # FEDERAL api with the largest page size in the codebase, so the pause
+            # belongs between pages too, not only between queries.
+            time.sleep(0.5)
         time.sleep(0.5)
     return out
+
+
+def _usajobs_rows(result: dict, remote: str, out: list) -> None:
+    """Map one USAJOBS page into `out` (split out so the paging loop reads as
+    paging rather than as parsing)."""
+    for it in result.get("SearchResultItems", []):
+        d = it.get("MatchedObjectDescriptor") or {}
+        pay = (d.get("PositionRemuneration") or [{}])[0]
+        out.append(
+            {
+                "title": d.get("PositionTitle", ""),
+                "company": d.get("OrganizationName", ""),
+                "location": (
+                    d.get("PositionLocationDisplay", "")
+                    + (" (Remote)" if remote else "")
+                ),
+                "url": d.get("PositionURI", ""),
+                "posted": to_date(d.get("PublicationStartDate")),
+                # PRESERVED byte-identical (deprecated, removed at 1.0) -- but it
+                # was never a department. "Department of Veterans Affairs" is the
+                # EMPLOYER, and pouring it into a category column is how a
+                # downstream store ended up with employer names among its most
+                # common "categories". The three keys below say what each thing is.
+                "department": d.get("DepartmentName", ""),
+                "employer_org": d.get("DepartmentName") or None,
+                "org_unit": d.get("SubAgency") or None,
+                # OPM occupational series -- a real, coded job family.
+                "function": ", ".join(
+                    c.get("Name", "")
+                    for c in (d.get("JobCategory") or [])
+                    if c.get("Name")
+                )
+                or None,
+                "seniority": ", ".join(
+                    g.get("Code", "")
+                    for g in (d.get("JobGrade") or [])
+                    if g.get("Code")
+                )
+                or None,
+                **_usajobs_place(d.get("PositionLocation")),
+                "remote": True if remote else None,
+                "remote_basis": "source_field" if remote else None,
+                "employment_type": ", ".join(
+                    s.get("Name", "") for s in (d.get("PositionSchedule") or [])
+                ),
+                "salary": salary_range(
+                    pay.get("MinimumRange"), pay.get("MaximumRange")
+                ),
+                "text": clean(
+                    (d.get("UserArea") or {}).get("Details", {}).get("JobSummary", "")
+                ),
+                "source": "usajobs",
+            }
+        )
+
+
+# The Muse hard-caps at page 99 (page 100 is a 400 "Value page is too high"), so one
+# query reaches at most 100 x 20 = 2,000 rows however many it advertises -- `page_count`
+# said 20,223 when this was measured on 2026-08-03, which is a count of pages that do
+# not exist. Its ~36,000 real rows are only reachable by fanning out over the 19
+# categories, whose slices are nearly disjoint (19 dupes in 1,138 sampled).
+#
+# The default here is deliberately small. A full 19-category fan-out to the cap is
+# ~1,900 requests, which is a harvest of its own rather than one source among sixteen;
+# widen it with THEMUSE_MAX_PAGES when The Muse is the point of the run.
+#
+# It is also NOT sorted by date (page 0 median 420d, page 90 median 45d), so the
+# freshness cut has to happen at ingest -- you cannot page to the fresh part.
+THEMUSE_MAX_PAGES = int(os.environ.get("THEMUSE_MAX_PAGES", "5"))
+THEMUSE_PAGE_CAP = 99
+
+
+# The 20-value taxonomy, verbatim from catalog/themuse.md. "Unknown" is a real
+# category value in the API, not a placeholder -- it is where The Muse files a job it
+# could not classify, so dropping it would silently lose rows.
+THEMUSE_CATEGORIES = (
+    "Account Management",
+    "Accounting and Finance",
+    "Advertising and Marketing",
+    "Animal Care",
+    "Business Operations",
+    "Data and Analytics",
+    "Education",
+    "Food and Hospitality Services",
+    "Healthcare",
+    "Human Resources and Recruitment",
+    "Installation, Maintenance, and Repairs",
+    "Legal Services",
+    "Management",
+    "Product Management",
+    "Project Management",
+    "Retail",
+    "Sales",
+    "Science and Engineering",
+    "Software Engineering",
+    "Unknown",
+)
+
+
+def search_themuse(queries):
+    """The Muse -- keyless, and the least tech-skewed source here (11% tech titles
+    when measured), which is the reason to carry it at all.
+
+    `queries` is accepted and IGNORED: The Muse has no title search, verified across
+    nine parameter names, so it is a harvest-lane source only. Passing a query would
+    silently return the unfiltered set, which is the failure this docstring exists to
+    prevent.
+
+    FANS OUT over the 20-value category taxonomy, and that is the whole yield of this
+    adapter. The unfiltered feed hard-caps at page 99 = 2,000 rows, and this adapter
+    used to page ONLY that feed at THEMUSE_MAX_PAGES=5 -- **100 rows out of ~36,060
+    reachable.** The cap applies PER SLICE, and the slices are near-disjoint, so
+    querying each category is the only way past 2,000.
+
+    What blocked this for so long was a wrong entry in our own catalog claiming
+    category filtering was unreliable. Re-measured 2026-08-05: `category=Healthcare`
+    returns 20/20 Healthcare rows with zero overlap against the unfiltered page. The
+    trap has been corrected in catalog/themuse.md; do not re-add it.
+
+    Cost is THEMUSE_MAX_PAGES x 20 categories requests per run (default 5 -> 100
+    requests, ~2,000 rows). `seen` dedups across slices because a job can carry two
+    categories.
+    """
+    out, seen = [], set()
+    pages = min(THEMUSE_MAX_PAGES, THEMUSE_PAGE_CAP + 1)
+    for category in THEMUSE_CATEGORIES:
+        for page in range(pages):
+            try:
+                data = get_json(
+                    "https://www.themuse.com/api/public/jobs"
+                    f"?page={page}&category={q(category)}"
+                )
+            except NET_ERRORS:
+                break  # a dead slice ends this category; the others still run
+            except Exception:  # noqa: BLE001
+                break
+            results = data.get("results") or []
+            if not results:
+                break  # this category is exhausted
+            _themuse_rows(results, seen, out)
+            time.sleep(0.2)  # be polite between pages of one slice
+    return out
+
+
+def _themuse_rows(results, seen: set, out: list) -> None:
+    """Map one page of Muse results into `out`, skipping ids already seen.
+
+    Cross-slice dedup is required, not defensive: a posting can carry several
+    categories, so the same job legitimately appears in more than one fan-out slice.
+    """
+    for j in results:
+        jid = j.get("id")
+        if jid in seen:
+            continue
+        seen.add(jid)
+        locs = [
+            x.get("name", "") for x in (j.get("locations") or []) if isinstance(x, dict)
+        ]
+        cats = [
+            x.get("name", "")
+            for x in (j.get("categories") or [])
+            if isinstance(x, dict)
+        ]
+        levels = [
+            x.get("name", "") for x in (j.get("levels") or []) if isinstance(x, dict)
+        ]
+        text = clean(j.get("contents", ""))
+        out.append(
+            {
+                "title": j.get("name", ""),
+                "company": (j.get("company") or {}).get("name", ""),
+                "location": "; ".join(x for x in locs if x),
+                "url": (j.get("refs") or {}).get("landing_page", ""),
+                "posted": to_date(j.get("publication_date")),
+                # A job FAMILY ("Data Science"), not an org unit -- see
+                # catalog/_SCHEMA.md on why that distinction is load-bearing.
+                "department": "; ".join(x for x in cats if x),
+                "function": "; ".join(x for x in cats if x) or None,
+                # `levels` is a real seniority string ("Senior Level"). It was held
+                # back while `seniority` was a strand-B key not yet on any adapter;
+                # the contract exists now, so it ships.
+                "seniority": "; ".join(x for x in levels if x) or None,
+                "employment_type": j.get("type", ""),
+                "salary": salary_from_text(text),
+                "text": text,
+                "source": "themuse",
+            }
+        )
 
 
 BREADTH_ALL = {
@@ -1140,7 +1818,7 @@ BREADTH_ALL = {
     "google_jobs": search_google_jobs,
     "hn": search_hn_whoishiring,
     "braintrust": search_braintrust,
-    "techtree": search_techtree,
+    "themuse": search_themuse,
 }
 
 

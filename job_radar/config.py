@@ -3,7 +3,8 @@
 Every tunable that used to be a module constant lives here, loaded from one
 YAML file the user edits. The engine reads the *active* Config (set once at
 startup); tests pass an explicit Config. Defaults are generic tech-role
-defaults -- copy job-radar.example.yaml and make it yours.
+defaults -- run `job-radar init` to get a commented copy of them as YAML
+(job_radar/data/job-radar.example.yaml) and make it yours.
 """
 
 from __future__ import annotations
@@ -319,6 +320,12 @@ class Config:
     usajobs_results_per_page: int = field(
         default_factory=lambda: _env_int("USAJOBS_RESULTS_PER_PAGE", 500)
     )
+    # USAJOBS pages with `&Page=N`, and the adapter never sent it -- so any keyword
+    # with more than one page of matches was silently truncated. Measured in
+    # catalog/usajobs.md: "medical assistant" 736 and "registered nurse" 620 against a
+    # 500-row page. 3 pages = 1,500 rows/query, bounded because this is a federal API
+    # taking the largest page size in the codebase.
+    usajobs_max_pages: int = field(default_factory=lambda: _env_int("USAJOBS_MAX_PAGES", 3))
     funnel_auto_grow: bool = True
     funnel_max_new_per_run: int = 25
     # A budget on PROBES ATTEMPTED, which max_new_per_run is not. That one counts
@@ -473,6 +480,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         cfg.usajobs_results_per_page = srcs["usajobs"].get(
             "results_per_page", cfg.usajobs_results_per_page
         )
+        cfg.usajobs_max_pages = srcs["usajobs"].get("max_pages", cfg.usajobs_max_pages)
     if isinstance(srcs.get("funnel"), dict):
         cfg.funnel_auto_grow = srcs["funnel"].get("auto_grow", cfg.funnel_auto_grow)
         cfg.funnel_max_probes_per_run = srcs["funnel"].get(

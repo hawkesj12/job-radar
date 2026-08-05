@@ -107,36 +107,18 @@ def test_shipped_example_config_enables_every_adapter(tmp_path):
     assert set(sources.BREADTH_ALL) == set(c.breadth_sources)
 
 
-def test_the_ai_config_prompt_lists_every_adapter():
-    """`prompts/build-config-with-ai.md` embeds a config template that the README
-    tells users to paste into an AI assistant. That template is a SECOND copy of the
-    adapter lists, and it drifted: it sat 19 days behind, missing `workday`,
-    `google_jobs` and `usajobs` — so the "let AI write your config" path handed
-    people a config with the enterprise ATS switched off, which is exactly the bug
-    0.5.0 fixed in the shipped example. A doc that generates config is config."""
-    txt = (
-        Path(__file__).parent.parent / "prompts" / "build-config-with-ai.md"
-    ).read_text(encoding="utf-8")
-    missing = [
-        a for a in list(sources.DEPTH_ALL) + list(sources.BREADTH_ALL) if a not in txt
-    ]
-    assert not missing, (
-        f"the AI-config prompt does not mention {missing} — a user following it "
-        "would get those sources silently disabled"
-    )
-
-
-@pytest.mark.parametrize("name", ["job-radar.example.yaml", "watchlist.example.json"])
-def test_root_and_packaged_examples_are_identical(name):
-    """Two copies of each example file exist: one at the repo root (what a GitHub
-    visitor reads) and one under job_radar/data/ (what the wheel ships). They have
-    already drifted once — a 2026-07-18 fix corrected the packaged watchlist and
-    left the root copy pointing at five boards that now 404. Byte-equality is the
-    only thing that keeps the file people READ and the file people GET in sync."""
-    root = (Path(__file__).parent.parent / name).read_text(encoding="utf-8")
-    assert root == cli._packaged(name), (
-        f"{name}: the repo-root copy and the packaged copy have drifted"
-    )
+# The repo-root copies of the example files are GONE, and so are the two tests that
+# pinned them byte-equal to the packaged ones. There is now exactly one copy of each
+# — job_radar/data/, the copy the wheel ships and `init` writes — so there is nothing
+# left to drift. The equality test was the right guard for the wrong shape: it kept
+# two writable copies of one file agreeing, when deleting the second copy removes the
+# failure mode outright. `test_shipped_example_config_enables_every_adapter` above
+# already reads the packaged copy, which is the one that matters.
+#
+# Deleted with them: test_the_ai_config_prompt_lists_every_adapter, which guarded a
+# THIRD copy of the adapter lists inside prompts/build-config-with-ai.md (it drifted
+# 19 days behind and shipped `workday`/`google_jobs`/`usajobs` switched off). That
+# prompt is retired, so the copy it guarded no longer exists either.
 
 
 # ── deterministic scoring + gates ────────────────────────────────────────────
@@ -1742,6 +1724,7 @@ def test_repeating_a_keyword_can_never_raise_the_score():
         "the whole thing presence-based scoring exists to prevent."
     )
 
+
 def test_score_k1_is_a_gain_knob_not_a_saturation_knob():
     """...and score_k1 does something real, so it isn't dead config either."""
     p = {"title": "AI Engineer", "location": "Remote", "text": "ai engineer python rag"}
@@ -2053,3 +2036,40 @@ def test_harvest_bounds_the_results_it_holds_in_memory(monkeypatch):
         "with the universe again, which is the 1.25 GB bug."
     )
     assert large < 200, f"held {large} results at once; the window is 24 + a pool of 12"
+
+
+def test_starter_watchlist_ships_a_working_workday_triple():
+    """Workday shipped as an enabled adapter with ZERO companies to poll for three
+    releases, so the enterprise lane the README sells was dark out of the box.
+
+    It is the one ATS whose key cannot be hand-written -- tenant + wdN host shard +
+    site slug, and the site slug is unguessable ("NVIDIAExternalCareerSite"). So the
+    starter list has to carry real triples or the adapter is unreachable until a user
+    runs `seed`. This pins that they are present and SHAPED correctly; liveness is the
+    canary's job, not a hermetic test's.
+    """
+    import json
+
+    doc = json.loads(cli._packaged("watchlist.example.json"))
+    wd = [c for c in doc["companies"] if c.get("ats") == "workday"]
+    assert wd, "the starter watchlist ships no Workday companies — the lane is dark"
+    for c in wd:
+        missing = [f for f in sources.DEPTH_EXTRA_FIELDS["workday"] if not c.get(f)]
+        assert not missing, f"{c['name']}: workday entry missing {missing}"
+    # The _comment tells a hand-editing user which ATS values are legal; it listed
+    # five of eight while three adapters were shipping.
+    for ats in sources.DEPTH_ALL:
+        assert ats in doc["_comment"], f"_comment does not mention the {ats} adapter"
+
+
+def test_every_starter_entry_declares_its_required_fields():
+    """engine._fetch_company fails LOUD on a missing extra field rather than fetching
+    a wrong-but-valid URL, so a malformed starter entry is a silent dead company."""
+    import json
+
+    doc = json.loads(cli._packaged("watchlist.example.json"))
+    for c in doc["companies"]:
+        assert c.get("ats") in sources.DEPTH_ALL, f"{c} names an unregistered ats"
+        assert c.get("slug"), f"{c} has no slug"
+        for f in sources.DEPTH_EXTRA_FIELDS.get(c["ats"], ()):
+            assert c.get(f), f"{c['name']} ({c['ats']}) is missing {f}"

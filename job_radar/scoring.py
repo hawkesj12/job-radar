@@ -87,10 +87,33 @@ def relevant(title: str, cfg=None) -> bool:
 
 
 def is_remote(p: dict, cfg=None) -> bool:
+    """The remote GATE (config-aware), as opposed to `remote_posting` (a pure text
+    predicate).
+
+    A structured `remote` flag, where the source actually sends one, BEATS reading the
+    prose. That ordering is what makes the 0.7.0 contract field load-bearing rather
+    than decorative: several sources have always sent a real boolean -- Adzuna's
+    `area == ["US"]`, SmartRecruiters' `location.remote`, Arbeitnow's `remote`,
+    Ashby's `isRemote` -- and this gate threw every one of them away and re-derived
+    remoteness from text that frequently does not mention it.
+
+    The Adzuna case is the sharp one. Its nationwide rows carry the bare location
+    string "US", which no text rule can read as remote, so genuinely-remote federal-
+    scale postings were dropped by the very filter meant to find them. Mapping the
+    signal into `remote` fixes nothing unless the gate reads it.
+
+    `None` still falls through to the text rule -- unknown is not False.
+    """
     cfg = cfg or config.active()
     if not cfg.remote_only:
         return True
-    if not remote_posting(p.get("title", ""), p.get("location", ""), p.get("text", "")):
+    flag = p.get("remote")
+    if flag is None:
+        if not remote_posting(
+            p.get("title", ""), p.get("location", ""), p.get("text", "")
+        ):
+            return False
+    elif not flag:
         return False
     b = f"{p.get('title', '')} {p.get('location', '')}".lower()
     return not any(x in b for x in cfg.exclude_locations)

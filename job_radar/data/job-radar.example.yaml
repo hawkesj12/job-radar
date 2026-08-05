@@ -1,5 +1,6 @@
-# job-radar config — copy this to `job-radar.yaml` and make it yours.
-# Everything is optional; anything you omit uses a sensible generic default.
+# job-radar config — this IS your `job-radar.yaml` (written by `job-radar init`).
+# Edit it in place and make it yours. Everything is optional; anything you omit
+# uses a sensible generic default, so deleting a section is a valid way to reset it.
 
 # ── profile: what you're looking for ────────────────────────────────────────
 profile:
@@ -67,10 +68,10 @@ filters:
 
 # ── sources: default = all official public APIs ─────────────────────────────
 sources:
-  ats:    [greenhouse, lever, ashby, smartrecruiters, workable, workday]
+  ats:    [greenhouse, lever, ashby, smartrecruiters, workable, workday, rippling, teamtailor]
   # adzuna + usajobs are GENERAL (every field, any location) but need free keys —
   # set them and you can search any field / any city, not just remote tech.
-  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, usajobs, google_jobs, hn, braintrust, techtree]
+  boards: [remotive, jobicy, arbeitnow, remoteok, himalayas, adzuna, usajobs, google_jobs, hn, braintrust, themuse]
   adzuna:                 # optional; set these env vars if you have free Adzuna keys
     app_id_env: ADZUNA_APP_ID
     app_key_env: ADZUNA_APP_KEY
@@ -82,6 +83,11 @@ sources:
   google_jobs:
     key_env: SERPAPI_KEY  # env var holding your SerpApi key
     pages: 1              # or set GOOGLE_JOBS_PAGES
+  usajobs:
+    results_per_page: 500  # the vendor max
+    max_pages: 3           # USAJOBS pages with &Page=; 3 x 500 = 1,500 rows/query.
+                           # It never paged at all before 0.7.0, so any keyword with
+                           # more than 500 matches was silently truncated.
   funnel:
     auto_grow: true        # discover + add new companies from breadth hits
     max_new_per_run: 25    # cap on companies ADDED per run

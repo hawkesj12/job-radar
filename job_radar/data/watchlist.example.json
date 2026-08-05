@@ -1,28 +1,205 @@
 {
-  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable), slug (the last path segment of the company's public job-board URL). The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
+  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable|workday|rippling|teamtailor), and slug (the last path segment of the company's public job-board URL). WORKDAY IS DIFFERENT: it needs a three-part key -- slug (tenant) + host (the wdN shard) + site -- because the site slug is unguessable. Get more with `job-radar seed workday`. The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
   "companies": [
-    { "name": "Anthropic", "ats": "greenhouse", "slug": "anthropic", "frontier": true },
-    { "name": "OpenAI", "ats": "ashby", "slug": "openai", "frontier": true },
-    { "name": "Cohere", "ats": "ashby", "slug": "Cohere" },
-    { "name": "Stripe", "ats": "greenhouse", "slug": "stripe" },
-    { "name": "Databricks", "ats": "greenhouse", "slug": "databricks" },
-    { "name": "Ramp", "ats": "ashby", "slug": "ramp" },
-    { "name": "Notion", "ats": "ashby", "slug": "notion" },
-    { "name": "Figma", "ats": "greenhouse", "slug": "figma" },
-    { "name": "Vercel", "ats": "greenhouse", "slug": "vercel" },
-    { "name": "Discord", "ats": "greenhouse", "slug": "discord" },
-    { "name": "Brex", "ats": "greenhouse", "slug": "brex" },
-    { "name": "Plaid", "ats": "ashby", "slug": "plaid" },
-    { "name": "Samsara", "ats": "greenhouse", "slug": "samsara" },
-    { "name": "Benchling", "ats": "ashby", "slug": "benchling" },
-    { "name": "GitLab", "ats": "greenhouse", "slug": "gitlab" },
-    { "name": "Coinbase", "ats": "greenhouse", "slug": "coinbase" },
-    { "name": "DoorDash", "ats": "greenhouse", "slug": "doordashusa" },
-    { "name": "Robinhood", "ats": "greenhouse", "slug": "robinhood" },
-    { "name": "Dropbox", "ats": "greenhouse", "slug": "dropbox" },
-    { "name": "Harvey", "ats": "ashby", "slug": "harvey", "frontier": true },
-    { "name": "Sierra", "ats": "ashby", "slug": "sierra", "frontier": true },
-    { "name": "LangChain", "ats": "ashby", "slug": "langchain" },
-    { "name": "ElevenLabs", "ats": "ashby", "slug": "elevenlabs", "frontier": true }
+    {
+      "name": "Anthropic",
+      "ats": "greenhouse",
+      "slug": "anthropic",
+      "frontier": true
+    },
+    {
+      "name": "OpenAI",
+      "ats": "ashby",
+      "slug": "openai",
+      "frontier": true
+    },
+    {
+      "name": "Cohere",
+      "ats": "ashby",
+      "slug": "Cohere"
+    },
+    {
+      "name": "Stripe",
+      "ats": "greenhouse",
+      "slug": "stripe"
+    },
+    {
+      "name": "Databricks",
+      "ats": "greenhouse",
+      "slug": "databricks"
+    },
+    {
+      "name": "Ramp",
+      "ats": "ashby",
+      "slug": "ramp"
+    },
+    {
+      "name": "Notion",
+      "ats": "ashby",
+      "slug": "notion"
+    },
+    {
+      "name": "Figma",
+      "ats": "greenhouse",
+      "slug": "figma"
+    },
+    {
+      "name": "Vercel",
+      "ats": "greenhouse",
+      "slug": "vercel"
+    },
+    {
+      "name": "Discord",
+      "ats": "greenhouse",
+      "slug": "discord"
+    },
+    {
+      "name": "Brex",
+      "ats": "greenhouse",
+      "slug": "brex"
+    },
+    {
+      "name": "Plaid",
+      "ats": "ashby",
+      "slug": "plaid"
+    },
+    {
+      "name": "Samsara",
+      "ats": "greenhouse",
+      "slug": "samsara"
+    },
+    {
+      "name": "Benchling",
+      "ats": "ashby",
+      "slug": "benchling"
+    },
+    {
+      "name": "GitLab",
+      "ats": "greenhouse",
+      "slug": "gitlab"
+    },
+    {
+      "name": "Coinbase",
+      "ats": "greenhouse",
+      "slug": "coinbase"
+    },
+    {
+      "name": "DoorDash",
+      "ats": "greenhouse",
+      "slug": "doordashusa"
+    },
+    {
+      "name": "Robinhood",
+      "ats": "greenhouse",
+      "slug": "robinhood"
+    },
+    {
+      "name": "Dropbox",
+      "ats": "greenhouse",
+      "slug": "dropbox"
+    },
+    {
+      "name": "Harvey",
+      "ats": "ashby",
+      "slug": "harvey",
+      "frontier": true
+    },
+    {
+      "name": "Sierra",
+      "ats": "ashby",
+      "slug": "sierra",
+      "frontier": true
+    },
+    {
+      "name": "LangChain",
+      "ats": "ashby",
+      "slug": "langchain"
+    },
+    {
+      "name": "ElevenLabs",
+      "ats": "ashby",
+      "slug": "elevenlabs",
+      "frontier": true
+    },
+    {
+      "name": "Accenture",
+      "ats": "workday",
+      "slug": "accenture",
+      "host": "wd103",
+      "site": "AccentureCareers",
+      "industry": "consulting"
+    },
+    {
+      "name": "Advocate Aurora Health",
+      "ats": "workday",
+      "slug": "aah",
+      "host": "wd5",
+      "site": "external",
+      "industry": "healthcare"
+    },
+    {
+      "name": "Academy Sports + Outdoors",
+      "ats": "workday",
+      "slug": "academy",
+      "host": "wd1",
+      "site": "Careers",
+      "industry": "retail"
+    },
+    {
+      "name": "3M",
+      "ats": "workday",
+      "slug": "3m",
+      "host": "wd1",
+      "site": "Search",
+      "industry": "manufacturing"
+    },
+    {
+      "name": "Avanade",
+      "ats": "workday",
+      "slug": "accenture",
+      "host": "wd103",
+      "site": "avanadecareers",
+      "industry": "consulting"
+    },
+    {
+      "name": "ABC Supply",
+      "ats": "workday",
+      "slug": "abcsupply",
+      "host": "wd1",
+      "site": "ABCSupplyCareers",
+      "industry": "distribution"
+    },
+    {
+      "name": "AAA Mid-Atlantic",
+      "ats": "workday",
+      "slug": "aaamidatlantic",
+      "host": "wd5",
+      "site": "AAAMidAtlantic",
+      "industry": "insurance"
+    },
+    {
+      "name": "AllianceBernstein",
+      "ats": "workday",
+      "slug": "abglobal",
+      "host": "wd1",
+      "site": "alliancebernsteincareers",
+      "industry": "finance"
+    },
+    {
+      "name": "Ace Hardware",
+      "ats": "workday",
+      "slug": "acehardware",
+      "host": "wd1",
+      "site": "AHHS_External",
+      "industry": "retail"
+    },
+    {
+      "name": "23andMe",
+      "ats": "workday",
+      "slug": "23andme",
+      "host": "wd5",
+      "site": "23",
+      "industry": "biotech"
+    }
   ]
 }

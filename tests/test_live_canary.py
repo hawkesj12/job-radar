@@ -36,11 +36,13 @@ pytestmark = pytest.mark.live
 # Sources that return their WHOLE board regardless of the query. An empty list from
 # one of these is never "no matches" — it means the response no longer looks like
 # what the parser expects, so it is a hard failure rather than a soft one.
-WHOLE_BOARD = ["jobicy", "arbeitnow", "remoteok", "techtree"]
+WHOLE_BOARD = ["jobicy", "arbeitnow", "remoteok", "themuse", "remotive"]
 
 # Query-driven sources. A niche query can legitimately return nothing, so these
 # assert on SHAPE when rows come back rather than on row count.
-QUERY_DRIVEN = ["remotive", "himalayas"]
+# `remotive` moved to WHOLE_BOARD: every parameter on that endpoint is ignored, so
+# it takes no query at all and an empty result is drift, not "no matches".
+QUERY_DRIVEN = ["himalayas"]
 
 BROAD_QUERY = ["engineer"]
 

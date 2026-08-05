@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, config, engine, funnel, llm, shortlist
+from . import __version__, config, emit, engine, funnel, llm, shortlist
 from .dedup import dedup_key
 from .util import today_et
 
@@ -42,7 +42,14 @@ def _resolve_config(path_arg):
         print(f"error: --config {path_arg}: no such file", file=sys.stderr)
         raise SystemExit(2)
     explicit = bool(path_arg)
-    for cand in (path_arg, "job-radar.yaml", "job-radar.example.yaml"):
+    # `job-radar.example.yaml` used to be a third candidate here, for the case of
+    # running straight from a clone where a repo-root copy sat beside the code. That
+    # copy is gone -- the packaged one under job_radar/data/ is now the only copy, and
+    # `init` is how it reaches a user's folder -- so the candidate could only ever
+    # match a file the user put there themselves. Falling through to the generic
+    # defaults below is the same configuration anyway: the example file encodes the
+    # defaults, it does not change them.
+    for cand in (path_arg, "job-radar.yaml"):
         if cand and Path(cand).exists():
             cfg = config.load_config(cand)
             if not explicit:
@@ -167,6 +174,17 @@ def cmd_scan(args, cfg):
         shortlist.annotate(args.out, ann)
         surfaced = shortlist.surface(merged, cfg)
 
+    # NDJSON goes to STDOUT and everything else to STDERR, so `job-radar --format
+    # ndjson > jobs.ndjson` produces a clean file and the human progress lines still
+    # reach the terminal. A DB feed that has to be grepped out of a status report is
+    # not a feed.
+    # getattr, not args.format: tests and library callers construct a Namespace by
+    # hand, and a new CLI flag must not turn "your caller predates this option" into
+    # an AttributeError mid-scan, AFTER the network harvest has already happened.
+    if getattr(args, "format", "text") == "ndjson":
+        _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key)
+        return
+
     new_n = sum(1 for r in surfaced if r.get("_is_new"))
     err_tail = f"{len(errors)} feed errors"
     if errors and not args.verbose:
@@ -188,6 +206,45 @@ def cmd_scan(args, cfg):
         print(_fmt(r, cfg))
     print(f"\nFull list: {args.out}  ·  apply: job-radar apply <id>")
     if args.strict and errors:  # opt-in: a partial failure is a failure
+        raise SystemExit(1)
+
+
+def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
+    """Write the machine feed: rows to stdout, run manifest and status to stderr.
+
+    `--all` emits every tracked role; the default emits only what `surface()` shows,
+    which is the same set the human output prints. A store usually wants everything
+    (it does its own filtering), so this is the one place `--all` is likely the
+    normal choice rather than the exception.
+
+    THE JOIN, and why it has to happen here. Two dicts describe the same role and
+    each holds half of what the feed needs:
+
+      * the HARVEST row (`by_key`) carries the 0.7.0 contract -- structured location,
+        remote + basis, function/org_unit/employer_org, tags, seniority
+      * the STORE row (`merged`) carries the HISTORY -- id, first_seen, status, and
+        any llm_score
+
+    The store is a nineteen-column CSV and deliberately does not persist the contract
+    fields, so emitting straight from `merged` would produce a feed of nulls that
+    looked structurally correct. Emitting straight from the harvest would lose
+    `status`, so a consumer could not tell an applied role from a new one. Join them
+    on dedup_key, store row first so history wins, contract fields grafted on top.
+    """
+    store_rows = merged if getattr(args, "all", False) else surfaced
+    rows = []
+    for r in store_rows:
+        harvested = by_key.get(r.get("dedup_key")) or {}
+        joined = dict(r)
+        for k in engine._CONTRACT_FIELDS:
+            joined[k] = harvested.get(k)
+        joined["sources"] = harvested.get("sources") or joined.get("sources")
+        rows.append(joined)
+    text = emit.records(rows)
+    if text:
+        print(text)
+    print(emit.manifest(rows, errors, discovered, cfg), file=sys.stderr)
+    if args.strict and errors:
         raise SystemExit(1)
 
 
@@ -265,6 +322,17 @@ def main(argv=None):
         help="print the per-source error list (which feeds failed and why)",
     )
     common.add_argument(
+        "--format",
+        choices=("text", "ndjson"),
+        default="text",
+        help="text (human, default) or ndjson (one JSON object per line, for a DB)",
+    )
+    common.add_argument(
+        "--all",
+        action="store_true",
+        help="with --format ndjson: emit every tracked role, not just the shortlist",
+    )
+    common.add_argument(
         "--strict",
         action="store_true",
         help="exit nonzero if ANY source errored (for scheduled runs / CI)",
@@ -298,8 +366,7 @@ def main(argv=None):
     for name, past in (("apply", "applied"), ("dismiss", "dismissed")):
         s = sub.add_parser(name, parents=[common], help=f"mark a role {past}")
         s.add_argument("id")
-    pl = sub.add_parser("list", parents=[common], help="show the current shortlist")
-    pl.add_argument("--all", action="store_true", help="include applied/dismissed")
+    sub.add_parser("list", parents=[common], help="show the current shortlist")
     sd = sub.add_parser(
         "seed",
         parents=[common],
