@@ -110,6 +110,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that copy gone it could only match a file the user placed there. The generic
   defaults it falls through to are the same configuration the example encodes.
 
+### Changed
+
+- **`employment_type` now carries the closed-vocabulary value, not the vendor's
+  string.** `"Full-time"`, `"FULL_TIME"` and `"full time"` all arrive as `FULL_TIME`;
+  the vendor's exact words move to **`employment_type_raw`**. This changes the value
+  semantics of a field that shipped in 0.6.0, and jobfitr reads these rows — a
+  consumer matching on the old strings must read `employment_type_raw` instead, or
+  match the new closed set in `vocab.EMPLOYMENT_TYPES`. Flagged here because a pin of
+  `>=0.6,<0.7` makes it load-bearing.
+
+- **`remote_basis` gained a fourth value, `"board"`.** Six adapters were emitting
+  `"stated"` for a fact no row ever asserted: remotive, jobicy, remoteok, himalayas
+  and braintrust are remote-only sites, so every posting is remote because of what the
+  BOARD is, and usajobs was conditioned on our own query parameter. The values were
+  right; the provenance label was not, and collapsing "the vendor's field said so"
+  into "the board is remote-only" destroys the distinction the field exists to keep. A
+  consumer tightening a remote filter can now discount a board-scope inference without
+  discarding a vendor's explicit flag. The full closed set is
+  `stated | board | location | text | None`, pinned by a test.
+
 ### Added
 
 - **Source attribution, which five wired sources require as a condition of access.**
@@ -172,6 +192,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adapter. Every reduction is announced; nothing is trimmed silently.
 
 ### Fixed
+
+- **A caller-supplied `cfg` did not govern the run.** `engine.harvest(cfg=...)` never
+  installed it, while `sources._depth()` (every `harvest_depth` ceiling), the SerpApi
+  quota guard and the adzuna/usajobs adapters all read the process-global
+  `config.active()`. A library consumer that built a Config and passed it in got the
+  GLOBAL settings silently — the config looked applied and was inert, which is worse
+  than no config at all. jobfitr had reverse-engineered the workaround (calling
+  `set_active` itself) with nothing in the docs saying it was required. `harvest` now
+  installs the cfg for its duration and restores the previous one in a `finally`.
+  Stated plainly because it is a real constraint: two concurrent `harvest()` calls
+  with DIFFERENT configs in one process will interfere, and a caller doing that needs
+  its own lock.
+
+- **USAJOBS ignored the row's own remote field and read our query parameter instead.**
+  `remote_basis` was `"stated"` because WE had appended `&RemoteIndicator=True` to the
+  request, so every row claimed a vendor statement about remoteness. The real per-row
+  fields were there the whole time (probed n=25: `UserArea.Details.RemoteIndicator` on
+  25/25, `TeleworkEligible` true on 13), and are now read — including hybrid, which no
+  amount of reading our own query could ever have produced.
+
+- **The remote-vs-place predicate drifted apart again.** `search_usajobs` compared
+  `cfg.location.lower() != "remote"` — the exact literal-string bug adzuna's own
+  comment names as one it already fixed, and which CLAUDE.md lists as an invariant
+  learned expensively. With `location` set to `anywhere`, `any`, `""` or `" remote "`
+  it built `&LocationName=%20remote%20` with no `RemoteIndicator`, so the remote
+  filter silently never reached the API. Now uses the shared `_is_remote_query`.
+
+- **`employment_type_raw` could hold a value the vendor never sent.** It is documented
+  as "what the vendor actually said", and the back-fill wrote the NORMALIZED value
+  into it whenever the raw was absent. USAJOBS is the real case: it maps
+  `PositionSchedule[].Code == "1"` to `FULL_TIME` itself and `.Name` is empty on 47 of
+  50 measured rows, so rows claimed a quotation that never existed.
+
+- **Two hot paths, 2× on a realistic corpus, byte-identical output.** `util.has` was a
+  lookaround regex scanning a ~4.8 KB blob once per keyword — measured at 46% of
+  whole-corpus consume time — and is now a `str.find` loop with identical semantics
+  (verified against the old regex on 60,000 randomized cases, zero mismatches; scoring
+  measured 1.98× with identical scores and signals). And `dedup.different_openings`
+  re-parsed both URLs with `job_ref` on every pairwise comparison, when the candidate's
+  ref was computed one line earlier and each hit's on insert; stashing it measured
+  **11.4× at n=1600** with identical hit-key sets at every size. Recorded so nobody
+  re-derives it: an `lru_cache` on `job_ref` is the *wrong* fix and measured slower —
+  it hashes tens of thousands of distinct URL keys to serve blocks averaging ~10.
 
 - **The self-expanding watchlist was blind to three of its eight ATSs.** `funnel`
   identified a candidate board with `ats_from_url`, which returns `(ats, slug)` and

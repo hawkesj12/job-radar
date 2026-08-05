@@ -2314,3 +2314,38 @@ def test_every_depth_ceiling_is_reachable_through_the_block():
     have = set(vars(config.HarvestDepth()))
     assert asked, "no depth lookups found — did the accessor get renamed?"
     assert asked <= have, f"sources asks for {sorted(asked - have)}, not on the block"
+
+
+def test_employment_type_raw_never_holds_a_value_the_vendor_did_not_send():
+    """Panel P7. `employment_type_raw` is documented as "what the vendor actually
+    said", and the back-fill wrote the NORMALIZED value into it whenever raw was
+    absent — so a row claimed a vendor quotation that never existed.
+
+    USAJOBS is the real case: it maps PositionSchedule Code "1" to FULL_TIME itself,
+    and `.Name` is empty on 47 of 50 measured rows. Absent is honest; inventing a
+    quotation is the one thing a provenance field cannot do."""
+    r = engine._coerce(
+        {
+            "title": "Engineer",
+            "company": "Acme",
+            "url": "https://example.com/1",
+            "source": "usajobs",
+            "employment_type": "FULL_TIME",  # already normalized by the adapter
+            "employment_type_raw": None,
+        }
+    )
+    assert r["employment_type"] == "FULL_TIME"
+    assert r["employment_type_raw"] is None, "invented a vendor quotation"
+
+    # A genuine vendor string still round-trips into the raw.
+    r2 = engine._coerce(
+        {
+            "title": "Engineer",
+            "company": "Acme",
+            "url": "https://example.com/2",
+            "source": "greenhouse",
+            "employment_type": "Full-time",
+        }
+    )
+    assert r2["employment_type"] == "FULL_TIME"
+    assert r2["employment_type_raw"] == "Full-time"

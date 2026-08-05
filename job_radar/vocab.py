@@ -439,6 +439,31 @@ def split_place(raw) -> dict:
     return empty
 
 
+# The closed vocabulary for `remote_basis`. Kept here beside the other vocabularies
+# rather than as a comment, so a value outside it is a one-line diff to spot.
+#
+# `board` was added 2026-08-05 after a panel review caught six adapters emitting
+# `stated` for it. It is the difference between "the vendor's own field on THIS row
+# says remote" and "every row on this board is remote because that is what the board
+# IS" -- remotive, jobicy, remoteok, himalayas and braintrust are remote-only sites,
+# and usajobs was conditioned on OUR OWN query parameter, not on anything the row
+# said. The value is right in all six cases; the provenance label was not, and
+# collapsing the two is exactly what this field exists to prevent. A consumer
+# tightening a remote filter should be able to discount a board-scope inference
+# without discarding a vendor's explicit flag.
+REMOTE_BASES = frozenset({"stated", "board", "location", "text"})
+
+# `seniority_basis` -- same discipline, unchanged vocabulary.
+SENIORITY_BASES = frozenset({"stated", "title"})
+
+# `posted_basis` -- see util.posted_from / sources.posted_from_relative.
+POSTED_BASES = frozenset({"stated", "relative"})
+
+# `salary_basis` -- `estimated` rides in salary_estimated_* rather than here, so a
+# figure in salary_min is always one an employer committed to.
+SALARY_BASES = frozenset({"stated", "text"})
+
+
 def remote_type(raw) -> str | None:
     """Vendor work-arrangement string -> remote | hybrid | onsite | None.
 

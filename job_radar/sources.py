@@ -1572,7 +1572,10 @@ def search_remotive(queries, strict: bool = False):
                 "department": j.get("category", ""),
                 "category": j.get("category") or None,
                 "remote_type": "remote",  # a remote-only board by definition
-                "remote_basis": "stated",
+                # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
+                # here is remote because that is what this board is. Collapsing the two
+                # into one label is what the basis field exists to prevent.
+                "remote_basis": "board",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
                 "employment_type": j.get("job_type", ""),
                 "salary": j.get("salary", "") or salary_from_text(text),
@@ -1609,7 +1612,10 @@ def search_jobicy(queries):
                 "category": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
                 "remote_type": "remote",  # a remote-only board by definition
-                "remote_basis": "stated",
+                # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
+                # here is remote because that is what this board is. Collapsing the two
+                # into one label is what the basis field exists to prevent.
+                "remote_basis": "board",
                 "employment_type": _joined(j.get("jobType")),
                 "salary": salary_from_text(text),
                 # salaryMin/Max/Currency/Period are REAL fields on 46 of 100 rows --
@@ -1679,7 +1685,10 @@ def search_remoteok(queries):
                 "department": "",
                 "employment_type": "",
                 "remote_type": "remote",  # a remote-only board by definition
-                "remote_basis": "stated",
+                # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
+                # here is remote because that is what this board is. Collapsing the two
+                # into one label is what the basis field exists to prevent.
+                "remote_basis": "board",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
                 # salary_min/salary_max are present on all 100 rows of this feed and
                 # both are 0 (probed 2026-08-05) -- the keys exist, the data does not.
@@ -1843,7 +1852,10 @@ def _himalayas_rows(jobs, out, seen=None):
                 )
                 or None,
                 "remote_type": "remote",  # a remote-only board by definition
-                "remote_basis": "stated",
+                # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
+                # here is remote because that is what this board is. Collapsing the two
+                # into one label is what the basis field exists to prevent.
+                "remote_basis": "board",
                 # `locationRestrictions` is a COUNTRY list ("United States", or forty
                 # of them) -- never a city. That is a region, which is exactly what
                 # remote_region means, and it was only being joined into the display
@@ -2196,7 +2208,10 @@ def search_braintrust(queries):
                     "category": (j.get("role") or {}).get("name") or None,
                     "expires": to_date(j.get("deadline")),
                     "remote_type": "remote",  # a remote freelance network by definition
-                    "remote_basis": "stated",
+                    # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
+                    # here is remote because that is what this board is. Collapsing the two
+                    # into one label is what the basis field exists to prevent.
+                    "remote_basis": "board",
                     "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
                     or None,
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
@@ -2284,6 +2299,26 @@ def _usajobs_text(d: dict) -> str:
     return clean("\n".join(parts))
 
 
+def _usajobs_remote(d: dict) -> dict:
+    """USAJOBS row -> {remote_type, remote_basis, remote_region}.
+
+    `RemoteIndicator` on a FEDERAL posting means nationwide within the US -- the
+    location display literally reads "Anywhere in the U.S. (remote job)" -- so the
+    region is knowable rather than a guess.
+    """
+    ua = (d.get("UserArea") or {}).get("Details") or {}
+    if "RemoteIndicator" not in ua and "TeleworkEligible" not in ua:
+        return {"remote_type": None, "remote_basis": None, "remote_region": None}
+    if ua.get("RemoteIndicator") is True:
+        return {
+            "remote_type": "remote",
+            "remote_basis": "stated",
+            "remote_region": "US",
+        }
+    rt = "hybrid" if ua.get("TeleworkEligible") is True else "onsite"
+    return {"remote_type": rt, "remote_basis": "stated", "remote_region": None}
+
+
 def _usajobs_place(locations) -> dict:
     """USAJOBS `PositionLocation[]` -> {city, state, country}.
 
@@ -2319,7 +2354,14 @@ def search_usajobs(queries):
     if not (key and email):
         print("  usajobs: no USAJOBS_API_KEY/USAJOBS_EMAIL -- skipped")
         return []
-    is_place = cfg.location.lower() != "remote"
+    # THE SHARED PREDICATE, not a literal comparison. This read
+    # `cfg.location.lower() != "remote"`, which is the exact drift adzuna's comment
+    # already names as a bug it fixed -- and CLAUDE.md lists "one predicate for
+    # remote-vs-place" as an invariant learned expensively. It matched only the
+    # literal string: with `location` set to "anywhere", "any", "" or " remote ",
+    # this built `&LocationName=%20remote%20` with NO RemoteIndicator, so the remote
+    # filter silently never reached the API and an empty LocationName went out.
+    is_place = not _is_remote_query(cfg)
     loc = f"&LocationName={q(cfg.location)}" if is_place else ""
     # USAJOBS Radius is in miles and only applies alongside a LocationName.
     rad = f"&Radius={cfg.radius_miles}" if (is_place and cfg.radius_miles > 0) else ""
@@ -2417,12 +2459,20 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # how a federal applicant reads it.
                 "seniority": _usajobs_grade(d),
                 **_usajobs_place(d.get("PositionLocation")),
-                "remote_type": "remote" if remote else None,
-                "remote_basis": "stated" if remote else None,
-                # RemoteIndicator on a FEDERAL posting means nationwide within the
-                # US -- the location display literally reads "Anywhere in the U.S.
-                # (remote job)". The region is knowable, not a guess.
-                "remote_region": "US" if remote else None,
+                # THE ROW'S OWN FIELDS, not our query parameter. This used to read
+                # `"stated" if remote`, where `remote` is the string WE appended to
+                # the request URL -- so the basis was reporting our own search, and
+                # every row came back "remote/stated" simply because we had asked for
+                # remote. Probed 2026-08-05 (n=25, plain query): every posting carries
+                # UserArea.Details.RemoteIndicator (False on 25/25 there) and
+                # TeleworkEligible (True on 13, False on 12), so the fact was
+                # available per row the whole time.
+                #
+                # TeleworkEligible -> hybrid is the one judgment here: a federal role
+                # that is telework-eligible but not remote is partly-in-office, which
+                # is what `hybrid` means. The basis stays `stated` because basis names
+                # WHERE a value came from -- a vendor field -- not how certain it is.
+                **_usajobs_remote(d),
                 # OPM occupational series and pay grade are real federal identifiers
                 # -- better join keys than the label already in `category` -- and no
                 # other source has anything like them. One-source fields belong in

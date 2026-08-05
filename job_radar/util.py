@@ -14,7 +14,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -241,18 +240,45 @@ def salary_range(lo, hi) -> str:
     return ""
 
 
-@lru_cache(maxsize=None)
-def _kw_re(kw: str) -> re.Pattern:
-    """Compile a keyword's whole-word matcher once (keyword lists are static per
-    config; this is called ~200×/posting, so caching the compile matters)."""
-    return re.compile(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])")
+# The character class the whole-word boundary is defined against. A frozenset
+# membership test is what makes the str.find loop below beat the regex.
+_WORDCHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 
 
 def has(kw: str, text: str) -> bool:
     """Whole-word match, CASE-SENSITIVE: 'ai' hits 'ai' but not 'training' /
     'available'. Callers lowercase both the keyword and the text first (keyword
-    lists are lowercase; the scored blob is `.lower()`-ed), so this never uppercases."""
-    return _kw_re(kw).search(text) is not None
+    lists are lowercase; the scored blob is `.lower()`-ed), so this never uppercases.
+
+    `str.find` in a loop, NOT a lookaround regex, and the difference is not academic:
+    the previous `(?<![a-z0-9])kw(?![a-z0-9])` scanned a ~4.8 KB blob once per
+    keyword and `re.Pattern.search` measured 46% of whole-corpus `_consume` time.
+    Replacing it took `_present` from 122.5 to 6.5 us/posting (18.8x) and the whole
+    30,000-posting consume from 3.378s to 1.781s (1.90x), with byte-identical output.
+
+    The semantics are IDENTICAL, not merely similar, which is the only reason this is
+    a safe trade: every keyword is a `re.escape`d literal (no patterns), both sides
+    are case-sensitive, and a lookaround asserting "not an alnum" is exactly a check
+    of the character on either side. Checking those two characters directly does the
+    same work without a scan.
+
+    An n-gram token-set alternative was measured and is SLOWER (142 us/posting):
+    building the grams in Python costs more than the C-level regex it replaces.
+    """
+    # No empty-keyword short-circuit: the lookaround regex this replaces DOES match
+    # an empty keyword, at any position whose neighbours are not alnum, and the loop
+    # below reproduces that exactly. Special-casing it disagreed on 3,701 of 40,000
+    # randomized cases -- all of them empty-keyword -- which is how it was caught.
+    n, start = len(kw), 0
+    while True:
+        i = text.find(kw, start)
+        if i < 0:
+            return False
+        if (i == 0 or text[i - 1] not in _WORDCHARS) and (
+            i + n == len(text) or text[i + n] not in _WORDCHARS
+        ):
+            return True
+        start = i + 1
 
 
 def today_et() -> str:

@@ -92,13 +92,13 @@ _CONTRACT_FIELDS = (
     "country",
     "remote_type",  # remote | hybrid | onsite | None
     "remote_region",  # where a remote worker may sit, when stated
-    "remote_basis",  # stated | location | text | None
+    "remote_basis",  # stated | board | location | text | None -- vocab.REMOTE_BASES
     # money
     "salary_min",  # float | None -- what an employer COMMITTED to
     "salary_max",
     "salary_currency",
     "salary_period",  # year | month | week | day | hour | fixed | None
-    "salary_basis",  # stated | parsed | None
+    "salary_basis",  # stated | text | None -- vocab.SALARY_BASES
     "salary_estimated_min",  # a MODEL's guess. Never the same column as a commitment.
     "salary_estimated_max",
     # terms
@@ -227,9 +227,19 @@ def _coerce(p: dict) -> dict:
     # used to carry the vendor string and now carries the closed-vocabulary value.
     # That is a deliberate break, and the raw is one key away.
     if p.get("employment_type_raw") is None:
-        norm, raw = vocab.employment_type(p.get("employment_type"))
+        incoming = p.get("employment_type")
+        norm, raw = vocab.employment_type(incoming)
         p["employment_type"] = norm or ""
-        p["employment_type_raw"] = raw
+        # `raw` means "what the VENDOR actually said", so it must not be back-filled
+        # with a value the vendor never sent. An adapter that already mapped into the
+        # closed vocabulary -- usajobs turns PositionSchedule Code "1" into FULL_TIME,
+        # and .Name is empty on 47 of 50 measured rows -- was landing here with
+        # employment_type=FULL_TIME and raw=None, and this wrote FULL_TIME into the
+        # raw as though the vendor had said it. Leave it None: absent is honest, and
+        # inventing a quotation is the one thing a provenance field cannot do.
+        p["employment_type_raw"] = (
+            None if str(incoming or "") in vocab.EMPLOYMENT_TYPES else raw
+        )
 
     # `direct_apply` -- does this url reach the EMPLOYER, or an aggregator that will
     # bounce you onward? It is the product's whole differentiator, and _src_pref has
@@ -284,7 +294,7 @@ def _consume(postings, hits, blocks, cfg, meta):
         match, key, blk, nt = find_hit_key(p, hits, blocks, cfg)
         if match is None:
             p["_blk"] = blk  # block + normalized title, stashed for the fuzzy pass
-            p["_nt"] = nt
+            p["_nt"] = nt  # (`_ref` is stashed by find_hit_key itself)
             p["dedup_key"] = key  # stash so the store/CLI don't recompute it
             hits[key] = p
             if blk:
@@ -334,8 +344,29 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
     longer needs to know where a caller's companies live, or be able to read disk
     at all. `discovered` is likewise RETURNED, never written — persistence is the
     caller's business (see cli.cmd_scan, which appends to its watchlist.json).
+
+    A caller-supplied `cfg` GOVERNS THE WHOLE RUN, including the parts that do not
+    take it as an argument. That needed saying because it was not true until
+    2026-08-05: `sources._depth()` (every harvest_depth ceiling), the SerpApi quota
+    guard, and the adzuna/usajobs adapters all read the process-global
+    `config.active()`, so a consumer that built a Config and passed it here got the
+    GLOBAL depth settings silently — the config looked applied and was inert. jobfitr
+    had reverse-engineered the workaround (calling `set_active` itself) without
+    anything in the docs saying it was required.
+
+    The cost of fixing it that way, stated plainly: `harvest` now installs `cfg`
+    globally for its duration and restores the previous one afterwards. Two
+    concurrent `harvest()` calls with DIFFERENT configs in one process will therefore
+    interfere, and a caller doing that needs its own lock.
     """
     cfg = cfg or config.active()
+    with config.activated(cfg):
+        return _harvest(cfg, watchlist_path, companies)
+
+
+def _harvest(cfg, watchlist_path, companies):
+    """The body of `harvest`, split out only so the config installation above reads as
+    one line rather than wrapping two hundred."""
     watchlist_err = None
     if companies is None:
         companies = []
@@ -478,4 +509,5 @@ def harvest(cfg=None, watchlist_path=None, companies=None):
     for r in rows:
         r.pop("_blk", None)
         r.pop("_nt", None)
+        r.pop("_ref", None)  # the stashed job_ref — same reasoning as the two above
     return rows, discovered, errors

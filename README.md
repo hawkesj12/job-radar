@@ -36,7 +36,7 @@ Every adapter, whatever it was handed, emits the same dict:
 | **`city` · `state` · `country`** | structured geography, where the source sends it                |
 | **`remote`**                   | `True` / `False` / **`None`** — see below                        |
 | **`remote_type`**              | `remote` · `hybrid` · `onsite` · `None` — a bool cannot say hybrid |
-| **`remote_basis`**             | how we decided: `stated` · `location` · `text`                   |
+| **`remote_basis`**             | how we decided: `stated` · `board` · `location` · `text`         |
 | **`tags`** · **`seniority`**   | skills list; the source's own level string, verbatim             |
 | `location`                     | the raw location string, kept alongside the parsed fields        |
 | `department`                   | **deprecated** — see below. Removed at 1.0.                      |

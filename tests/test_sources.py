@@ -64,7 +64,14 @@ def _usajobs_response(monkeypatch, payload):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: _Resp())
+    seen: list[str] = []
+
+    def _open(req, timeout=0):
+        seen.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _open)
+    return seen  # the request URLs, for tests that assert on what was SENT
 
 
 def _assert_contract(postings, source_name=None, required=None):
@@ -2235,3 +2242,115 @@ def test_the_quota_probe_itself_is_free(monkeypatch):
     sources.search_google_jobs(["a"])
     account_calls = [u for u in seen if "account.json" in u]
     assert len(account_calls) == 1, "the quota is probed once per run, not per query"
+
+
+# ── the basis vocabularies are closed (panel review C1, 2026-08-05) ──────────
+def test_no_adapter_emits_a_basis_outside_its_closed_vocabulary():
+    """A basis outside its set is a contract break: the whole point of the field is
+    that a consumer can branch on it, which requires knowing every value it can take.
+
+    Enforced by reading the SOURCE, so an adapter that hard-codes a typo'd basis fails
+    here rather than in whatever consumer eventually branches on it."""
+    import inspect
+    import re as _re
+
+    from job_radar import vocab as _vocab
+
+    src = inspect.getsource(sources)
+    for field, legal in (
+        ("remote_basis", _vocab.REMOTE_BASES),
+        ("seniority_basis", _vocab.SENIORITY_BASES),
+        ("posted_basis", _vocab.POSTED_BASES),
+        ("salary_basis", _vocab.SALARY_BASES),
+    ):
+        used = set(_re.findall(rf'"{field}":\s*"([a-z_]+)"', src))
+        used |= set(_re.findall(rf'"{field}":\s*"([a-z_]+)"\s+if', src))
+        illegal = used - legal
+        assert not illegal, f"{field} emits {sorted(illegal)}, not in {sorted(legal)}"
+
+
+def test_a_remote_only_board_reports_board_scope_not_a_vendor_field():
+    """C1, the panel's blocker. Six adapters labelled `stated` for a fact no ROW ever
+    asserted — every posting on remotive/jobicy/remoteok/himalayas/braintrust is
+    remote because that is what the board IS. The values were right; the provenance
+    was not, and collapsing "the vendor's field said so" into "the board is remote-
+    only" destroys exactly the distinction the basis field exists to preserve.
+
+    A consumer tightening a remote filter must be able to discount a board-scope
+    inference without discarding a vendor's explicit flag."""
+    for name, sample_key in (
+        ("remotive", "remotive"),
+        ("jobicy", "jobicy"),
+        ("remoteok", "remoteok"),
+        ("braintrust", "braintrust"),
+    ):
+        if sample_key not in SAMPLES:
+            continue
+        import unittest.mock as m
+
+        c = _cfg()
+        with (
+            m.patch.object(sources, "get_json", lambda *a, **k: SAMPLES[sample_key]),
+            m.patch.object(sources.time, "sleep", lambda s: None),
+            m.patch.object(c, "env", lambda k: "test-key"),
+        ):
+            rows = sources.BREADTH_ALL[name](["engineer"])
+        for r in rows:
+            assert r.get("remote_basis") == "board", (
+                f"{name}: a remote-only board is not a per-row vendor statement"
+            )
+
+
+def test_usajobs_reads_the_rows_remote_field_not_our_query_parameter():
+    """It emitted `stated` from the string WE appended to the request URL, so every
+    row claimed a vendor statement purely because we had asked for remote. The real
+    per-row fields were there the whole time (probed n=25: RemoteIndicator on 25/25,
+    TeleworkEligible True on 13)."""
+    remote = sources._usajobs_remote(
+        {"UserArea": {"Details": {"RemoteIndicator": True, "TeleworkEligible": True}}}
+    )
+    assert remote == {
+        "remote_type": "remote",
+        "remote_basis": "stated",
+        "remote_region": "US",
+    }
+    # Telework-eligible but not remote is partly-in-office, which is what hybrid means.
+    hybrid = sources._usajobs_remote(
+        {"UserArea": {"Details": {"RemoteIndicator": False, "TeleworkEligible": True}}}
+    )
+    assert hybrid["remote_type"] == "hybrid" and hybrid["remote_region"] is None
+    onsite = sources._usajobs_remote(
+        {"UserArea": {"Details": {"RemoteIndicator": False, "TeleworkEligible": False}}}
+    )
+    assert onsite["remote_type"] == "onsite"
+    # Neither field present -> unknown, never a plausible default.
+    assert sources._usajobs_remote({})["remote_type"] is None
+    assert sources._usajobs_remote({})["remote_basis"] is None
+
+
+def test_usajobs_treats_every_non_place_the_way_adzuna_does(monkeypatch):
+    """The remote-vs-place predicate drifted apart again (panel P2). This adapter
+    compared against the literal string "remote", so "anywhere", "any" and "" built
+    `&LocationName=%20remote%20` with no RemoteIndicator — the remote filter never
+    reached the API and an empty LocationName went out. Every keyed search API
+    distinguishes a PLACE from a WORK ARRANGEMENT, and every one fails silently when
+    you confuse them."""
+    for arrangement in ("remote", "Remote", " remote ", "anywhere", "any", ""):
+        c = _cfg()
+        monkeypatch.setattr(c, "location", arrangement)
+        monkeypatch.setattr(c, "env", lambda key: "test-key")
+        calls = _usajobs_response(
+            monkeypatch, {"SearchResult": {"SearchResultItems": []}}
+        )
+        sources.search_usajobs(["engineer"])
+        url = calls[0] if isinstance(calls, list) and calls else ""
+        assert "RemoteIndicator=True" in url, f"{arrangement!r} lost the remote filter"
+        assert "LocationName=" not in url, f"{arrangement!r} sent a place too: {url}"
+
+    c = _cfg()
+    monkeypatch.setattr(c, "location", "Louisville, KY")
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    calls = _usajobs_response(monkeypatch, {"SearchResult": {"SearchResultItems": []}})
+    sources.search_usajobs(["engineer"])
+    url = calls[0]
+    assert "LocationName=Louisville" in url and "RemoteIndicator" not in url

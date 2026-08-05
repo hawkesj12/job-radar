@@ -10,6 +10,7 @@ defaults -- run `job-radar init` to get a commented copy of them as YAML
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -606,3 +607,27 @@ def set_active(cfg: Config) -> None:
 
 def active() -> Config:
     return _ACTIVE
+
+
+@contextmanager
+def activated(cfg: Config):
+    """Make `cfg` the process-global active config for the duration of a block.
+
+    Exists because several things a harvest depends on -- every `harvest_depth`
+    ceiling, the SerpApi quota guard, and the two keyed search adapters -- read
+    `active()` rather than taking a cfg argument, and threading one through every
+    adapter signature would change the public shape of all nineteen. A caller who
+    passes `cfg` to `harvest()` means "run with THIS config", so `harvest` installs it.
+
+    NOT thread-safe by construction, and it cannot be: the thing it sets is global.
+    Two concurrent `harvest()` calls with DIFFERENT configs will interfere, so a
+    consumer running them in parallel needs its own lock (jobfitr already does). The
+    restore is in a finally, so an exception cannot leave someone else's config
+    installed.
+    """
+    prev = _ACTIVE
+    set_active(cfg)
+    try:
+        yield cfg
+    finally:
+        set_active(prev)
