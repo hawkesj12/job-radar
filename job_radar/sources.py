@@ -272,6 +272,20 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 "remote_type": _rt(loc.get("remote"), loc.get("hybrid")),
                 "remote_basis": "stated" if "remote" in loc else None,
                 "employment_type": (j.get("typeOfEmployment") or {}).get("label", ""),
+                # One-source fields: nobody else in the corpus sends an industry
+                # taxonomy, a SEPARATE hybrid flag, or coordinates. Kept verbatim
+                # rather than dropped, and out of the core rather than bloating it.
+                "source_extra": {
+                    k: v
+                    for k, v in (
+                        ("industry", (j.get("industry") or {}).get("label")),
+                        ("hybrid", loc.get("hybrid")),
+                        ("latitude", loc.get("latitude")),
+                        ("longitude", loc.get("longitude")),
+                        ("ref_number", j.get("refNumber")),
+                    )
+                    if v not in (None, "")
+                },
                 "salary": "",
                 "text": "",
             }
@@ -671,12 +685,13 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
             path = j.get("externalPath", "")
             # bulletFields carries a real 'Posting Date: MM/DD/YYYY'; postedOn is a
             # relative string ('Posted 26 Days Ago') that would rot in the cache.
-            posted = ""
+            posted, posted_basis = "", None
             for b in j.get("bulletFields") or []:
                 m = _WD_POSTED.search(str(b))
                 if m:
                     mo, day, yr = m.groups()
                     posted = f"{yr}-{int(mo):02d}-{int(day):02d}"
+                    posted_basis = "stated"  # a real 'Posting Date: MM/DD/YYYY'
                     break
             if not posted:
                 # Only SOME tenants put an absolute date in bulletFields; the rest
@@ -684,12 +699,19 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
                 # than leaving posted empty — a blank date sinks the role in any
                 # freshness filter, which would silently bury whole employers.
                 posted = _relative_posted(j.get("postedOn", ""))
+                # ARITHMETIC ON A PHRASE, not a date the tenant published. Workday
+                # says "Posted 26 Days Ago" -- and "30+ Days Ago" could be 30 or 300.
+                # Without this label the derived date looks exactly as authoritative
+                # as Greenhouse's real timestamp, and only SOME tenants put an
+                # absolute date in bulletFields, so the two arrive side by side.
+                posted_basis = "relative" if posted else None
             out.append(
                 {
                     "title": j.get("title", ""),
                     "location": j.get("locationsText", ""),
                     "url": f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{path}",
                     "posted": posted,
+                    "posted_basis": posted_basis,
                     "department": "",
                     "employment_type": "",
                     "salary": "",
@@ -1498,6 +1520,10 @@ def search_adzuna(queries):
                         "country": country,
                         "remote_type": "remote" if is_remote else None,
                         "remote_basis": "location" if is_remote else None,
+                        # `area == ["US"]` does not just mean "remote", it names the
+                        # REGION a remote worker may sit in -- and that was the whole
+                        # signal, flattened to a boolean. area[0] is the country.
+                        "remote_region": country if is_remote else None,
                         "employment_type": j.get("contract_time", ""),
                         "salary": salary_range(
                             j.get("salary_min"), j.get("salary_max")
@@ -1844,8 +1870,33 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 )
                 or None,
                 **_usajobs_place(d.get("PositionLocation")),
-                "remote": True if remote else None,
-                "remote_basis": "source_field" if remote else None,
+                "remote_type": "remote" if remote else None,
+                "remote_basis": "stated" if remote else None,
+                # RemoteIndicator on a FEDERAL posting means nationwide within the
+                # US -- the location display literally reads "Anywhere in the U.S.
+                # (remote job)". The region is knowable, not a guess.
+                "remote_region": "US" if remote else None,
+                # OPM occupational series and pay grade are real federal identifiers
+                # -- better join keys than the label already in `category` -- and no
+                # other source has anything like them. One-source fields belong in
+                # source_extra, not in a core column 18 adapters leave empty.
+                "source_extra": {
+                    k: v
+                    for k, v in (
+                        (
+                            "opm_series",
+                            ",".join(
+                                c.get("Code", "")
+                                for c in (d.get("JobCategory") or [])
+                                if c.get("Code")
+                            ),
+                        ),
+                        ("pay_grade", (d.get("JobGrade") or [{}])[0].get("Code")),
+                        ("announcement", d.get("PositionID")),
+                    )
+                    if v
+                }
+                or None,
                 "employment_type": ", ".join(
                     s.get("Name", "") for s in (d.get("PositionSchedule") or [])
                 ),

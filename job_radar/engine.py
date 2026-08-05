@@ -112,6 +112,11 @@ _CONTRACT_FIELDS = (
     # provenance
     "direct_apply",  # bool -- the url reaches the EMPLOYER, not an aggregator
     "remote",  # bool | None -- DERIVED from remote_type; see _coerce
+    # dict | None -- the third tier. Fields ONE source sends that no other can, kept
+    # verbatim so nothing is lost while the core stays queryable. The promotion rule:
+    # a field enters the core contract when TWO OR MORE sources can fill it; a
+    # genuine one-source quirk lives here. Never index this; read it by key.
+    "source_extra",
 )
 
 # Fields whose ABSENCE is meaningful and must survive as None rather than "".
