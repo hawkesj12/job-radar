@@ -529,9 +529,27 @@ def search_google_jobs(queries):
                             j.get("apply_options"), j.get("share_link", "")
                         ),
                         "posted": _google_posted(ext.get("posted_at", "")),
+                        # ALWAYS relative -- Google states recency as "2 days ago",
+                        # never a date. The absolute value above is arithmetic done
+                        # at fetch time, and a consumer sorting by freshness deserves
+                        # to know that rather than trusting it like a timestamp.
+                        "posted_basis": "relative" if ext.get("posted_at") else None,
                         "department": "",
+                        # `work_from_home` is a real boolean on the extension, and it
+                        # is the ONLY structured remote signal Google gives. Verified
+                        # 2026-08-05: with &ltype=1 it is true on 10 of 10 results,
+                        # without it 0 of 10.
+                        **(
+                            {"remote_type": "remote", "remote_basis": "stated"}
+                            if ext.get("work_from_home")
+                            else {}
+                        ),
                         "employment_type": ext.get("schedule_type", ""),
-                        "salary": salary_from_text(text),
+                        # Google's salary carries its PERIOD in the string --
+                        # "47-55 an hour", "2,140 a week" -- and is frequently NOT
+                        # annual. Parsed rather than assumed; see vocab.google_salary.
+                        "salary": ext.get("salary") or salary_from_text(text),
+                        **vocab.google_salary(ext.get("salary")),
                         "text": text,
                         "source": "google_jobs",
                     }

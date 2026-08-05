@@ -1686,3 +1686,74 @@ def test_usajobs_reads_its_rate_interval(monkeypatch):
     assert r["salary_min"] == 105053.0  # arrives as a STRING from this API
     assert r["salary_period"] == "year" and r["salary_currency"] == "USD"
     assert r["salary_basis"] == "stated"
+
+
+def test_google_salary_carries_its_period():
+    """Google states pay as free text with the PERIOD EMBEDDED — "35-43 an hour",
+    "2,140 a week" — and it is frequently NOT annual (probed 2026-08-05). Those
+    numbers are meaningless without their unit: 35 and 2140 and 150000 in one column
+    with no period makes every aggregate wrong, silently."""
+    from job_radar import vocab
+
+    got = vocab.google_salary("35–43 an hour")
+    assert (got["salary_min"], got["salary_max"]) == (35.0, 43.0)
+    assert got["salary_period"] == "hour" and got["salary_basis"] == "parsed"
+    assert vocab.google_salary("2,140 a week")["salary_period"] == "week"
+    # unparseable -> all None, never a number with a guessed period
+    assert vocab.google_salary("competitive")["salary_min"] is None
+
+
+def test_google_jobs_reads_its_structured_extensions(monkeypatch):
+    """`detected_extensions` carries four things the adapter used to ignore:
+    work_from_home (the only structured remote signal Google gives), schedule_type,
+    a salary with its period, and posted_at — which is ALWAYS relative."""
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda k: "test-key")
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    payload = {
+        "jobs_results": [
+            {
+                "title": "Intake Registered Nurse",
+                "company_name": "Acme Health",
+                "location": "Anywhere",
+                "share_link": "https://g/1",
+                "description": "care",
+                "detected_extensions": {
+                    "posted_at": "2 days ago",
+                    "schedule_type": "Full-time",
+                    "work_from_home": True,
+                    "salary": "35–43 an hour",
+                },
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: payload)
+    from job_radar import engine
+
+    r = engine._coerce(sources.search_google_jobs(["nurse"])[0])
+    assert r["remote_type"] == "remote" and r["remote_basis"] == "stated"
+    assert r["employment_type"] == "FULL_TIME"
+    assert r["employment_type_raw"] == "Full-time"
+    assert r["posted_basis"] == "relative", "a computed date must not look stated"
+    assert r["salary_min"] == 35.0 and r["salary_period"] == "hour"
+
+
+def test_employment_type_is_normalized_once_for_every_adapter():
+    """Nineteen vendors send nineteen spellings of the same eight ideas. Normalizing
+    at the engine boundary rather than per-adapter means one place to be right,
+    instead of nineteen chances to drift — and the vendor string is never lost."""
+    from job_radar import engine, vocab
+
+    for raw, want in [
+        ("Full-time", "FULL_TIME"),
+        ("Regular Full Time (Salary)", "FULL_TIME"),
+        ("permanent", "FULL_TIME"),
+        ("Contract", "CONTRACTOR"),
+        ("Weird New Thing", "OTHER"),  # received but unrecognised != "did not say"
+    ]:
+        r = engine._coerce({"title": "x", "employment_type": raw})
+        assert r["employment_type"] == want, f"{raw!r} -> {r['employment_type']!r}"
+        assert r["employment_type_raw"] == raw, "the vendor's own string was destroyed"
+        assert r["employment_type"] in vocab.EMPLOYMENT_TYPES
+    silent = engine._coerce({"title": "x"})
+    assert silent["employment_type"] == "" and silent["employment_type_raw"] is None

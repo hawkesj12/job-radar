@@ -179,6 +179,39 @@ def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict
     }
 
 
+# Google for Jobs states its salary as free text with the PERIOD EMBEDDED --
+# "47–55 an hour", "2,140 a week", "50 an hour" (probed 2026-08-05). Not annual, and
+# not a number a generic currency regex would give a period to. This is the exact
+# case that makes salary_period load-bearing: 47 and 2140 and 50 are all valid
+# numbers and mean nothing without their unit.
+_G_SALARY = re.compile(
+    r"(?P<lo>[\d,]+(?:\.\d+)?)\s*(?:[-–—]|to)?\s*(?P<hi>[\d,]+(?:\.\d+)?)?\s*"
+    r"(?:an?|per)\s+(?P<per>hour|hr|week|wk|month|mo|year|yr|day)",
+    re.I,
+)
+
+
+def google_salary(raw) -> dict:
+    """Google's `detected_extensions.salary` -> the structured fields.
+
+    Returns all-None when the string does not parse, rather than a number with a
+    guessed period. `basis` is "parsed" -- this is text Google assembled, not a field
+    an employer filled in.
+    """
+    m = _G_SALARY.search(str(raw or ""))
+    if not m:
+        return salary()
+
+    def _n(v):
+        try:
+            return float(str(v).replace(",", "")) or None
+        except (TypeError, ValueError):
+            return None
+
+    lo, hi = _n(m.group("lo")), _n(m.group("hi"))
+    return salary(lo, hi, currency="USD", period=m.group("per"), basis="parsed")
+
+
 # ── remote type ─────────────────────────────────────────────────────────────
 REMOTE_TYPES = frozenset({"remote", "hybrid", "onsite"})
 

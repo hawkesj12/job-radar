@@ -205,6 +205,20 @@ def _coerce(p: dict) -> dict:
                 }
             ]
 
+    # employment_type is NORMALIZED here, once, for all nineteen adapters rather
+    # than in each of them. Nineteen vendors send nineteen spellings of the same
+    # eight ideas -- "Full-time", "FULL_TIME", "Regular Full Time (Salary)",
+    # "permanent" -- and a facet a consumer cannot filter on is not a facet. The
+    # vendor's exact string is preserved in employment_type_raw; nothing is lost.
+    #
+    # NOTE this changes the VALUE SEMANTICS of a released field: `employment_type`
+    # used to carry the vendor string and now carries the closed-vocabulary value.
+    # That is a deliberate break, and the raw is one key away.
+    if p.get("employment_type_raw") is None:
+        norm, raw = vocab.employment_type(p.get("employment_type"))
+        p["employment_type"] = norm or ""
+        p["employment_type_raw"] = raw
+
     p["harvested_at"] = p.get("harvested_at") or now_et()
     return p
 
