@@ -1,0 +1,154 @@
+{
+  "_comment": [
+    "Per-source descriptors for _probe.py. This exists so the probe procedure runs the",
+    "SAME way against every source: the array path and the title/date keys are the only",
+    "things that legitimately differ between them, so they are data, not per-source code.",
+    "Every path here was read off a live response on 2026-08-03, not from a vendor doc.",
+    "'skip' lists procedure steps that cannot apply: a whole-board ATS feed has no query",
+    "interface to test (step 2) and no pages to walk (step 3)."
+  ],
+  "breadth": {
+    "remotive": {
+      "base": "https://remotive.com/api/remote-jobs",
+      "items": "jobs",
+      "date": "publication_date",
+      "title": "title",
+      "title_params": "limit,category,company_name"
+    },
+    "jobicy": {
+      "base": "https://jobicy.com/api/v2/remote-jobs?count=100",
+      "items": "jobs",
+      "date": "pubDate",
+      "title": "jobTitle",
+      "title_params": "tag,geo,industry",
+      "note": "rejects unknown params with 400, so the generic name list answers false; its real keyword filter is `tag`"
+    },
+    "remoteok": {
+      "base": "https://remoteok.com/api",
+      "items": "",
+      "date": "date",
+      "title": "position",
+      "note": "index 0 is a metadata object, not a job — confirmed live",
+      "title_params": "tag,tags"
+    },
+    "himalayas": {
+      "base": "https://himalayas.app/jobs/api/search?limit=20",
+      "items": "jobs",
+      "date": "pubDate",
+      "title": "title",
+      "page_param": "page",
+      "page_mode": "page",
+      "page_size": 20,
+      "title_params": "q",
+      "note": "/jobs/api/search takes `page`; the sibling /jobs/api browse endpoint takes offset+limit. Walking `offset` here is correctly ignored — a fact about the parameter, not the source's depth. `limit` is silently clamped to 20."
+    },
+    "braintrust": {
+      "base": "https://app.usebraintrust.com/api/jobs/?limit=20",
+      "items": "results",
+      "date": "created",
+      "title": "title",
+      "page_size": 20
+    },
+    "techtree": {
+      "base": "https://jobs.techtree.dev/api/public-job-posting?visibility=job_board_only",
+      "items": "jobs",
+      "date": "created_at",
+      "title": "title",
+      "title_params": "q,term"
+    },
+    "arbeitnow": {
+      "base": "https://www.arbeitnow.com/api/job-board-api",
+      "items": "data",
+      "date": "created_at",
+      "title": "title"
+    },
+    "4dayweek": {
+      "base": "https://4dayweek.io/api/jobs",
+      "items": "jobs",
+      "date": "posted",
+      "title": "title",
+      "page_size": 25,
+      "title_params": "search_term,keyword"
+    },
+    "workingnomads": {
+      "base": "https://www.workingnomads.com/api/exposed_jobs/",
+      "items": "",
+      "date": "pub_date",
+      "title": "title",
+      "title_params": "q,term"
+    },
+    "devitjobs": {
+      "base": "https://devitjobs.com/api/jobsLight",
+      "items": "",
+      "date": "activeFrom",
+      "title": "title",
+      "title_params": "q,term"
+    },
+    "landing.jobs": {
+      "base": "https://landing.jobs/api/v1/jobs",
+      "items": "",
+      "date": "published_at",
+      "title": "title",
+      "title_params": "q,term"
+    },
+    "weworkremotely": {
+      "base": "https://weworkremotely.com/remote-jobs.rss",
+      "format": "rss",
+      "items": "",
+      "date": "pubDate",
+      "title": "title"
+    },
+    "nodesk": {
+      "base": "https://nodesk.co/remote-jobs/index.xml",
+      "format": "rss",
+      "items": "",
+      "date": "pubDate",
+      "title": "title"
+    },
+    "jobspresso": {
+      "base": "https://jobspresso.co/?feed=job_feed",
+      "format": "rss",
+      "items": "",
+      "date": "pubDate",
+      "title": "title"
+    }
+  },
+  "depth": {
+    "_comment": "One known-good slug per platform. A 404 here means the slug, not the platform.",
+    "greenhouse": {
+      "base": "https://boards-api.greenhouse.io/v1/boards/databricks/jobs?content=true",
+      "items": "jobs",
+      "date": "updated_at",
+      "title": "title",
+      "skip": "2,3"
+    },
+    "ashby": {
+      "base": "https://api.ashbyhq.com/posting-api/job-board/openai",
+      "items": "jobs",
+      "date": "publishedAt",
+      "title": "title",
+      "skip": "2,3"
+    },
+    "lever": {
+      "base": "https://api.lever.co/v0/postings/leverdemo?mode=json",
+      "items": "",
+      "date": "createdAt",
+      "title": "text",
+      "skip": "2,3"
+    },
+    "rippling": {
+      "base": "https://api.rippling.com/platform/api/ats/v1/board/rippling/jobs",
+      "items": "",
+      "date": "",
+      "title": "name",
+      "skip": "2,3"
+    },
+    "teamtailor": {
+      "base": "https://apotea.teamtailor.com/jobs.json",
+      "items": "items",
+      "date": "date_published",
+      "title": "title",
+      "skip": "2,3"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 # your real config + data (never commit these)
 job-radar.yaml
 watchlist.json
+watchlist.recovered.json
 *.lock                 # shortlist.csv.lock, created by the store's flock guard
 shortlist.csv
 shortlist.csv.tmp
@@ -20,3 +21,18 @@ dist/
 # IDE
 .idea/
 *.iml
+
+# Session handoff + agent orientation — local context, never published
+HANDOFF.md
+CLAUDE.md
+BUILD-0.7.0.md
+ARCHITECTURE.md
+MAPPING.md
+
+# catalog working data — the PROBE OUTPUT, not the knowledge. Every profile carries
+# its own verbatim "## A real record" (required by _SCHEMA.md), so the evidence is in
+# the committed artifact; these two dirs are the scratch the probe wrote on the way
+# there. _probe.py / _scaffold.py / _targets.json ARE committed — they are the
+# procedure, and the procedure is the point.
+catalog/_raw/
+catalog/_out/
