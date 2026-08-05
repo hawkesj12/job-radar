@@ -8,9 +8,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **A structured record contract — ten new keys, every unknown `None`.** `function`
-  (the job family), `org_unit` (the company's own team), `employer_org` (the
-  employing organisation), `city` / `state` / `country`, `remote` + `remote_basis`,
+- **A structured record contract — ten new keys, every unknown `None`.** `category`
+  (the job family), `team` (the company's own team), `parent_company` (the umbrella
+  organisation), `city` / `state` / `country`, `remote` + `remote_basis`,
   `tags`, and `seniority`. Sources that already sent this data were discarding it:
   SmartRecruiters alone carries a real job function, org unit, seniority string,
   structured geography and a remote **boolean** on every posting, and the adapter
@@ -74,8 +74,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unit on Greenhouse and Ashby, a job function on Adzuna, a seniority level on
   Braintrust, and the **employer** on USAJOBS — so a consumer pouring it into one
   column got a category dimension it could not filter on. Still emitted
-  byte-identically, and a test pins that. Use `function` / `org_unit` /
-  `employer_org` / `seniority`. Removed at 1.0.
+  byte-identically, and a test pins that. Use `category` / `team` /
+  `parent_company` / `seniority`. Removed at 1.0.
 
 ### Removed
 
@@ -111,6 +111,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   defaults it falls through to are the same configuration the example encodes.
 
 ### Fixed
+
+- **The machine feed advertised the 0.7.0 contract and shipped six fields of it.**
+  `--format ndjson` emitted three key names — `function`, `org_unit`, `employer_org` —
+  that nothing in the package has set since they were renamed to `category`, `team`
+  and `parent_company`. The rename reached the contract and all nineteen adapters and
+  stopped at `emit._nested`, so those keys were `null` on every row while the ones the
+  adapters actually fill were never emitted at all.
+
+  Auditing that turned up the larger half: **23 of the 29 contract fields never
+  reached the wire.** Every salary field, every `*_basis`, `remote_type`, the title
+  decomposition and `locations` existed on the record and stopped at the emitter. So
+  did `text` — the full description, which is the entire input to the fit score — for
+  a third reason: it is neither a contract field nor a store column, so the join in
+  `cli._emit_ndjson` grafted neither half of it.
+
+  Nothing failed while this was true. The feed had the right shape and was null where
+  it mattered, which is the failure mode this format exists to prevent.
+
+  `title`, `location`, `remote` and `salary` are now nested objects keeping the raw
+  vendor value beside the parsed parts. A new `tests/test_emit.py` asserts in both
+  directions — every key the emitter reads must be something the package produces, and
+  every contract field must reach the wire — so the next rename cannot half-land.
+  `emit.py` had no test coverage at all before this.
 
 - **A date and the label saying where it came from can no longer drift apart.**
   `posted_basis` distinguishes a date the vendor published (`stated`) from one this

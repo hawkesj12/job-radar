@@ -27,12 +27,16 @@ Every adapter, whatever it was handed, emits the same dict:
 | `text`                         | the full description, HTML stripped and whitespace collapsed     |
 | `salary` · `employment_type`   | normalized range; full-time / contract, where the source says    |
 | `source`                       | which adapter produced this record                               |
-| **`function`**                 | the job family — "Healthcare & Nursing Jobs"                     |
-| **`org_unit`**                 | the company's own team — "Engineering - Pipeline"                |
-| **`employer_org`**             | the employing organisation. Never a category.                    |
+| **`category`**                 | the job family — "Healthcare & Nursing Jobs"                     |
+| **`team`**                     | the company's own team — "Engineering - Pipeline"                |
+| **`parent_company`**           | the umbrella org, where a source distinguishes one               |
+| **`title_root`** · **`title_level`** | the matchable role with decoration stripped; `I`–`IV`      |
+| **`salary_min`** · **`salary_max`** | what an employer COMMITTED to, with currency and period     |
+| **`salary_estimated_*`**       | a model's guess, kept in separate keys. Adzuna predicts 93%.      |
 | **`city` · `state` · `country`** | structured geography, where the source sends it                |
 | **`remote`**                   | `True` / `False` / **`None`** — see below                        |
-| **`remote_basis`**             | how we decided: `source_field` · `location_rule` · `text`        |
+| **`remote_type`**              | `remote` · `hybrid` · `onsite` · `None` — a bool cannot say hybrid |
+| **`remote_basis`**             | how we decided: `stated` · `location` · `text`                   |
 | **`tags`** · **`seniority`**   | skills list; the source's own level string, verbatim             |
 | `location`                     | the raw location string, kept alongside the parsed fields        |
 | `department`                   | **deprecated** — see below. Removed at 1.0.                      |
@@ -51,8 +55,8 @@ disagrees with the inference can override it rather than re-deriving everything.
 unit on Greenhouse and Ashby, a job function on Adzuna (`IT Jobs`), a seniority level
 on Braintrust, and *the employer* on USAJOBS (`Department of Veterans Affairs`) — so
 a consumer pouring it into one column got a category dimension it could not filter
-on. It is still emitted byte-identically; use `function` / `org_unit` /
-`employer_org` / `seniority` instead.
+on. It is still emitted byte-identically; use `category` / `team` /
+`parent_company` / `seniority` instead.
 
 Type safety is enforced at one boundary rather than trusted from ~500 third parties: every field above is coerced to `str` inside `harvest` before anything reads it, because a JSON `null` arriving as `None` used to crash the whole harvest on the first `.lower()`.
 
@@ -149,7 +153,7 @@ every role for roughly half the requests the previous truncated version cost.
 Stated plainly, because they're the difference between "normalized" and "actually comparable":
 
 - **Structured location is per-source, not universal.** Adzuna, USAJOBS, SmartRecruiters and Ashby send real `city`/`state`/`country` and those are now mapped. Greenhouse is free text with full state names and no `, XX`; Lever, RemoteOK, Remotive, HN and Braintrust are free text too. `location` always carries the raw string, so nothing is lost — but do not assume `state` is populated. One Greenhouse posting can also name several places at once, separated by `;`, and only the first is parsed.
-- **`department` still exists.** Deprecated, emitted byte-identically, removed at 1.0. It is the one contract field whose meaning varies by source; `function` / `org_unit` / `employer_org` / `seniority` are the replacements.
+- **`department` still exists.** Deprecated, emitted byte-identically, removed at 1.0. It is the one contract field whose meaning varies by source; `category` / `team` / `parent_company` / `seniority` are the replacements.
 - **SmartRecruiters returns no body** through its list endpoint, so `text` and `salary` are empty for that adapter.
 - **Workday truncates at 200 roles per employer** by default, silently, in Workday's own ordering rather than newest-first. Raise `WORKDAY_MAX_PAGES` to widen it.
 
@@ -169,13 +173,24 @@ tracked role rather than just the surfaced shortlist, which is usually what a st
 wants — it does its own filtering.
 
 ```json
-{"id":"a3f9c21","dedup_key":"anthropic|ai engineer","title":"AI Engineer, Applied",
- "company":"Anthropic","function":"Engineering","org_unit":"Applied AI",
- "seniority":"Senior","tags":["python","llm"],
- "location":{"raw":"San Francisco, CA","city":"San Francisco","state":"CA","country":"US"},
- "remote":false,"remote_basis":"source_field","posted":"2026-08-01",
- "url":"https://job-boards.greenhouse.io/anthropic/jobs/4020123","source":"greenhouse"}
+{"id":"a3f9c21","dedup_key":"anthropic|ai engineer|san francisco ca|4020123",
+ "title":{"raw":"AI Engineer, Applied","root":"AI Engineer","level":null,"qualifiers":["applied"]},
+ "company":"Anthropic","parent_company":null,"category":"Engineering","team":"Applied AI",
+ "seniority":"Senior","seniority_basis":"stated","tags":["python","llm"],
+ "location":{"raw":"San Francisco, CA","city":"San Francisco","state":"CA","country":"US","all":[...]},
+ "remote":{"is_remote":false,"type":"onsite","region":null,"basis":"stated"},
+ "posted":"2026-08-01","posted_basis":"stated","expires":null,
+ "employment_type":"FULL_TIME","employment_type_raw":"FULL_TIME",
+ "salary":{"raw":null,"min":300000.0,"max":405000.0,"currency":"USD","period":"year",
+           "basis":"stated","estimated_min":null,"estimated_max":null},
+ "url":"https://job-boards.greenhouse.io/anthropic/jobs/4020123","direct_apply":true,
+ "text":"Build agentic LLM systems.","source":"greenhouse","score":41}
 ```
+
+`title`, `location`, `remote` and `salary` are nested objects that each keep the raw
+vendor value beside the parsed parts, so a consumer who disagrees with our parse can
+re-read the original rather than losing it. Everything the contract knows is on the
+wire — including `text`, the full description, which is the entire input to the score.
 
 Each run also emits **one manifest object to stderr** describing the run itself —
 row counts per source, which adapters failed, how many companies were discovered, and

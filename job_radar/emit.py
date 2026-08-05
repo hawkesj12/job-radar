@@ -18,11 +18,13 @@ file is still valid up to the last complete line.
 
 Two shapes are emitted:
 
-  * `records()`  -- one object per role. `location` is nested; `salary` is NOT --
-    it is still the display string the adapters produce. An earlier version of this
-    line said "location and salary are objects", which was true of neither the code
-    below nor any release. Structuring salary is real work (currency, period, and
-    whether anyone actually stated it) and is not done yet.
+  * `records()`  -- one object per role. `title`, `location`, `remote` and `salary`
+    are nested objects, each keeping its `raw` vendor value beside the parsed parts,
+    so a consumer that disagrees with our parse can re-read the original rather than
+    losing it. (Two earlier versions of this line were wrong in opposite directions --
+    first claiming salary was an object when it was a bare string, then claiming it
+    was "not done yet" after the parsing landed. It is done: currency, period, and a
+    basis saying whether anyone actually stated the figure.)
   * `manifest()` -- ONE object per harvest describing the run itself
 
 The manifest matters more than it looks. A store fed only rows cannot answer "why
@@ -62,28 +64,57 @@ def _nested(r: dict) -> dict:
     return {
         "id": r.get("id") or None,
         "dedup_key": r.get("dedup_key") or None,
-        "title": r.get("title") or None,
+        "title": {
+            "raw": r.get("title") or None,
+            "root": r.get("title_root"),
+            "level": r.get("title_level"),
+            "qualifiers": r.get("title_qualifiers"),
+        },
         "company": r.get("company") or None,
-        "employer_org": r.get("employer_org"),
-        "function": r.get("function"),
-        "org_unit": r.get("org_unit"),
+        "parent_company": r.get("parent_company"),
+        "category": r.get("category"),
+        "team": r.get("team"),
         "seniority": r.get("seniority"),
+        "seniority_basis": r.get("seniority_basis"),
         "tags": r.get("tags"),
         "location": {
             "raw": r.get("location") or None,
             "city": r.get("city"),
             "state": r.get("state"),
             "country": r.get("country"),
+            "all": r.get("locations"),
         },
-        "remote": r.get("remote"),
-        "remote_basis": r.get("remote_basis"),
+        "remote": {
+            "is_remote": r.get("remote"),
+            "type": r.get("remote_type"),
+            "region": r.get("remote_region"),
+            "basis": r.get("remote_basis"),
+        },
         "posted": r.get("posted") or None,
+        "posted_basis": r.get("posted_basis"),
+        "expires": r.get("expires"),
+        "harvested_at": r.get("harvested_at"),
         "employment_type": r.get("employment_type") or None,
-        "salary": r.get("salary") or None,
+        "employment_type_raw": r.get("employment_type_raw"),
+        "salary": {
+            "raw": r.get("salary") or None,
+            "min": r.get("salary_min"),
+            "max": r.get("salary_max"),
+            "currency": r.get("salary_currency"),
+            "period": r.get("salary_period"),
+            "basis": r.get("salary_basis"),
+            # KEPT APART from min/max on purpose. Adzuna predicts a salary with a
+            # model on 93% of its rows; merging those into the same keys would make
+            # a guess indistinguishable from a figure an employer committed to.
+            "estimated_min": r.get("salary_estimated_min"),
+            "estimated_max": r.get("salary_estimated_max"),
+        },
         "url": r.get("url") or None,
+        "direct_apply": r.get("direct_apply"),
         "text": r.get("text") or None,
         "source": r.get("source") or None,
         "sources": sorted(r["sources"]) if isinstance(r.get("sources"), set) else None,
+        "source_extra": r.get("source_extra"),
         "score": r.get("score"),
         "signals": r.get("signals") or None,
         # DEPRECATED -- see the docstring. Preserved byte-identical.

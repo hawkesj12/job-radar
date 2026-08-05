@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from . import config
 from . import vocab
-from .vocab import remote_type
+from .vocab import remote_type, salary, salary_period
 from .util import (
     NET_ERRORS,
     age_int,
@@ -170,6 +170,39 @@ def _ashby_place(address) -> dict:
     }
 
 
+def _ashby_salary(comp: dict) -> dict:
+    """Ashby's structured compensation -> the five salary fields.
+
+    `summaryComponents` is the pre-flattened list; the same figures also sit nested
+    under compensationTiers[].components[], and reading the flat one avoids caring
+    how many tiers a posting has.
+
+    ONLY `compensationType == "Salary"`. Measured on openai (n=734 postings): the
+    components are Salary 594, EquityCashValue 576, Commission 15 -- so taking the
+    first component would have written an equity grant into salary_min on hundreds of
+    rows, and equity carries minValue/maxValue of None anyway, which would have
+    produced a salary that is neither stated nor honestly unknown.
+
+    Every posting that has salary at all has exactly one Salary component with BOTH
+    bounds present (594/594), so there is no partial-range case to invent a rule for.
+    """
+    for c in (comp or {}).get("summaryComponents") or []:
+        if c.get("compensationType") != "Salary":
+            continue
+        got = salary(
+            c.get("minValue"),
+            c.get("maxValue"),
+            c.get("currencyCode"),
+            salary_period(c.get("interval")),
+        )
+        if got.get("salary_min") is not None or got.get("salary_max") is not None:
+            return got
+    # 140/734 postings carry no Salary component at all. All-None, not zero and not
+    # a figure scraped from prose -- the `salary` display string above still carries
+    # whatever the text says, and a consumer can tell the two apart by the basis.
+    return salary()
+
+
 def fetch_ashby(slug: str):
     data = get_json(
         f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
@@ -218,6 +251,7 @@ def fetch_ashby(slug: str):
                 **_ashby_place(j.get("address")),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
+                **_ashby_salary(comp),
                 "text": text,
             }
         )

@@ -221,7 +221,7 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
     each holds half of what the feed needs:
 
       * the HARVEST row (`by_key`) carries the 0.7.0 contract -- structured location,
-        remote + basis, function/org_unit/employer_org, tags, seniority
+        remote + basis, category/team/parent_company, salary, tags, seniority
       * the STORE row (`merged`) carries the HISTORY -- id, first_seen, status, and
         any llm_score
 
@@ -238,6 +238,12 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
         joined = dict(r)
         for k in engine._CONTRACT_FIELDS:
             joined[k] = harvested.get(k)
+        # `text` is neither a contract field nor a store column -- the CSV has no room
+        # for a 4 KB body and the contract treats it as plain text, not structure. So
+        # nothing above grafts it, and the machine feed emitted "text": null on every
+        # row while the human CSV never needed it. It is the entire input to the fit
+        # score; a consumer re-scoring our rows cannot do it without the body.
+        joined["text"] = harvested.get("text") or joined.get("text")
         joined["sources"] = harvested.get("sources") or joined.get("sources")
         rows.append(joined)
     text = emit.records(rows)

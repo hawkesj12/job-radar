@@ -121,6 +121,12 @@ _PERIOD_MAP = {
     "per hour wage": "hour",      # lever
     "per task": "fixed",          # braintrust payment_type
     "one time": "fixed",
+    # ashby summaryComponents[].interval. Measured on openai (n=594 salary
+    # components): '1 YEAR' 592, '1 HOUR' 2 -- the leading count is part of the
+    # string, so 'year' alone never matches and every Ashby salary would have been
+    # dropped for an unrecognised period.
+    "1 year": "year", "1 month": "month", "1 week": "week",
+    "1 day": "day", "1 hour": "hour",
     # usajobs RateIntervalCode. Only PA was seen live 2026-08-05 (nurse, 25 rows);
     # the rest are from OPM's published code list and are UNVERIFIED against a real
     # posting -- they map to a period we would otherwise have had to guess.
