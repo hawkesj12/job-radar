@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from . import config
 from . import vocab
-from .vocab import remote_type, salary, salary_period
+from .vocab import country_code, remote_type, salary, salary_period, split_place
 from .util import (
     NET_ERRORS,
     age_int,
@@ -45,6 +45,27 @@ from .util import (
 # One definition, two users: the full fetch below (with bodies) and live_greenhouse
 # (without them). Greenhouse also backs the board-ownership check in discover.
 GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
+
+
+def _gh_metadata(md) -> dict:
+    """Greenhouse `metadata[]` -> a flat name->value dict for `source_extra`.
+
+    source_extra and NOT a core column, because the field names are chosen per board
+    and share no vocabulary. Measured 2026-08-05: databricks sends 'Company
+    Assignment' and 'Career Page Posting Category' on all 808 rows, anthropic sends
+    'Location Type' on all 395, and stripe sends none at all on 547. Mapping
+    'Company Assignment' to parent_company would work on exactly one board and put a
+    different meaning in that column on the next one, which is the mistake
+    `department` already made and 0.7.0 exists to undo.
+
+    Multi-select values arrive as a list and are kept as one -- flattening to the
+    first would silently drop the rest.
+    """
+    out = {}
+    for m in md or []:
+        if isinstance(m, dict) and m.get("name") and m.get("value") not in (None, ""):
+            out[str(m["name"])] = m["value"]
+    return out
 
 
 def fetch_greenhouse(slug: str):
@@ -75,7 +96,10 @@ def fetch_greenhouse(slug: str):
                 # updated_at is kept in source_extra: "recently touched" is real
                 # information, it is just not the post date.
                 **posted_from(j.get("first_published") or j.get("updated_at")),
-                "source_extra": {"updated_at": to_date(j.get("updated_at"))} or None,
+                "source_extra": {
+                    "updated_at": to_date(j.get("updated_at")),
+                    **_gh_metadata(j.get("metadata")),
+                },
                 # Present on every Greenhouse posting and NULL on all 397 of the
                 # board measured 2026-08-05 -- the key exists, the data usually does
                 # not. Mapped anyway: it costs nothing, other boards may fill it, and
@@ -116,12 +140,30 @@ def _lever_remote(workplace_type) -> dict:
     return {"remote_type": rt, "remote_basis": "stated" if rt else None}
 
 
+def _lever_text(j: dict) -> str:
+    """The WHOLE posting body, which Lever splits across three fields.
+
+    `descriptionPlain` is only the intro -- 1,118 chars on average (binance, n=295).
+    The requirements and responsibilities live in `lists[]`, each a heading plus HTML
+    (2,279 chars), and the closing sits in `additionalPlain` (712). Reading only the
+    first field fed the scorer a third of each posting, so a role whose skills were
+    all in the Requirements list scored as though it had none.
+    """
+    parts = [j.get("descriptionPlain") or j.get("description", "")]
+    for sec in j.get("lists") or []:
+        if isinstance(sec, dict):
+            parts.append(sec.get("text") or "")
+            parts.append(sec.get("content") or "")
+    parts.append(j.get("additionalPlain") or "")
+    return clean("\n".join(str(x) for x in parts if x))
+
+
 def fetch_lever(slug: str):
     data = get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
     out = []
     for j in data:
         cats = j.get("categories") or {}
-        text = clean(j.get("descriptionPlain") or j.get("description", ""))
+        text = _lever_text(j)
         sr = j.get("salaryRange") or {}
         # PROBED 2026-08-05 on leverdemo: {min, max, currency, interval} where
         # interval is a vendor-specific string ("per-year-salary", "per-hour-wage")
@@ -140,6 +182,11 @@ def fetch_lever(slug: str):
             {
                 "title": j.get("text", ""),
                 "location": cats.get("location", ""),
+                # TOP-LEVEL, not under `categories` -- `categories.country` does not
+                # exist (0 of 295 on binance) while `country` is present on 295 of
+                # 295, already alpha-2. Looking for it in the obvious place left the
+                # column empty on nearly every Lever row.
+                "country": country_code(j.get("country")),
                 "url": j.get("hostedUrl", ""),
                 **posted_from(j.get("createdAt")),
                 "department": cats.get("team") or cats.get("department", ""),
@@ -166,7 +213,9 @@ def _ashby_place(address) -> dict:
     return {
         "city": pa.get("addressLocality") or None,
         "state": pa.get("addressRegion") or None,
-        "country": pa.get("addressCountry") or None,
+        # Ashby sends a display name ("Singapore"); Lever sends alpha-2. One
+        # normalizer so the column holds one vocabulary.
+        "country": country_code(pa.get("addressCountry")),
     }
 
 
@@ -1012,9 +1061,12 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
             r["text"] = text
             r["salary"] = r["salary"] or salary_from_text(text)
         # startDate is a real ISO date; prefer it over anything derived from a
-        # relative string when the detail call gives us one.
-        if info.get("startDate"):
-            r["posted"] = to_date(info["startDate"])
+        # relative string when the detail call gives us one. THROUGH THE HELPER, so
+        # the basis is upgraded with the value -- setting posted alone left the row
+        # claiming "relative" while holding a date the tenant actually published,
+        # which is the same drift _rippling_detail had.
+        if (fresh := posted_from(info.get("startDate")))["posted"]:
+            r.update(fresh)
         if info.get("timeType"):
             r["employment_type"] = info["timeType"]
 
@@ -1066,6 +1118,22 @@ def _rippling_detail(slug: str, row: dict) -> None:
     # basis, which is exactly the drift posted_from exists to make impossible.
     if (fresh := posted_from(d.get("createdOn")))["posted"]:
         row.update(fresh)
+    # payRangeDetails is a LIST (one entry per pay location) and is present on only
+    # 3 of 30 sampled postings -- rare, but it is a figure the employer committed to,
+    # which no text scrape can claim. First entry that carries a real range; the rest
+    # differ by location, which this record has no column for.
+    for pr in d.get("payRangeDetails") or []:
+        if not isinstance(pr, dict):
+            continue
+        got = salary(
+            pr.get("rangeStart"),
+            pr.get("rangeEnd"),
+            pr.get("currency"),
+            salary_period(pr.get("frequency")),
+        )
+        if got["salary_min"] is not None:
+            row.update(got)
+            break
     et = d.get("employmentType")
     if isinstance(et, dict):
         # INVERTED, and not a typo: `id` holds the human string ("Salaried,
@@ -2075,6 +2143,27 @@ def _usajobs_grade(d: dict) -> str | None:
     return f"{plan}-{band}" if plan else band
 
 
+def _usajobs_text(d: dict) -> str:
+    """The whole federal posting, not just its summary.
+
+    `JobSummary` averages 305 characters (probed 2026-08-05, n=25) while the content
+    a scorer needs sits in sibling fields: MajorDuties 1,692, Evaluations 1,487,
+    Requirements 322. Reading only the summary fed the fit score under a tenth of
+    each posting, so federal roles scored near zero regardless of match -- the same
+    shape as the Lever body bug. Several of these arrive as LISTS of paragraphs.
+    """
+    det = (d.get("UserArea") or {}).get("Details") or {}
+    parts = []
+    for k in ("JobSummary", "MajorDuties", "QualificationSummary", "Requirements",
+              "Evaluations"):  # fmt: skip
+        v = det.get(k)
+        if isinstance(v, (list, tuple)):
+            v = " ".join(str(x) for x in v if x)
+        if v:
+            parts.append(str(v))
+    return clean("\n".join(parts))
+
+
 def _usajobs_place(locations) -> dict:
     """USAJOBS `PositionLocation[]` -> {city, state, country}.
 
@@ -2087,10 +2176,16 @@ def _usajobs_place(locations) -> dict:
     first = (locations or [{}])[0] if isinstance(locations, list) else {}
     if not isinstance(first, dict):
         return {"city": None, "state": None, "country": None}
+    # Every one of these three needed normalizing, and the key names actively lie
+    # (probed 2026-08-05, n=25): CityName is "New Orleans, Louisiana" -- the city
+    # field carries the state too; CountrySubDivisionCode is a NAME ("Louisiana"),
+    # not the code it claims; CountryCode is "United States". Passed through, this
+    # source put a second vocabulary into all three columns.
+    city = str(first.get("CityName") or "").split(",")[0].strip() or None
     return {
-        "city": first.get("CityName") or None,
-        "state": first.get("CountrySubDivisionCode") or None,
-        "country": first.get("CountryCode") or None,
+        "city": city,
+        "state": vocab.us_state_code(first.get("CountrySubDivisionCode")),
+        "country": country_code(first.get("CountryCode")),
     }
 
 
@@ -2254,9 +2349,7 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     currency="USD",
                     period=pay.get("RateIntervalCode") or pay.get("Description"),
                 ),
-                "text": clean(
-                    (d.get("UserArea") or {}).get("Details", {}).get("JobSummary", "")
-                ),
+                "text": _usajobs_text(d),
                 "source": "usajobs",
             }
         )
@@ -2391,6 +2484,11 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 "title": j.get("name", ""),
                 "company": (j.get("company") or {}).get("name", ""),
                 "location": "; ".join(x for x in locs if x),
+                # The Muse sends locations only as "Waco, TX" display strings -- no
+                # structured geography anywhere in the payload -- so the parse is the
+                # only way this source fills city/state. FIRST location only, matching
+                # every other multi-location adapter; `locations` keeps the rest.
+                **split_place(next((x for x in locs if x), "")),
                 "url": (j.get("refs") or {}).get("landing_page", ""),
                 **posted_from(j.get("publication_date")),
                 # A job FAMILY ("Data Science"), not an org unit -- see

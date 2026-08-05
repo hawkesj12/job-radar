@@ -36,7 +36,13 @@ pytestmark = pytest.mark.live
 # Sources that return their WHOLE board regardless of the query. An empty list from
 # one of these is never "no matches" — it means the response no longer looks like
 # what the parser expects, so it is a hard failure rather than a soft one.
-WHOLE_BOARD = ["jobicy", "arbeitnow", "remoteok", "themuse", "remotive"]
+# `braintrust` and `hn` were missing entirely, and braintrust is precisely where a
+# vendor silently dropped a field on us: its `level` key -- which the adapter mapped
+# to `department` -- returns on 0 of 20 rows today. Uncovered sources are where drift
+# hides, so the list is now every keyless breadth adapter.
+WHOLE_BOARD = [
+    "jobicy", "arbeitnow", "remoteok", "themuse", "remotive", "braintrust", "hn",
+]  # fmt: skip
 
 # Query-driven sources. A niche query can legitimately return nothing, so these
 # assert on SHAPE when rows come back rather than on row count.
@@ -133,6 +139,8 @@ def test_query_driven_source_still_parses(name):
 DEPTH_PROBES = [
     ("greenhouse", ("anthropic",)),
     ("ashby", ("openai",)),
+    ("lever", ("binance",)),
+    ("rippling", ("rippling",)),
 ]
 
 
@@ -164,3 +172,59 @@ def test_liveness_probes_still_agree_with_a_real_board():
     assert n > 0, "liveness reported 0 roles for a board that is definitely live"
     # Exact equality is too strict — a role can be posted between the two calls.
     assert abs(n - full) <= 5, f"liveness said {n}, full fetch said {full}"
+
+
+# What each source was MEASURED to populate on 2026-08-05, with the sample size. This
+# is the only detector in the repo for a vendor silently dropping a field: a fixture
+# test asserts our parser against our own captured payload, so when the vendor stops
+# sending something, every hermetic test still passes and the column just goes quiet.
+#
+# The concrete misses this exists to catch, all found by hand rather than by a test:
+# braintrust's `level` (0/20 -- gone from the response, the mapping is dead),
+# himalayas shipping the literal string "name" as companyName, Workable's absent
+# `location` key (0/28), Teamtailor's jobLocation being a list (0/53).
+#
+# Keys are listed ONLY where the source genuinely sends them. A legitimately sparse
+# field must not be listed -- a canary that goes red on a truthfully-absent value
+# gets muted, and a muted canary is worse than none.
+POPULATED = {
+    "greenhouse": ("posted", "text"),
+    "ashby": ("posted", "text", "remote_type", "city", "country", "salary_min"),
+    "lever": ("posted", "text", "country", "remote_type"),
+    "themuse": ("posted", "text", "city", "country"),
+    "jobicy": ("posted", "text"),
+    "remoteok": ("posted", "text"),
+    "arbeitnow": ("posted", "text"),
+    "braintrust": ("posted", "text"),
+    "hn": ("posted", "text"),
+}
+
+
+def _populated(rows, key):
+    return sum(1 for r in rows if r.get(key) not in (None, "", [], {}))
+
+
+@pytest.mark.parametrize("name", sorted(POPULATED))
+def test_a_field_a_source_really_sends_has_not_gone_quiet(name):
+    """Drift shows up as a column that is suddenly empty on EVERY row while the
+    endpoint stays healthy and every offline test stays green."""
+    _cfg()
+    from job_radar import engine
+
+    try:
+        if name in sources.DEPTH_ALL:
+            slug = dict(DEPTH_PROBES)[name][0]
+            raw = sources.DEPTH_ALL[name](slug)
+        else:
+            raw = sources.BREADTH_ALL[name](BROAD_QUERY)
+    except NET_ERRORS as e:
+        pytest.skip(f"{name} unreachable ({type(e).__name__})")
+    if not raw:
+        pytest.skip(f"{name} returned no rows — covered by the shape tests")
+    rows = [engine._coerce(r) for r in raw]
+    for key in POPULATED[name]:
+        assert _populated(rows, key), (
+            f"{name}: `{key}` is empty on all {len(rows)} rows, and this source was "
+            "measured sending it. Either the vendor renamed/dropped the field or our "
+            "mapping broke — both are silent everywhere else."
+        )

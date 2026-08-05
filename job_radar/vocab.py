@@ -275,6 +275,170 @@ _REMOTE_MAP = {
 }  # fmt: skip
 
 
+# ISO 3166-1 alpha-2. Sources disagree on the vocabulary for the SAME field: Lever's
+# top-level `country` is already alpha-2 ('SG', 155 of 295 on binance), while Ashby's
+# addressCountry is a display name ('Singapore'). Wiring both through verbatim would
+# put two vocabularies in one contract column, so a consumer grouping by country would
+# see 'US' and 'United States' as different places.
+#
+# Bounded ON PURPOSE, and this is the part worth keeping: the map covers the names our
+# sources actually emit (measured -- 15 distinct on openai's Ashby board) plus the
+# obvious neighbours. An unrecognised NAME returns None rather than a guess, because
+# guessing a code from a name we have never seen is how a wrong country enters a
+# database and never leaves. The raw string is never lost -- it stays in `location`.
+_COUNTRY_CODES = {
+    "united states": "US", "united states of america": "US", "usa": "US", "u.s.": "US",
+    "united kingdom": "GB", "uk": "GB", "great britain": "GB", "england": "GB",
+    "canada": "CA", "mexico": "MX", "brazil": "BR", "argentina": "AR", "chile": "CL",
+    "colombia": "CO", "peru": "PE", "ireland": "IE", "france": "FR", "germany": "DE",
+    "spain": "ES", "portugal": "PT", "italy": "IT", "netherlands": "NL",
+    "belgium": "BE", "switzerland": "CH", "austria": "AT", "sweden": "SE",
+    "norway": "NO", "denmark": "DK", "finland": "FI", "poland": "PL",
+    "czech republic": "CZ", "czechia": "CZ", "romania": "RO", "ukraine": "UA",
+    "greece": "GR", "turkey": "TR", "israel": "IL", "united arab emirates": "AE",
+    "saudi arabia": "SA", "south africa": "ZA", "nigeria": "NG", "kenya": "KE",
+    "egypt": "EG", "india": "IN", "pakistan": "PK", "china": "CN", "japan": "JP",
+    "south korea": "KR", "korea, republic of": "KR", "singapore": "SG",
+    "hong kong": "HK", "taiwan": "TW", "malaysia": "MY", "indonesia": "ID",
+    "thailand": "TH", "vietnam": "VN", "philippines": "PH", "australia": "AU",
+    "new zealand": "NZ", "kazakhstan": "KZ",
+}  # fmt: skip
+
+
+def country_code(raw) -> str | None:
+    """A country name OR an alpha-2 code -> alpha-2, or None when unrecognised.
+
+    An already-valid-looking two-letter code passes through uppercased without being
+    checked against a list: sources that send codes send real ones, and rejecting an
+    unlisted-but-valid code would discard data to enforce a list this module has no
+    business being the authority on.
+    """
+    s = _flatten(raw).strip()
+    if not s:
+        return None
+    if len(s) == 2 and s.isalpha():
+        return s.upper()
+    return _COUNTRY_CODES.get(s.lower())
+
+
+# The 50 states + DC + the territories that appear in job feeds. A two-letter token
+# after a comma is only a US state if it IS one -- "Taiwan, TW" would otherwise be
+# read as a city in the state of TW.
+_US_STATES = frozenset(
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
+    "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY "
+    "DC PR VI GU AS MP".split()
+)
+
+
+_STATE_NAMES = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+    "district of columbia": "DC",
+    "puerto rico": "PR",
+    "guam": "GU",
+    "virgin islands": "VI",
+    "american samoa": "AS",
+}
+
+
+def us_state_code(raw) -> str | None:
+    """A US state name OR code -> the two-letter code, else None.
+
+    USAJOBS sends `CountrySubDivisionCode` as a full NAME ("Louisiana") despite the
+    key saying Code, while every other adapter sends "LA". Without this the `state`
+    column holds two vocabularies and grouping by it splits every state in two.
+    """
+    s = _flatten(raw).strip()
+    if not s:
+        return None
+    if len(s) == 2 and s.upper() in _US_STATES:
+        return s.upper()
+    return _STATE_NAMES.get(s.lower())
+
+
+def split_place(raw) -> dict:
+    """A free-text location -> {city, state, country}, or None where it cannot be
+    read with confidence.
+
+    Deliberately narrow. It resolves exactly two shapes it can be sure of --
+    "Waco, TX" (a real US state code) and "London, United Kingdom" (a country this
+    module recognises) -- and returns None for everything else rather than guessing.
+
+    The tempting version splits on the comma and calls the second half a state, which
+    turns "Taiwan, Taipei" into the city of Taiwan in the state of Taipei. Several
+    sources emit COUNTRY-first order, so comma position carries no reliable meaning.
+    A None here costs a filter; a wrong city is a permanently wrong row.
+    """
+    s = _flatten(raw).strip()
+    empty = {"city": None, "state": None, "country": None}
+    if not s or "," not in s:
+        return empty
+    head, _, tail = s.rpartition(",")
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail:
+        return empty
+    if tail.upper() in _US_STATES:
+        return {"city": head, "state": tail.upper(), "country": "US"}
+    # A NAME only, never a bare two-letter tail. country_code() passes any two
+    # letters through, which is right for a source's dedicated country field but
+    # wrong here: "Toronto, ON" would resolve to the country "ON". A province and a
+    # country code are indistinguishable at two characters, so this gives up
+    # "Paris, FR" to avoid inventing a country for every Canadian city.
+    code = country_code(tail) if len(tail) > 2 else None
+    if code:
+        return {"city": head, "state": None, "country": code}
+    return empty
+
+
 def remote_type(raw) -> str | None:
     """Vendor work-arrangement string -> remote | hybrid | onsite | None.
 

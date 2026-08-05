@@ -112,6 +112,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Six adapters were discarding data their API already sends.** Each was measured
+  against the live endpoint, not inferred:
+
+  - **Ashby** shipped compensation as a display string only. 594 of 734 postings on
+    `openai` carry a structured range; those are now `salary_min`/`max`/`currency`/
+    `period`. Only the `Salary` component is read — the same list carries
+    `EquityCashValue` on 576 rows, and taking the first would have written an equity
+    grant into salary. The interval arrives as `"1 YEAR"`, so a period map keyed on
+    `year` matched nothing and every Ashby salary would have been dropped.
+  - **Lever** looked for `country` under `categories`, where it does not exist (0 of
+    295 on `binance`) rather than at the top level, where it is present on all 295.
+    Its body was also only the intro: `descriptionPlain` averages 1,118 characters
+    while the requirements sit in `lists[]` (2,279) and the closing in
+    `additionalPlain` (712). Bodies went 1,118 → 3,657 characters.
+  - **USAJOBS** read `JobSummary` (305 characters) and ignored `MajorDuties` (1,692),
+    `Evaluations` (1,487) and `Requirements` (322), so federal roles scored near zero
+    regardless of match. Bodies went 305 → 3,810. Its geography keys also lie:
+    `CityName` is `"New Orleans, Louisiana"` and `CountrySubDivisionCode` is a NAME,
+    not the code it claims.
+  - **The Muse** sends no structured geography at all, so city/state are now parsed
+    from the `"Waco, TX"` display string: 80/80 city, 68/80 state (the other 12 are
+    non-US and correctly have none).
+  - **Greenhouse** `metadata[]` now reaches `source_extra`. Not a core column: the
+    field names are per-board — `databricks` sends "Company Assignment", `anthropic`
+    sends "Location Type", `stripe` sends none — so mapping one to `parent_company`
+    would work on exactly one board and mean something else on the next. That is the
+    mistake `department` already made.
+  - **Rippling** `payRangeDetails` (3 of 30 sampled) is now read as a real range.
+
+- **`country` and `state` held several vocabularies at once.** Lever sends `SG`,
+  Ashby sends `Singapore`, USAJOBS sends `United States` and `Louisiana`. Grouping by
+  country split every country into pieces. One normalizer now maps all of them to
+  ISO alpha-2, and it returns `None` for a name it does not recognise rather than
+  guessing — a wrong country enters a database once and never leaves. The location
+  parser refuses `"Taiwan, Taipei"` and `"Toronto, ON"` for the same reason: several
+  sources emit country-first, and a province is indistinguishable from a country code
+  at two characters.
+
+- **Workday's detail pass upgraded a date without upgrading its label.** It replaces
+  a date derived from "Posted 26 Days Ago" with a real `startDate` when the detail
+  call returns one, but set `posted` alone, leaving the row claiming `relative` while
+  holding a date the tenant actually published. Same drift `_rippling_detail` had.
+
 - **The machine feed advertised the 0.7.0 contract and shipped six fields of it.**
   `--format ndjson` emitted three key names — `function`, `org_unit`, `employer_org` —
   that nothing in the package has set since they were renamed to `category`, `team`

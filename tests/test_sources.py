@@ -1897,6 +1897,7 @@ def test_every_adapter_labels_where_its_date_came_from(name, monkeypatch):
         pytest.skip(f"no SAMPLE payload for {name}")
     c = _cfg()
     monkeypatch.setattr(c, "env", lambda k: "test-key")
+
     def _get(url, *a, **k):
         # Rippling alone splits list and detail across two shapes, and the DATE only
         # exists on the detail object -- so a fixture that returns the list for both
@@ -1924,3 +1925,121 @@ def test_every_adapter_labels_where_its_date_came_from(name, monkeypatch):
                 "real timestamp from arithmetic on a phrase"
             )
     assert dated or not rows, f"{name}: no row carried a date, so nothing was proven"
+
+
+# ── shared normalizers (probed live 2026-08-05) ─────────────────────────────
+def test_country_is_one_vocabulary_across_sources():
+    """Lever sends alpha-2 ('SG'), Ashby a display name ('Singapore'), USAJOBS
+    'United States'. Passed through verbatim the column held three vocabularies and
+    grouping by country split every country into pieces."""
+    from job_radar.vocab import country_code
+
+    assert country_code("Singapore") == "SG"
+    assert country_code("SG") == "sg".upper()
+    assert country_code("United States") == country_code("USA") == "US"
+    # An unrecognised NAME is None, never a guess. A wrong country enters a database
+    # once and never leaves.
+    assert country_code("Freedonia") is None
+    assert country_code("") is None and country_code(None) is None
+
+
+def test_us_state_code_normalizes_the_name_usajobs_calls_a_code():
+    from job_radar.vocab import us_state_code
+
+    assert us_state_code("Louisiana") == "LA"
+    assert us_state_code("CA") == "CA"
+    assert us_state_code("Ontario") is None  # a real subdivision, not a US state
+
+
+def test_split_place_refuses_to_guess_rather_than_inventing_a_city():
+    """The tempting version splits on the comma and calls the second half a state.
+    Several sources emit COUNTRY-first order, so that turns 'Taiwan, Taipei' into the
+    city of Taiwan. A None costs a filter; a wrong city is a permanently wrong row."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Waco, TX") == {"city": "Waco", "state": "TX", "country": "US"}
+    assert split_place("Paris, France") == {
+        "city": "Paris",
+        "state": None,
+        "country": "FR",
+    }
+    for ambiguous in ("Taiwan, Taipei", "Remote", "Kuala Lumpur", ""):
+        assert split_place(ambiguous)["city"] is None, ambiguous
+    # "ON" is a province; two letters cannot be told from a country code, so the
+    # whole two-letter tail is refused rather than inventing the country "ON".
+    assert split_place("Toronto, ON")["country"] is None
+
+
+def test_ashby_salary_never_reads_the_equity_component():
+    """Measured on openai (n=734): components are Salary 594, EquityCashValue 576,
+    Commission 15. Taking the first would write an equity grant into salary_min."""
+    comp = {
+        "summaryComponents": [
+            {
+                "compensationType": "EquityCashValue",
+                "interval": "1 YEAR",
+                "currencyCode": "USD",
+                "minValue": None,
+                "maxValue": None,
+            },
+            {
+                "compensationType": "Salary",
+                "interval": "1 YEAR",
+                "currencyCode": "USD",
+                "minValue": 257000,
+                "maxValue": 335000,
+            },
+        ]
+    }
+    got = sources._ashby_salary(comp)
+    assert got["salary_min"] == 257000 and got["salary_max"] == 335000
+    # '1 YEAR' -- the leading count is part of the vendor string, so a period map
+    # keyed on 'year' alone would drop every Ashby salary.
+    assert got["salary_period"] == "year" and got["salary_currency"] == "USD"
+    assert sources._ashby_salary({})["salary_min"] is None
+
+
+def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
+    """Lever and USAJOBS both put a tenth of the posting in the obvious field and the
+    rest in siblings, so reading the obvious one fed the scorer a fragment."""
+    lever = sources._lever_text(
+        {
+            "descriptionPlain": "Intro.",
+            "lists": [{"text": "Requirements", "content": "<li>Python</li>"}],
+            "additionalPlain": "Why us.",
+        }
+    )
+    assert "Intro." in lever and "Requirements" in lever and "Python" in lever
+    assert "Why us." in lever
+
+    federal = sources._usajobs_text(
+        {
+            "UserArea": {
+                "Details": {
+                    "JobSummary": "Summary.",
+                    "MajorDuties": ["Duty one.", "Duty two."],  # arrives as a LIST
+                    "Evaluations": "Rated on X.",
+                }
+            }
+        }
+    )
+    assert "Summary." in federal and "Duty two." in federal and "Rated on X." in federal
+
+
+def test_greenhouse_metadata_goes_to_source_extra_not_a_core_column():
+    """The names are chosen per board -- databricks sends 'Company Assignment',
+    anthropic 'Location Type', stripe none -- so mapping one to parent_company works
+    on exactly one board. That is the mistake `department` already made."""
+    got = sources._gh_metadata(
+        [
+            {"name": "Company Assignment", "value": "Databricks Japan K.K."},
+            {"name": "Career Page Posting Category", "value": ["Field Engineering"]},
+            {"name": "Empty", "value": None},
+            "not a dict",
+        ]
+    )
+    assert got == {
+        "Company Assignment": "Databricks Japan K.K.",
+        # a multi-select stays a list; taking the first would silently drop the rest
+        "Career Page Posting Category": ["Field Engineering"],
+    }
