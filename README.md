@@ -23,21 +23,33 @@ Every adapter, whatever it was handed, emits the same dict:
 | field                          | what it holds                                                    |
 | ------------------------------ | ---------------------------------------------------------------- |
 | `title` · `company` · `url`    | the role, the employer, the apply link (direct-to-employer first) |
-| `posted`                       | `YYYY-MM-DD`, or `""` — never a vendor's arbitrary string        |
+| `posted`                       | `YYYY-MM-DD`, or `None` — never a vendor's arbitrary string      |
+| **`posted_basis`**             | `stated` (the vendor sent a date) · `relative` (computed from "Posted 26 Days Ago"). Provenance, NOT accuracy — `stated` means they sent one, not that it's right |
+| **`expires`** · **`harvested_at`** | the vendor's deadline where it sends one; when WE fetched the row |
 | `text`                         | the full description, HTML stripped and whitespace collapsed     |
-| `salary` · `employment_type`   | normalized range; full-time / contract, where the source says    |
+| `salary`                       | the vendor's own display string, kept verbatim                   |
+| **`employment_type`**          | a closed set — `FULL_TIME` · `PART_TIME` · `CONTRACTOR` · `TEMPORARY` · `INTERN` · `VOLUNTEER` · `PER_DIEM` · `OTHER` · `None`. Nineteen vendors spell these eight ideas nineteen ways |
+| **`employment_type_raw`**      | what the vendor actually said, verbatim. `None` when they said nothing — never back-filled from the normalized value |
 | `source`                       | which adapter produced this record                               |
 | **`category`**                 | the job family — "Healthcare & Nursing Jobs"                     |
 | **`team`**                     | the company's own team — "Engineering - Pipeline"                |
 | **`parent_company`**           | the umbrella org, where a source distinguishes one               |
 | **`title_root`** · **`title_level`** | the matchable role with decoration stripped; `I`–`IV`      |
-| **`salary_min`** · **`salary_max`** | what an employer COMMITTED to, with currency and period     |
-| **`salary_estimated_*`**       | a model's guess, kept in separate keys. Adzuna predicts 93%.      |
+| **`salary_min`** · **`salary_max`** | what an employer COMMITTED to. Floats, or `None` — a zero is dropped, because RemoteOK sends `0` on all 100 rows of its feed |
+| **`salary_currency`** · **`salary_period`** | ISO currency; `year` · `month` · `week` · `day` · `hour` · `fixed`. A period is **never guessed** — `65` and `135000` are both valid numbers, so a wrong period makes every aggregate silently wrong |
+| **`salary_basis`**             | `stated` (real numeric fields) · `parsed` (read out of free text) |
+| **`salary_estimated_min`** · **`salary_estimated_max`** | a MODEL's guess, in separate keys on purpose. Adzuna predicts 93% of its salaries; merging those into `salary_min` would make a guess indistinguishable from a commitment |
 | **`city` · `state` · `country`** | structured geography. **`country` is ISO alpha-2 or `None`** — normalized at the boundary, never a display name. `state` is a US two-letter code where the place is in the US — canonicalized at the boundary, so `California` and `CA` never both appear — and the source's own subdivision name elsewhere (`Greater London`), which has no code to map to. Filter it together with `country`: a two-letter value is only a US state when `country == "US"` (`CT` is Catalonia on a Spanish row). Derived from the location string when a source sends no structured fields, and left `None` when it cannot be read with confidence. |
 | **`remote`**                   | `True` / `False` / **`None`** — see below                        |
 | **`remote_type`**              | `remote` · `hybrid` · `onsite` · `None` — a bool cannot say hybrid |
-| **`remote_basis`**             | how we decided: `stated` · `board` · `location` · `text`         |
+| **`remote_basis`**             | how we decided: `stated` (the row's own vendor field) · `board` (a remote-only board, so every row is remote by scope) · `location` · `text` (weakest) |
+| **`remote_region`**            | where a remote worker may sit, when the source states it         |
 | **`tags`** · **`seniority`**   | skills list; the source's own level string, verbatim             |
+| **`seniority_basis`**          | `stated` (the source has a level field) · `title` (parsed out of the title) |
+| **`title_qualifiers`**         | the decoration stripped off `title_root` — `["applied"]` from "AI Engineer, Applied" |
+| **`locations`**                | every place ONE posting names, each with `raw`/`city`/`state`/`country`/`url`. Always the same five keys |
+| **`direct_apply`**             | does this URL reach the EMPLOYER, or an aggregator that bounces you onward? The product's whole differentiator |
+| **`source_extra`**             | the third tier: fields ONE source sends that no other can, kept verbatim. Read it by key; never index it |
 | `location`                     | the raw location string, kept alongside the parsed fields        |
 | `department`                   | **deprecated** — see below. Removed at 1.0.                      |
 
@@ -119,7 +131,7 @@ The mirror of that is worth stating too, because it's the more common failure: *
 
 `catalog/` is where both kinds of knowledge live — one profile per source, with machine-readable frontmatter covering auth, endpoint, query capabilities, measured limits, field paths, and **license as a contract**: the deciding clauses quoted rather than paraphrased, with a `read_at` date, because terms change silently and a summary drifts toward what the reader hoped it said.
 
-It's early — three profiles so far, and the rest queued in `catalog/INDEX.md` alongside every source that's been probed, whatever came of it. The schema and the probe procedure are the durable parts; the profiles accumulate.
+Twenty-two profiles are complete and dated, with every source that's been probed listed in `catalog/INDEX.md` whatever came of it — including the ones rejected on rights, which keep their profile so the evidence doesn't leave with the source. Two checkers run in CI: one that every profile parses and carries the keys the schema marks required, and one that INDEX.md still agrees with the profiles. The schema and the probe procedure are the durable parts; the profiles accumulate.
 
 The rule that orders everything else: **probe the junk parameter first.** An API that 400s on `?zzz_not_real=1` validates its input, so every parameter that returns a count is real and your measurements are trustworthy. An API that silently ignores it will accept your typo forever and tell you nothing. That single boolean decides what every other number about that source is worth.
 

@@ -95,16 +95,43 @@ def target(name: str) -> dict:
 COMMON = {
     "title": ("title", "jobTitle", "position", "text", "name"),
     "company": ("company_name", "companyName", "company", "employer"),
-    "body": ("description", "jobDescription", "content_html", "role_description",
-             "content", "descriptionHtml"),
-    "posted": ("publication_date", "pubDate", "date", "created_at", "createdAt",
-               "posted", "published_at", "date_published", "pub_date", "activeFrom"),
+    "body": (
+        "description",
+        "jobDescription",
+        "content_html",
+        "role_description",
+        "content",
+        "descriptionHtml",
+    ),
+    "posted": (
+        "publication_date",
+        "pubDate",
+        "date",
+        "created_at",
+        "createdAt",
+        "posted",
+        "published_at",
+        "date_published",
+        "pub_date",
+        "activeFrom",
+    ),
     "url": ("url", "applicationLink", "application_url", "hostedUrl", "absolute_url"),
     "tags": ("tags", "job_skills", "main_skills", "filterTags"),
-    "salary": ("salary", "salaryMin", "minSalary", "annualSalaryFrom",
-               "gross_salary_low", "budget_minimum_usd"),
-    "employment_type": ("job_type", "jobType", "employmentType", "contract_type",
-                        "schedule_type"),
+    "salary": (
+        "salary",
+        "salaryMin",
+        "minSalary",
+        "annualSalaryFrom",
+        "gross_salary_low",
+        "budget_minimum_usd",
+    ),
+    "employment_type": (
+        "job_type",
+        "jobType",
+        "employmentType",
+        "contract_type",
+        "schedule_type",
+    ),
 }
 
 
@@ -116,8 +143,14 @@ def field_map(record: dict) -> str:
         if hit:
             claimed.add(hit)
             v = record[hit]
-            extra = f", median_chars: {len(v)}" if canon == "body" and isinstance(v, str) else ""
-            lines.append(f"  {canon}: {{ path: {hit}, type: {type(v).__name__}{extra} }}")
+            extra = (
+                f", median_chars: {len(v)}"
+                if canon == "body" and isinstance(v, str)
+                else ""
+            )
+            lines.append(
+                f"  {canon}: {{ path: {hit}, type: {type(v).__name__}{extra} }}"
+            )
         else:
             lines.append(f"  {canon}: null")
     for canon in ("function", "org_unit", "employer_org", "seniority"):
@@ -281,7 +314,9 @@ def main() -> int:
             # -- which the schema marks REQUIRED -- and this still printed "complete",
             # because "no TODOs left" is not the same as "has what the schema demands".
             if isinstance(fm, dict) and not err:
-                missing = [k for k in ("name", "status", "lane", "license") if k not in fm]
+                missing = [
+                    k for k in ("name", "status", "lane", "license") if k not in fm
+                ]
                 lic = fm.get("license")
                 if isinstance(lic, dict) and "read_at" not in lic:
                     missing.append("license.read_at")
