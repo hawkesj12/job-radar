@@ -43,7 +43,7 @@ def profiles() -> dict:
     for f in sorted(HERE.glob("*.md")):
         if f.name.startswith("_") or f.name == "INDEX.md":
             continue
-        d = yaml.safe_load(f.read_text().split("---")[1])
+        d = yaml.safe_load(f.read_text(encoding="utf-8").split("---")[1])
         out[d["name"]] = d
     return out
 
@@ -72,7 +72,7 @@ def main() -> int:
     a = ap.parse_args()
 
     prof = profiles()
-    lines = INDEX.read_text().split("\n")
+    lines = INDEX.read_text(encoding="utf-8").split("\n")
     header: list[str] = []
     drift, fixed = [], 0
 
@@ -133,7 +133,7 @@ def main() -> int:
     print(f"\nchecked {len(prof)} profiles")
 
     if a.fix and fixed:
-        INDEX.write_text("\n".join(lines))
+        INDEX.write_text("\n".join(lines), encoding="utf-8")
         print(f"rewrote {fixed} cells in INDEX.md")
     return 1 if drift and not a.fix else 0
 

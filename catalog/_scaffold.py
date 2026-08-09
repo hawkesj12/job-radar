@@ -78,7 +78,7 @@ def truncate(record: dict, limit: int = 600) -> dict:
     return out
 
 
-TARGETS = json.loads((HERE / "_targets.json").read_text())
+TARGETS = json.loads((HERE / "_targets.json").read_text(encoding="utf-8"))
 
 
 def target(name: str) -> dict:
@@ -162,8 +162,8 @@ def field_map(record: dict) -> str:
 
 
 def draft(name: str) -> str:
-    values, log, body = parse_out((OUT / f"{name}.txt").read_text())
-    record = json.loads((RAW / f"{name}.json").read_text())
+    values, log, body = parse_out((OUT / f"{name}.txt").read_text(encoding="utf-8"))
+    record = json.loads((RAW / f"{name}.json").read_text(encoding="utf-8"))
     lane, status = LANES.get(name, ("breadth", TODO))
     date = values.get("measured_at", TODO)
     t = target(name)
@@ -296,7 +296,7 @@ def main() -> int:
         for f in sorted(HERE.glob("*.md")):
             if f.name.startswith("_") or f.name == "INDEX.md":
                 continue
-            text = f.read_text()
+            text = f.read_text(encoding="utf-8")
             n = text.count(TODO)
             # Parse the frontmatter, because "no TODOs left" is not the same as "usable".
             # Three profiles reached zero TODOs carrying YAML that does not load: an
@@ -344,7 +344,7 @@ def main() -> int:
         if not (RAW / f"{name}.json").exists():
             print(f"  skip {name} (no captured record)", file=sys.stderr)
             continue
-        dest.write_text(draft(name))
+        dest.write_text(draft(name), encoding="utf-8")
         print(f"  wrote {dest.relative_to(HERE.parent)}")
     return 0
 

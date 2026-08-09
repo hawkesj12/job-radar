@@ -864,7 +864,7 @@ def test_append_watchlist_grows_real_file(tmp_path):
     added = funnel.append_watchlist(
         wl, [{"name": "Acme", "ats": "greenhouse", "slug": "acme"}]
     )
-    assert added and "Acme" in wl.read_text()
+    assert added and "Acme" in wl.read_text(encoding="utf-8")
 
 
 def test_append_watchlist_refuses_template(tmp_path):
@@ -873,7 +873,9 @@ def test_append_watchlist_refuses_template(tmp_path):
     added = funnel.append_watchlist(
         ex, [{"name": "Acme", "ats": "greenhouse", "slug": "acme"}]
     )
-    assert added == [] and "Acme" not in ex.read_text()  # template untouched
+    assert added == [] and "Acme" not in ex.read_text(
+        encoding="utf-8"
+    )  # template untouched
 
 
 # ── C3: a re-titled applied role keeps its status (matched on URL) ────────────
@@ -1489,7 +1491,9 @@ def test_harvest_writes_no_files(tmp_path, monkeypatch):
 
     rows, discovered, errors = engine.harvest(c, str(wl))
     assert [d["slug"] for d in discovered] == ["newco"], "must RETURN what it found"
-    assert wl.read_text() == original, "engine must not have written the watchlist"
+    assert wl.read_text(encoding="utf-8") == original, (
+        "engine must not have written the watchlist"
+    )
 
 
 def test_cli_scan_persists_discovered_companies(tmp_path, monkeypatch):
@@ -1512,7 +1516,9 @@ def test_cli_scan_persists_discovered_companies(tmp_path, monkeypatch):
         strict=False,
     )
     cli.cmd_scan(args, _cfg())
-    assert [c["slug"] for c in _json.loads(wl.read_text())["companies"]] == ["newco"]
+    assert [
+        c["slug"] for c in _json.loads(wl.read_text(encoding="utf-8"))["companies"]
+    ] == ["newco"]
 
 
 # ── 0.4.0: liveness, the corrupt-watchlist crash, seed consolidation ─────────
@@ -2510,3 +2516,35 @@ def test_a_us_state_is_always_a_two_letter_code():
         }
     )
     assert odd["state"] == "Cook County"
+
+
+def test_no_file_is_read_without_an_explicit_encoding():
+    """Windows defaults to cp1252, not UTF-8, so a bare `read_text()` is a platform
+    bug that only ever fires on one third of the CI matrix.
+
+    This shipped: `tests/test_attribution.py` read `catalog/*.md` with no encoding and
+    all four Windows cells failed with
+    `UnicodeDecodeError: 'charmap' codec can't decode byte 0x81` — one byte, in one
+    catalog profile, invisible on macOS and Linux. The catalog checkers had the same
+    bug and were never reached, because pytest fails a job before them.
+
+    Enforced by reading the source so the next one fails here, on any platform,
+    instead of on someone's release day.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    offenders = []
+    for py in (
+        list(root.glob("job_radar/*.py"))
+        + list(root.glob("catalog/*.py"))
+        + list(root.glob("tests/*.py"))
+    ):
+        src = py.read_text(encoding="utf-8")
+        for i, line in enumerate(src.split("\n"), 1):
+            if _re.search(r"\.read_text\(\s*\)", line):
+                offenders.append(f"{py.relative_to(root)}:{i}  {line.strip()}")
+    assert not offenders, (
+        "read_text() with no encoding (cp1252 on Windows):\n" + "\n".join(offenders)
+    )

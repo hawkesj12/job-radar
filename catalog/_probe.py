@@ -545,7 +545,8 @@ def main() -> int:
     if len(sample) > a.record_index:
         raw_path = RAW_DIR / f"{a.name}.json"
         raw_path.write_text(
-            json.dumps(sample[a.record_index], indent=2, ensure_ascii=False)
+            json.dumps(sample[a.record_index], indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
         print(f"\n  captured record -> {raw_path}", file=sys.stderr)
 

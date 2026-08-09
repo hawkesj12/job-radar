@@ -32,7 +32,7 @@ def test_every_wired_source_that_demands_attribution_has_an_entry():
     for f in CATALOG.glob("*.md"):
         if f.stem.startswith("_"):
             continue  # _SCHEMA is the template, not a source
-        m = re.search(r"attribution_required:\s*(\S+)", f.read_text())
+        m = re.search(r"attribution_required:\s*(\S+)", f.read_text(encoding="utf-8"))
         if m and m.group(1).strip().lower() == "true" and f.stem in _wired():
             demanded.add(f.stem)
     missing = demanded - set(attribution.ATTRIBUTION)
