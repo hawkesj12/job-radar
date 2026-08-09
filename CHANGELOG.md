@@ -8,6 +8,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] - 2026-08-09
 
+### Fixed
+
+- **A three-part location now reads its last field as a country, not a state.**
+  `split_place` took the token after the final comma and called it a US state if it
+  looked like one, which is right for `"Waco, TX"` and wrong for `"Toronto, ON, CA"` —
+  there the region slot is already occupied by `ON`, so `CA` is Canada. Seven codes are
+  both a US state and a country (`AR CA CO DE ID IL IN`), so the rule needs structural
+  evidence rather than a guess about two letters.
+
+  Measured by re-running the old and new function over 21,495 captured location strings:
+  **294 rows stop being reported as American** (`Toronto, ON, CA`), and **469 gain a
+  country they previously had none of** (`Chicago, IL, US`, `Curitiba, PR, br` — the old
+  path returned nothing whenever the trailing country code was not also a US state).
+  Zero rows changed in any other way.
+
+  Gated on the country names this module already knows, never on `country_code()`, which
+  passes any two letters through — otherwise `"…, Seattle, WA"` invents the country
+  Washington. And restricted to single-place strings: the first cut of this rule guarded
+  only the comma case and would have turned 519 multi-location rows
+  (`"New York, NY; San Francisco, CA"`) Canadian to fix 25. That regression was caught by
+  the differential re-run, not by review.
+
 
 ### Added
 

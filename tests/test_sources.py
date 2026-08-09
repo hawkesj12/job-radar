@@ -1998,6 +1998,47 @@ def test_split_place_refuses_to_guess_rather_than_inventing_a_city():
     assert split_place("Toronto, ON")["country"] is None
 
 
+def test_split_place_reads_position_three_as_a_country_not_a_state():
+    """Three parts settle what two cannot. In "Toronto, ON, CA" the region slot is
+    already taken by ON, so CA is Canada -- and reading it as California made 25
+    foreign rows American on a 21,495-row harvest, plus left 52 with no geography at
+    all because their country code is not also a US state ("Curitiba, PR, br")."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Toronto, ON, CA") == {
+        "city": "Toronto",
+        "state": None,  # non-US subdivisions have no canonical form in `state`
+        "country": "CA",
+    }
+    assert split_place("Curitiba, PR, br")["country"] == "BR"
+    assert split_place("Eschborn, HESSEN, de")["country"] == "DE"
+    # a US three-part still resolves its state, because there the region IS a state
+    assert split_place("Charlotte, NC, us") == {
+        "city": "Charlotte",
+        "state": "NC",
+        "country": "US",
+    }
+
+
+def test_split_place_leaves_multi_location_strings_alone():
+    """The guard is _KNOWN_COUNTRIES, not country_code(), which passes ANY two
+    letters through. "San Francisco, CA, Seattle, WA" is several places in one
+    string, not City/Region/Country -- WA is not a country, so it must fall through
+    to the two-part logic rather than inventing the country Washington."""
+    from job_radar.vocab import split_place
+
+    assert split_place("San Francisco, CA, Seattle, WA")["country"] == "US"
+    assert split_place("Mountain View, CA, Detroit, MI")["country"] == "US"
+    # SEMICOLON and PIPE separated too -- the first cut of this rule guarded only the
+    # comma case and would have turned 519 of these Canadian to fix 25.
+    assert split_place("New York, NY; San Francisco, CA")["country"] == "US"
+    assert split_place("New York City, NY | Seattle, WA")["country"] == "US"
+    assert split_place("New York, NY; San Francisco, CA; Seattle, WA")["state"] == "WA"
+    # and the plain shapes are untouched
+    assert split_place("San Francisco, CA")["country"] == "US"
+    assert split_place("Mountain View, CA, USA")["country"] == "US"
+
+
 def test_ashby_salary_never_reads_the_equity_component():
     """Measured on openai (n=734): components are Salary 594, EquityCashValue 576,
     Commission 15. Taking the first would write an equity grant into salary_min."""

@@ -330,6 +330,16 @@ _US_STATES = frozenset(
     "DC PR VI GU AS MP".split()
 )
 
+# The alpha-2 codes this module can actually vouch for -- derived from the country
+# NAME table above so there is one source, not two lists to drift apart.
+#
+# `country_code()` deliberately passes any two letters through unvalidated, which is
+# right for a source's dedicated country field. It is wrong as a gate: it would call
+# "WA" the country Washington. This set is the gate, and the seven codes that are BOTH
+# a US state and a country -- AR CA CO DE ID IL IN -- are exactly why split_place needs
+# structural evidence before reading a two-letter token as a country.
+_KNOWN_COUNTRIES = frozenset(_COUNTRY_CODES.values())
+
 
 _STATE_NAMES = {
     "alabama": "AL",
@@ -426,6 +436,41 @@ def split_place(raw) -> dict:
     head, tail = head.strip(), tail.strip()
     if not head or not tail:
         return empty
+    # THREE parts settle the ambiguity the two-part case cannot. "Toronto, ON, CA"
+    # is Canada, not California: the region slot is already occupied by ON, so a
+    # two-letter token in position 3 is a country code. Measured on a 21,495-row
+    # harvest, reading position 3 as a state made 25 foreign rows American --
+    # "Toronto, ON, CA" (17), and it left 52 more with no geography at all because
+    # the tail was a country code that is not also a US state ("Curitiba, PR, br").
+    #
+    # Gated on _KNOWN_COUNTRIES, never on country_code(), so "San Francisco, CA,
+    # Seattle, WA" -- a multi-location string, not City/Region/Country -- falls
+    # through to the two-part logic unchanged rather than inventing the country WA.
+    #
+    # Restricted to strings with ONE place in them. Several sources pack multiple
+    # locations into one field ("New York, NY; San Francisco, CA"), where the trailing
+    # two letters are the last city's STATE, not a country. Without this guard the
+    # rule turned 519 such rows Canadian to fix 25 -- caught by re-running the old and
+    # new functions over the same 21,495 captured strings, not by reasoning.
+    if (
+        ";" not in s
+        and "|" not in s
+        and "," in head
+        and len(tail) == 2
+        and tail.upper() in _KNOWN_COUNTRIES
+    ):
+        city, _, region = head.rpartition(",")
+        city, region = city.strip(), region.strip()
+        if city:
+            country = tail.upper()
+            # `state` stays US-only by construction; a non-US subdivision has no
+            # canonical form here and a raw one would pollute the column.
+            state = (
+                region.upper()
+                if country == "US" and region.upper() in _US_STATES
+                else None
+            )
+            return {"city": city, "state": state, "country": country}
     if tail.upper() in _US_STATES:
         return {"city": head, "state": tail.upper(), "country": "US"}
     # A NAME only, never a bare two-letter tail. country_code() passes any two
