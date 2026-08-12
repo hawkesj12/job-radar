@@ -6,8 +6,53 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-08-09
+### Fixed
 
+- **`split_place()` read a work arrangement in the city slot as a city.** All three
+  resolving branches assigned `city` from the head of the string without ever testing
+  that the head named a place, so `Remote, France` came back as the city of Remote —
+  along with `Anywhere, Canada`, `Hybrid, Germany`, `WFH, India`, `Remote, TX` and
+  `Remote, ON, CA`. That is the permanently-wrong row this function's own docstring
+  refuses to create, and it is why a two-letter-tail rule was rejected rather than
+  shipped: accepting `, US` would have written a city named Remote onto ~295 measured
+  rows. Only the invented city is dropped — the country and state the string really
+  carries survive, so `Remote, TX` is a Texas row with no city.
+
+  The vocabulary derives from `dedup._QUAL_NOISE` rather than restating its words, so
+  the shared set has one source instead of a fourth copy to drift. Matches are
+  undecorated only: `Remote - US` still keeps its city, a bounded residual rather than
+  a rule widened without measurement, because a pattern loose enough to catch it also
+  nulls the real city in `Hybrid - Austin`.
+
+- **`split_place()` discarded countries it already knew how to resolve.** A location
+  string with no comma returned before the function ever asked whether the whole
+  string was a country name, so `country_code("Singapore")` gave `SG` while
+  `split_place("Singapore")` gave nothing. Measured by a downstream consumer over a
+  31,790-row harvest: 1,591 of the 14,616 rows with a blank country are exactly this
+  shape, and **539 of them are the literal string `United States`** — so the guard was
+  discarding US identification as well as foreign. The lookup is gated on the country
+  NAME map rather than `country_code()`, whose two-letter passthrough would turn a bare
+  `CA` or `ON` into a country, and it fills only `country`: a single token names no
+  city, so `London` and `Kuala Lumpur` still resolve to nothing rather than a guess.
+
+  It also excludes US state names, guarding an invariant nothing else enforced — no key
+  in `_COUNTRY_CODES` is also a US state name. That holds today, but the map is
+  hand-curated and missing Georgia, Jordan and Chad, so adding `"georgia": "GE"` for an
+  unrelated source would otherwise have made the bare US state a foreign country. A
+  test now pins the two maps disjoint, so that collision fails CI instead of shipping.
+
+- **`remote_posting()` documented a promise it does not keep.** Both its docstring and
+  the comment above `_REMOTE_BODY_RE` claimed the body must hit a **role**-remoteness
+  phrase. It does not: employer policy (`remote-first`, `remote-eligible`) and hybrid
+  schedules (`3 days of remote work each week`) both pass, and of 6,070 rows derived
+  remote from the body alone in that same harvest, 1,874 name a real place with no
+  remote wording — 512 from company-level boilerplate, 614 from split-week schedules.
+  Comments only; the regex is unchanged, because tightening it has a real
+  false-negative cost that has to be measured over a full harvest first. The note
+  records the blast radius meanwhile: `is_remote()` passes `text` into the predicate and
+  `remote_only` defaults to true, so these reach shortlists, not just consumer tags.
+
+## [0.7.0] - 2026-08-09
 
 ### Added
 
@@ -28,9 +73,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   found by re-reading `catalog/`, where the terms are quoted and dated — the audit
   that started as "Arbeitnow needs a link" turned up four more.
 
-  Three surfaces, because a library cannot discharge a *display* obligation on behalf
+  Three surfaces, because a library cannot discharge a _display_ obligation on behalf
   of whatever displays the jobs:
-
   - the CLI credits the sources a run actually used (crediting one that returned
     nothing is noise, and noise is how a credit line gets ignored);
   - `--format ndjson` carries the full terms in the run manifest under `attribution`,
@@ -97,7 +141,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`--format ndjson`** — the machine-facing output. One JSON object per line to
   stdout, the run manifest and progress to stderr, so `job-radar --format ndjson
-  --all > jobs.ndjson` produces a clean file. CSV cannot represent a list, a boolean,
+--all > jobs.ndjson` produces a clean file. CSV cannot represent a list, a boolean,
   or the difference between "unknown" and "empty", which is exactly what the contract
   above turns on.
 
@@ -148,10 +192,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the title alone. The gate now runs first, inside the adapter, against titles the list
   endpoint already returned. Measured across the ten shipped Workday employers:
 
-  | | requests | roles |
-  | --- | ---: | ---: |
-  | before (cap 200, bodies for all) | 1,663 | 1,583 of 6,922 |
-  | after (bodies after the gate) | **903** | **6,922** |
+  |                                  | requests |          roles |
+  | -------------------------------- | -------: | -------------: |
+  | before (cap 200, bodies for all) |    1,663 | 1,583 of 6,922 |
+  | after (bodies after the gate)    |  **903** |      **6,922** |
 
   Every role, for roughly half the requests the truncated version cost. `keep=None`
   preserves the old behaviour for a direct caller. Because of it, `WORKDAY_MAX_PAGES`
@@ -305,7 +349,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-parsed both URLs with `job_ref` on every pairwise comparison, when the candidate's
   ref was computed one line earlier and each hit's on insert; stashing it measured
   **11.4× at n=1600** with identical hit-key sets at every size. Recorded so nobody
-  re-derives it: an `lru_cache` on `job_ref` is the *wrong* fix and measured slower —
+  re-derives it: an `lru_cache` on `job_ref` is the _wrong_ fix and measured slower —
   it hashes tens of thousands of distinct URL keys to serve blocks averaging ~10.
 
 - **The self-expanding watchlist was blind to three of its eight ATSs.** `funnel`
@@ -341,7 +385,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   empty on 120 of 120 rows on `accenture`, the same absent-key failure Workable had.
 
   The consequence was not a blank column. `dedup_key` is
-  `company|title|location|job_id`, and Workday was missing *both* of the last two —
+  `company|title|location|job_id`, and Workday was missing _both_ of the last two —
   the location because of the absent key, the requisition id because `job_ref` did
   not recognise a Workday URL. So the key collapsed to `company|title`, and every
   same-titled role a company posts worldwide became one row. Measured on `accenture`
@@ -366,7 +410,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Six adapters were discarding data their API already sends.** Each was measured
   against the live endpoint, not inferred:
-
   - **Ashby** shipped compensation as a display string only. 594 of 734 postings on
     `openai` carry a structured range; those are now `salary_min`/`max`/`currency`/
     `period`. Only the `Salary` component is read — the same list carries
@@ -440,7 +483,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Both values now come out of one call — `util.posted_from()` for a vendor timestamp,
   `sources.posted_from_relative()` for a recency phrase — because the basis is a
-  property of *how the date was derived*, which is knowledge only the deriving code
+  property of _how the date was derived_, which is knowledge only the deriving code
   has. It cannot be defaulted at the record boundary either: by then a computed date
   and a real timestamp are both just strings, so defaulting to `stated` would be right
   for sixteen adapters and an invisible lie for the two that compute. A test now
@@ -463,7 +506,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   99 = 2,000 rows, and the cap applies **per category slice** — so the 20-category
   fan-out is the only way past it, and it was never implemented. All 20 category
   values were probed individually before shipping — necessary because this API
-  silently ignores an unrecognised parameter *value* and serves the unfiltered feed,
+  silently ignores an unrecognised parameter _value_ and serves the unfiltered feed,
   so an unverified slice would look healthy while being a copy of the others. What blocked it was a
   wrong entry in our own catalog claiming category filtering was unreliable;
   re-measured, `category=Healthcare` returns 20/20 Healthcare rows with zero overlap

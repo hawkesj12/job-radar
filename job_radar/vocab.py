@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from .dedup import _QUAL_RE, _TITLE_NOISE
+from .dedup import _QUAL_NOISE, _QUAL_RE, _TITLE_NOISE
 
 # ── employment type ─────────────────────────────────────────────────────────
 EMPLOYMENT_TYPES = frozenset(
@@ -415,6 +415,51 @@ def us_state_code(raw) -> str | None:
     return _STATE_NAMES.get(s.lower())
 
 
+# A head token that names a WORK ARRANGEMENT, not a place. Every branch of
+# split_place() assigned `city` from the head without ever testing that the head was
+# a place, so the arrangement became a city: "Remote, France" -> city "Remote",
+# "Anywhere, Canada" -> "Anywhere", "Hybrid, Germany" -> "Hybrid", "WFH, India" ->
+# "WFH", "Remote, TX" -> "Remote". That is the permanently-wrong row this module's
+# docstring refuses to create, and it is why a two-letter-tail rule was rejected:
+# accepting ", US" would have written a city named Remote onto ~295 measured rows.
+#
+# DERIVED from dedup._QUAL_NOISE (already imported above) rather than restating its
+# eight words, so the shared vocabulary has one source. Two lists of the same words
+# is the drift this package has been bitten by three times -- three URL parsers, two
+# remote-vs-place tuples. The coupling is deliberate and its failure direction is
+# benign: dropping a word from _QUAL_NOISE lets a bad city survive, it can never
+# invent a place. sources._NON_PLACE stays separate on purpose -- it is a predicate
+# over a whole CONFIG string for the keyed search APIs, not a head token.
+_PLACELESS = _QUAL_NOISE | {
+    "work from home",
+    "work-from-home",
+    "virtual",
+    "distributed",
+    "home based",
+    "home-based",
+}
+
+# Intensifiers that decorate an arrangement without making it a place.
+_PLACELESS_INTENSIFIERS = ("fully", "100%", "completely", "permanently", "partially")
+
+
+def _placeless_head(head: str) -> bool:
+    """True when a location string's head names an arrangement instead of a place.
+
+    UNDECORATED matches only. A trailing qualifier -- "Remote - US",
+    "Remote (EMEA)" -- keeps its bad city, a bounded residual rather than a bug to
+    widen carelessly: a whole-head pattern loose enough to catch those also nulls
+    the real city in "Hybrid - Austin", and which way that trades needs a corpus.
+    Under-fixing leaves a wrong value already in the column; over-fixing destroys a
+    right one, so the narrow rule is the safe one until it can be measured.
+    """
+    h = " ".join(head.lower().split())
+    first, _, rest = h.partition(" ")
+    if first in _PLACELESS_INTENSIFIERS and rest:
+        h = rest
+    return h in _PLACELESS
+
+
 def split_place(raw) -> dict:
     """A free-text location -> {city, state, country}, or None where it cannot be
     read with confidence.
@@ -430,8 +475,29 @@ def split_place(raw) -> dict:
     """
     s = _flatten(raw).strip()
     empty = {"city": None, "state": None, "country": None}
-    if not s or "," not in s:
+    if not s:
         return empty
+    if "," not in s:
+        # A whole string that IS a country name is not a guess -- it is the lookup
+        # country_code() already performs, and the comma guard was returning before
+        # ever asking. Measured downstream on a 31,790-row harvest: 1,591 rows are
+        # exactly this shape, and 539 of them are the literal "United States", so
+        # this was discarding US identification as well as foreign.
+        #
+        # Gated on the NAME map rather than country_code(), whose two-letter
+        # passthrough would turn a bare "CA" or "ON" into a country -- the exact
+        # failure the two-letter-tail refusal below exists to prevent.
+        #
+        # The _STATE_NAMES exclusion guards an invariant this lookup depends on and
+        # nothing else enforces: no key in _COUNTRY_CODES is also a US state name.
+        # That holds today, but the map is hand-curated and missing Georgia, Jordan
+        # and Chad -- so without this, adding "georgia": "GE" for some unrelated
+        # source would silently make the US state a foreign country. Only `country`
+        # is filled; no city or state is invented from a single token.
+        if s.lower() in _STATE_NAMES:
+            return empty
+        code = _COUNTRY_CODES.get(s.lower())
+        return {"city": None, "state": None, "country": code} if code else empty
     head, _, tail = s.rpartition(",")
     head, tail = head.strip(), tail.strip()
     if not head or not tail:
@@ -470,9 +536,25 @@ def split_place(raw) -> dict:
                 if country == "US" and region.upper() in _US_STATES
                 else None
             )
-            return {"city": city, "state": state, "country": country}
+            # RETURNS EVEN WHEN THE CITY IS DROPPED -- never fall through. "CA" is
+            # in both _US_STATES and _KNOWN_COUNTRIES, so a nulled city that fell
+            # out of this branch would hit the US-state test below and read
+            # "Remote, ON, CA" as state CA / country US. That is exactly the 25
+            # foreign-rows-made-American regression this branch was written to
+            # prevent, so the country decided here is final.
+            return {
+                "city": None if _placeless_head(city) else city,
+                "state": state,
+                "country": country,
+            }
     if tail.upper() in _US_STATES:
-        return {"city": head, "state": tail.upper(), "country": "US"}
+        # The state is real whether or not the head names a city, so a placeless
+        # head loses only the city -- "Remote, TX" is a Texas row with no city.
+        return {
+            "city": None if _placeless_head(head) else head,
+            "state": tail.upper(),
+            "country": "US",
+        }
     # A NAME only, never a bare two-letter tail. country_code() passes any two
     # letters through, which is right for a source's dedicated country field but
     # wrong here: "Toronto, ON" would resolve to the country "ON". A province and a
@@ -480,7 +562,13 @@ def split_place(raw) -> dict:
     # "Paris, FR" to avoid inventing a country for every Canadian city.
     code = country_code(tail) if len(tail) > 2 else None
     if code:
-        return {"city": head, "state": None, "country": code}
+        # Same as above: the country the string names survives, the invented city
+        # does not -- "Remote, France" is a French row with no city.
+        return {
+            "city": None if _placeless_head(head) else head,
+            "state": None,
+            "country": code,
+        }
     return empty
 
 

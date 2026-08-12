@@ -2039,6 +2039,128 @@ def test_split_place_leaves_multi_location_strings_alone():
     assert split_place("Mountain View, CA, USA")["country"] == "US"
 
 
+def test_split_place_resolves_a_bare_country_name():
+    """The comma guard used to return before asking whether the whole string is a
+    country. Measured downstream on a 31,790-row harvest: 1,591 rows are this shape
+    and 539 are the literal "United States", so US identification was lost too.
+    Only `country` is filled -- a single token names no city."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Singapore") == {
+        "city": None,
+        "state": None,
+        "country": "SG",
+    }
+    assert split_place("United States")["country"] == "US"
+    assert split_place("Canada")["country"] == "CA"
+    assert split_place("Hong Kong")["country"] == "HK"
+
+
+def test_split_place_still_refuses_a_bare_two_letter_token():
+    """The guard this must not weaken. "CA" alone is California as readily as Canada,
+    so the lookup is gated on the country NAME map, never on country_code(), whose
+    two-letter passthrough would resolve both it and the province "ON"."""
+    from job_radar.vocab import split_place
+
+    assert split_place("CA")["country"] is None
+    assert split_place("ON")["country"] is None
+    assert split_place("WA")["country"] is None
+
+
+def test_split_place_still_refuses_a_bare_city_name():
+    """A city is not a country and guessing one is the permanently-wrong row this
+    function refuses to create -- "London" is also London, Ontario."""
+    from job_radar.vocab import split_place
+
+    for city in ("London", "Kuala Lumpur", "Paris", "Remote"):
+        assert split_place(city) == {
+            "city": None,
+            "state": None,
+            "country": None,
+        }, city
+
+
+def test_split_place_does_not_read_an_arrangement_as_a_city():
+    """Every branch assigned `city` from the head without testing that the head was a
+    place, so "Remote, France" came back as the city of Remote. The country and state
+    the string really carries survive -- only the invented city is dropped."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Remote, France") == {
+        "city": None,
+        "state": None,
+        "country": "FR",
+    }
+    # the US-state branch keeps its state; only the city goes
+    assert split_place("Remote, TX") == {"city": None, "state": "TX", "country": "US"}
+    for s in ("Anywhere, Canada", "Hybrid, Germany", "WFH, India", "Onsite, Brazil"):
+        assert split_place(s)["city"] is None, s
+        assert split_place(s)["country"] is not None, s
+    # case and a leading intensifier both normalize
+    assert split_place("remote, italy") == {
+        "city": None,
+        "state": None,
+        "country": "IT",
+    }
+    assert split_place("Fully Remote, France")["city"] is None
+
+
+def test_split_place_drops_a_placeless_city_without_falling_through():
+    """THE regression this must never hit. "CA" is in both _US_STATES and
+    _KNOWN_COUNTRIES, so a nulled city that fell out of the three-part branch would
+    reach the US-state test and read "Remote, ON, CA" as state CA / country US --
+    the 25 foreign-rows-made-American bug that branch exists to prevent."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Remote, ON, CA") == {
+        "city": None,
+        "state": None,
+        "country": "CA",
+    }
+    assert split_place("Remote, NY, US") == {
+        "city": None,
+        "state": "NY",
+        "country": "US",
+    }
+
+
+def test_split_place_still_resolves_real_cities():
+    """The recovery cases must be byte-identical -- a placeless-head rule that also
+    nulls real cities would cost far more than the bug it fixes."""
+    from job_radar.vocab import split_place
+
+    assert split_place("Austin, TX") == {
+        "city": "Austin",
+        "state": "TX",
+        "country": "US",
+    }
+    assert split_place("Paris, France") == {
+        "city": "Paris",
+        "state": None,
+        "country": "FR",
+    }
+    assert split_place("Toronto, ON, CA") == {
+        "city": "Toronto",
+        "state": None,
+        "country": "CA",
+    }
+    # The documented residual: a DECORATED arrangement keeps its city. Narrow on
+    # purpose -- a pattern loose enough to catch this also nulls "Hybrid - Austin".
+    assert split_place("Remote - US, France")["city"] == "Remote - US"
+
+
+def test_no_country_name_is_also_a_us_state_name():
+    """The invariant split_place's bare-name lookup depends on, pinned here because
+    nothing else enforces it. _COUNTRY_CODES is hand-curated and currently missing
+    Georgia, Jordan and Chad; adding "georgia": "GE" for an unrelated source would
+    otherwise make the bare US state a foreign country. split_place excludes
+    _STATE_NAMES for that reason, and this fails the moment the two maps collide so
+    the collision is a test failure rather than a silent wrong row."""
+    from job_radar.vocab import _COUNTRY_CODES, _STATE_NAMES
+
+    assert not set(_COUNTRY_CODES) & set(_STATE_NAMES)
+
+
 def test_ashby_salary_never_reads_the_equity_component():
     """Measured on openai (n=734): components are Salary 594, EquityCashValue 576,
     Commission 15. Taking the first would write an equity grant into salary_min."""

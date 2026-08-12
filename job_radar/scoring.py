@@ -43,9 +43,26 @@ def _present(text: str, tokset: set, fw: dict, singles, multis) -> list:
 
 # ── remote detection ────────────────────────────────────────────────────────
 # A pure predicate shared with downstream consumers (jobfitr). Title/location
-# match liberally; the BODY must hit a role-remoteness phrase AND not be negated,
-# which recovers Adzuna/USAJOBS roles that are genuinely remote but only say so in
-# the description (their APIs carry no reliable remote flag).
+# match liberally; the BODY must hit _REMOTE_BODY_RE AND not be negated, which
+# recovers Adzuna/USAJOBS roles that are genuinely remote but only say so in the
+# description (their APIs carry no reliable remote flag).
+#
+# _REMOTE_BODY_RE does NOT establish ROLE-level remoteness, which this comment and
+# remote_posting's docstring both used to claim. Measured downstream on a 31,790-row
+# harvest, of 6,070 rows derived remote from the body alone, 1,874 name a real place
+# with no remote wording. Two shapes account for it: employer-level policy read as
+# role-level (512 rows -- "we are a fully remote global company", the identical
+# sentence appearing on postings in Mexico, Brazil and Canada at once), and hybrid
+# schedules (614 rows -- "3 days of remote work each week" matches the `remote work`
+# branch, though job-radar already has a `hybrid` state for exactly that).
+#
+# Not yet fixed, deliberately. Tightening the alternation has a real false-negative
+# cost -- "this position allows remote work from anywhere in the US" is genuinely
+# remote and dies with the `work` token -- and that delta has to be measured over a
+# full harvest before shipping, the way every other rule in this file was. Note the
+# blast radius while it stands: is_remote() below passes `text` into this predicate
+# and remote_only defaults True, so these false positives enter our own shortlists,
+# not just a consumer's tags -- the same leak sources.py records for HN.
 _REMOTE_RE = re.compile(r"remote|anywhere|work from home|\bwfh\b", re.I)
 _REMOTE_BODY_RE = re.compile(
     r"\b(?:fully|100%|completely|permanently)\s+remote\b"
@@ -65,9 +82,16 @@ _REMOTE_NEG_RE = re.compile(
 
 
 def remote_posting(title: str, location: str, body: str = "") -> bool:
-    """True when a role is remote. Title/location match liberally; the body must
-    hit a role-remoteness phrase and not be negated. Pure -- no config, safe to
-    share with jobfitr's tag derivation."""
+    """True when a posting reads as remote. Title/location match liberally; the body
+    must hit _REMOTE_BODY_RE and not be negated. Pure -- no config, safe to share
+    with jobfitr's tag derivation.
+
+    The body branch is a REMOTENESS-MENTIONED test, not a role-level one: employer
+    policy ("remote-first", "remote-eligible") and split-week schedules ("3 days of
+    remote work") both pass. Measured false-positive counts and why the fix is
+    deferred are above _REMOTE_BODY_RE. A caller that needs role-level confidence
+    should prefer a source's structured `remote_type` -- which is what is_remote()
+    does, falling through to this only when the source sent nothing."""
     head = f"{title} {location}"
     if _REMOTE_NEG_RE.search(head):  # "Non-remote ...", "On-site only" -> not remote
         return False
