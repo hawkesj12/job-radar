@@ -251,6 +251,56 @@ def test_remote_posting_reads_body():
     assert not scoring.remote_posting("Engineer", "Austin, TX", "")
 
 
+def test_both_gates_agree_about_a_us_inclusive_posting():
+    """The two gates USED TO CONTRADICT each other on the same row, and the counterexample
+    was already sitting in this file: `_location_excluded`'s US veto deliberately rescues
+    these strings, and then `remote_scope` answered CA for "Remote - US & Canada" because
+    its country pass ran before the US marker -- so `remote_regions=["US","ANY"]` threw the
+    row away one gate later. 112 rows named the US explicitly and carried a foreign
+    boundary. One fixture now pins both gates so they cannot drift apart again."""
+    c = config.Config(remote_only=True, remote_regions=["US", "ANY"])
+    for loc in (
+        "Remote (United States | Canada)",
+        "Americas (USA or Canada) (Remote)",
+        "Remote - US & Canada",
+    ):
+        assert vocab.remote_scope(loc) in ("US", "AMERICAS"), loc
+        p = engine.derive_remote(
+            engine._coerce(
+                {
+                    "title": "AI Engineer",
+                    "company": "A",
+                    "url": "https://x/" + loc,
+                    "source": "greenhouse",
+                    "location": loc,
+                }
+            )
+        )
+        assert scoring.is_remote(p, c) is True, loc
+
+
+def test_a_named_country_beats_the_anywhere_token():
+    """ "Remote - Anywhere in Brazil" means anywhere WITHIN Brazil. Checking ANY first
+    answered ANY and lost the boundary that matters, on 24 rows, 11 of them French."""
+    assert vocab.remote_scope("Remote - Anywhere in Brazil") == "BR"
+    assert vocab.remote_scope("Remote - Anywhere") == "ANY"
+
+
+def test_the_body_literal_gates_change_no_verdict():
+    """remote_signal gates each expensive body pattern behind a cheap substring test. The
+    gate words are hand-derived, and a first version omitted `anywhere` and silently lost
+    192 remote verdicts. This asserts each pattern's literal set is complete by checking a
+    body that matches ONLY through that pattern's rarest literal."""
+    cases = [
+        ("This role is remote; you may work from anywhere in the US.", "remote"),
+        ("Telecommuting is available for this position.", "remote"),
+        ("Our hybrid schedule is three days in the office.", "hybrid"),
+        ("This is not a remote position.", None),
+    ]
+    for body, want in cases:
+        assert scoring.remote_signal("Engineer", "Austin, TX", body)[0] == want, body
+
+
 def test_remote_signal_records_how_it_decided():
     """`is_remote` called remote_posting, took a bare bool and wrote NOTHING -- so a row
     admitted because its TITLE said remote was byte-identical in the record to a row
@@ -344,28 +394,31 @@ def test_hybrid_is_not_matched_as_a_bare_word():
 
 def test_coerce_records_the_remote_decision_without_overwriting_a_source():
     """The fallback may only ADD, the same discipline as the geography fallback."""
-    p = engine._coerce(
-        {
-            "title": "AI Engineer - Remote",
-            "company": "A",
-            "url": "https://x/1",
-            "source": "greenhouse",
-            "location": "Austin, TX",
-        }
-    )
+    row = {
+        "title": "AI Engineer - Remote",
+        "company": "A",
+        "url": "https://x/1",
+        "source": "greenhouse",
+        "location": "Austin, TX",
+    }
+    # derive_remote runs AFTER the relevance gate in _consume, not inside _coerce, because
+    # it scans the body and 69% of postings are discarded a moment later.
+    p = engine.derive_remote(engine._coerce(row))
     assert (p["remote_type"], p["remote_basis"]) == ("remote", "title")
     assert p["remote"] is True, "the derived bool must reflect a newly-derived type"
     # a source that sent its own structured signal keeps it
-    kept = engine._coerce(
-        {
-            "title": "AI Engineer - Remote",
-            "company": "A",
-            "url": "https://x/2",
-            "source": "ashby",
-            "location": "Austin, TX",
-            "remote_type": "hybrid",
-            "remote_basis": "stated",
-        }
+    kept = engine.derive_remote(
+        engine._coerce(
+            {
+                "title": "AI Engineer - Remote",
+                "company": "A",
+                "url": "https://x/2",
+                "source": "ashby",
+                "location": "Austin, TX",
+                "remote_type": "hybrid",
+                "remote_basis": "stated",
+            }
+        )
     )
     assert (kept["remote_type"], kept["remote_basis"]) == ("hybrid", "stated")
 
@@ -376,14 +429,16 @@ def test_remote_region_filter_separates_boundary_from_arrangement():
     ["US","ANY","UNSTATED"] 7,242."""
 
     def row(loc):
-        return engine._coerce(
-            {
-                "title": "AI Engineer",
-                "company": "A",
-                "url": "https://x/" + loc,
-                "source": "greenhouse",
-                "location": loc,
-            }
+        return engine.derive_remote(
+            engine._coerce(
+                {
+                    "title": "AI Engineer",
+                    "company": "A",
+                    "url": "https://x/" + loc,
+                    "source": "greenhouse",
+                    "location": loc,
+                }
+            )
         )
 
     us, br, anywhere, bare = (

@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **About every number below.** All counts come from **one** harvest of 31,790 rows,
+> composed **78% greenhouse · 12% ashby · 4% lever**; 8 of the 19 wired sources contributed
+> under 250 rows between them and 8 contributed none. It was read from a downstream
+> consumer's store, not from `harvest()` output. Each claim names the population it was
+> measured over, because several of these counts move by 2× depending on whether the
+> population is "all rows" or "remote-by-location rows", and on which token list is in play.
+> **Nothing here is hand-labelled**: classes like "employer boilerplate", "role-level
+> assertion" and "split-week schedule" are pattern-matched, so read every precision claim as
+> an upper bound. Counts were re-derived with each row's adapter-supplied `remote_type`
+> preserved — a replay that forces it to `None` routes 6,049 already-typed rows down a
+> fallback the engine never calls for them, and overstates the deltas badly.
+
 ### Added
 
 - **The remote gate now RECORDS what it decided.** It called `remote_posting()`, took a
@@ -13,28 +25,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out with `remote_type`, `remote_basis` and `remote_region` all `None`, byte-identical in
   the record to a row nobody classified. The 0.7.0 rule that every derived field carries a
   basis was broken by the gate itself, which is why a downstream consumer invented
-  `remote_basis='derived'`, a value outside `REMOTE_BASES`. On a 31,790-row harvest the new
-  `scoring.remote_signal()` labels **8,342 remote** (7,915 `location`, 449 `title`, 3,068
-  `text` across all types) and **3,089 hybrid**, where the fallback previously recorded
-  nothing at all. `remote_posting()` is unchanged — it is released public API — so this is
-  a typed sibling, not a rewrite.
+  `remote_basis='derived'`, a value outside `REMOTE_BASES`.
 
-- **`title` joins `REMOTE_BASES`.** 462 rows say remote in the title with the location
-  silent — 422 Greenhouse, 39 Lever, 1 Ashby, which is to say almost entirely the two big
-  depth adapters that send no structured remote field, so the title is the only evidence in
-  existence. `location` would have been a lie about where we read it and `stated` implies a
-  vendor field, so neither could stand in.
+  Across all 31,790 rows, `engine.derive_remote()` now labels **7,618 remote · 4,183 hybrid
+  · 2,009 onsite**, leaving 17,980 honestly unknown. By provenance: `stated` 4,805 ·
+  `location` 4,525 · `text` 2,729 · `board` 1,244 · `title` 507. Only the last three are
+  new work; `stated` and `board` come from the adapters and are never overwritten.
+  `remote_posting()` is unchanged — it is released public API — so this is a typed sibling,
+  not a rewrite.
+
+- **`title` joins `REMOTE_BASES`.** Over all 31,790 rows, 462 say remote in the title with
+  the location silent, and **507** end up recorded with `basis="title"` once title-only
+  hybrid and negation cases are counted too. `location` would have been a lie about where we
+  read it and `stated` implies a vendor field, so neither could stand in.
+
+  Correcting the reasoning first given for this: it is _not_ true that Greenhouse and Lever
+  both send no remote field. **Lever does** — the adapter reads `workplaceType`
+  (`sources.py:297`) — and in this harvest all 39 lever rows already carry `stated`, so none
+  of them reaches the title fallback. Greenhouse is the source that genuinely has no remote
+  field, and it is where this basis earns its keep.
 
 - **`remote_region` is parsed for every source, and `remote_regions` filters on it.**
   The boundary was being parsed and discarded: the field existed and only Adzuna ever set
   it. `vocab.remote_scope()` now reads an alpha-2 code, a US state, a multi-country region
   (`EMEA`, `NORTH AMERICA`), or `ANY`, falling back to the row's own `country` —
-  **6,115 of 8,342 remote rows now carry a boundary.** The new `remote_regions` config key
-  filters on it: unset 7,375 rows, `[US, ANY]` 4,216, `[US, ANY, UNSTATED]` 7,177.
+  **4,150 of 7,618 remote rows now carry a boundary.** The new `remote_regions` config key
+  filters on it: unset 6,521 rows, `[US, ANY]` 2,862, `[US, ANY, UNSTATED]` 6,428.
   `remote_only` stays a bool; this is a separate key, because changing a released field's
   type would break consumers.
 
-  **`None` means UNSTATED and is deliberately not `ANY`.** Only 654 of 7,712
+  Worth knowing before you set it strictly: a row whose source _stated_ it is remote usually
+  states no boundary, so it is `UNSTATED` rather than `US`. That is why `[US, ANY]` is so
+  much smaller than `[US, ANY, UNSTATED]` — the strict list drops most vendor-stated remote
+  rows, not just the foreign ones.
+
+  **`None` means UNSTATED and is deliberately not `ANY`.** Only 30 of 7,712
   remote-by-location rows actually say anywhere; a bare `Remote` means "remote, boundary
   unstated", usually within whatever country the employer can legally pay from. Admitting
   those is an explicit opt-in rather than an assumption baked into the parser — the same
@@ -47,13 +72,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A `remote_only` harvest returns a different set of rows. Read this before upgrading.**
   The gate now reads the arrangement the engine derived, and a posting that states a split
-  week is `hybrid`, which is not remote. Measured on a 31,790-row harvest with the location
-  filter held constant: **808 rows that used to pass no longer do, and 292 now pass that
-  did not** — a net −516, roughly −6% of what a remote-only run surfaces.
+  week is `hybrid`, which is not remote. Measured over all 31,790 rows with the location
+  filter held constant: **556 rows that used to pass no longer do, and 286 now pass that
+  did not** — a net −270, or **−3.1%** of the 8,688 a remote-only run surfaced before.
 
-  The 808 are postings whose body states a split week ("2 days a week in the office") while
+  The 556 are postings whose body states a split week ("2 days a week in the office") while
   nothing in the title or location said remote; the old gate saw the word "remote" in that
-  same sentence and admitted them. The 292 are postings whose title or location says remote
+  same sentence and admitted them. The 286 are postings whose title or location says remote
   where nothing previously typed them at all. Both directions are the intended effect and
   neither is a silent reweighting — every row now carries a `remote_basis` saying how it
   was decided, so a consumer that disagrees can filter on the basis rather than re-derive.
@@ -83,35 +108,51 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `hybrid` is matched with different sensitivity per field, which is not a compromise but
   the point: bare in a title or location, where the word can only mean the work
   arrangement, and requiring a work-context noun in a body, where it usually does not. A
-  bare `\bhybrid\b` matched 5,491 bodies and the third-largest group was **"hybrid
-  vehicles"** — automotive job descriptions — with "hybrid environment" (as often hybrid
-  _cloud_ as hybrid work) close behind. Tightening took it to 2,995 with zero
-  vehicle/cloud matches. The head case regressed when both shared one tightened pattern,
-  and a test caught it rather than a reading.
+  bare `\bhybrid\b` matched **5,390** of 31,790 bodies and the third-largest group was
+  **"hybrid vehicles"** — automotive job descriptions — with "hybrid environment" (as often
+  hybrid _cloud_ as hybrid work) close behind. Tightening took it to **2,995**, of which
+  **zero** contain "hybrid vehicle". Stated precisely, because the looser claim was wrong:
+  **101 of the 2,995 still contain "hybrid cloud" or "hybrid environment"** somewhere in the
+  body — the pattern matches on a _different_ span in those rows, so the verdict is
+  defensible, but "zero vehicle/cloud matches" was not what was measured. The head case
+  regressed when both patterns shared one tightened form, and a test caught it, not a
+  reading.
 
 - **The non-US location filter matched bare substrings, so it dropped US jobs.** `"india"`
-  matched india**na** and `"apac"` matched c**apac**ity — measured on a 31,790-row harvest,
-  202 rows were excluded by collision, including `"Anderson, Indiana, United States"` and a
-  Capacity Planning role in Austin. Matching is now word-bounded. The boundary is
+  matched india**na** and `"apac"` matched c**apac**ity — over all 31,790 rows, matching
+  title+location against the old 34-name list, **188 rows** were excluded by collision,
+  including `"Anderson, Indiana, United States"` and a Capacity Planning role in Austin.
+  (The population matters and is why an earlier draft said 202: matching location-only gives
+  129, and the new 66-token list gives 165.) Matching is now word-bounded. The boundary is
   `(?<![a-z])…(?![a-z])` rather than `\b`, because real tokens are not all word-shaped:
   `"(eu)"` shipped in the example config and `\b(eu)\b` does not mean what it appears to.
 
 - **A posting listing several eligible countries was dropped on the foreign one.**
   `"Remote (United States | Canada)"`, `"Americas (USA or Canada)"` and `"Remote - US &
 Canada"` were all discarded because `canada` matched — losing jobs that are workable from
-  the US. **339 rows in one harvest.** A US marker in the location now vetoes the
+  the US. Over all 31,790 rows, **451** that the old list dropped are kept by the new
+  filter — that figure combines this veto with the word-boundary fix above, which is why an
+  earlier draft's 339 (the veto alone, on a narrower population) was not reproducible.
+  A US marker in the location now vetoes the
   exclusion; the veto reads the location only, never the title, because titles carry "US"
   incidentally ("US client") and would rescue genuinely foreign rows. This long predates
   the change below — `canada` was in the old hand-written list — and only became visible
   when the filter was measured instead of read.
 
-- **The default non-US filter was 34 hand-written names against a 60-name vocabulary.**
-  The 26 it lacked leaked 260 remote rows bounded to countries the user cannot work in —
-  led by the Philippines (68), the UK spellings (44), South Africa, Pakistan, Thailand,
-  China, Chile and South Korea. It now derives from `vocab._COUNTRY_CODES`, the same fix
-  and the same reasoning as `_KNOWN_COUNTRIES`: adding a country to the map is sufficient,
-  and there is no second list to go stale. A test pins the coverage so it cannot drift
-  again. The leak measures 260 → 2.
+- **The default non-US filter was 34 hand-written names against a 58-name vocabulary.**
+  The names it lacked leaked **260** remote rows bounded to countries the user cannot work
+  in — led by the Philippines (68), the UK spellings (44), South Africa, Pakistan, Thailand,
+  China, Chile and South Korea. Population: rows whose location matches the remote pattern,
+  name a non-US country, and carry no US marker. **The leak measures 260 → 2.** It now
+  derives from `vocab._COUNTRY_CODES`, the same fix and the same reasoning as
+  `_KNOWN_COUNTRIES`: adding a country to the map is sufficient, and there is no second list
+  to go stale. A test pins the coverage so it cannot drift again.
+
+  One token was traded away rather than gained: `czech` was in the hand list and is not a
+  key in the country map, which carries `czechia` and `czech republic` instead. Both real
+  spellings are still caught and all 21 rows naming it are excluded by another token, so
+  there is no live regression — but the change was not purely additive, and saying so
+  matters more than the clean story.
 
 - **`country_code("UK")` returned `"UK"`.** That is not a valid ISO alpha-2 code — `GB` is
   — and the name map has said `uk → GB` all along, but the unvalidated two-letter

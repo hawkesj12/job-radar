@@ -199,33 +199,9 @@ def _coerce(p: dict) -> dict:
         p["seniority"] = parsed["seniority"]
         p["seniority_basis"] = "title"
 
-    # REMOTE FALLBACK, and the point is that it RECORDS what it decided. The gate used to
-    # call scoring.remote_posting, take a bare bool, and write nothing -- so a row admitted
-    # because its title said "Remote" came out with remote_type/remote_basis/remote_region
-    # all None, indistinguishable from a row nobody classified. Measured on a 31,790-row
-    # harvest that is 462 title-decided rows plus 1,642 body-decided ones, and it is why a
-    # downstream consumer invented `remote_basis='derived'`, a value outside REMOTE_BASES.
-    #
-    # ONLY when the adapter left remote_type None, same discipline as the geography
-    # fallback below: a source that sends a real structured signal always wins.
-    if p.get("remote_type") is None:
-        rtype, rbasis, rregion = remote_signal(
-            p.get("title", "") or "",
-            p.get("location", "") or "",
-            p.get("text", "") or "",
-        )
-        if rtype is not None:
-            p["remote_type"] = rtype
-            p["remote_basis"] = rbasis
-            # Never overwrite a region an adapter already stated (himalayas, jobicy and
-            # remotive all send one); only fill a gap.
-            if p.get("remote_region") is None:
-                p["remote_region"] = rregion
-
     # `remote` is DERIVED from remote_type, not stored beside it. Two homes for one
     # fact is how a hybrid role ends up reported as `remote: False`, which reads as
-    # on-site to anything that only checks the flag. Runs AFTER the fallback above so a
-    # newly-derived remote_type is reflected here rather than a stale None.
+    # on-site to anything that only checks the flag.
     rt = p.get("remote_type")
     p["remote"] = None if rt is None else rt == "remote"
 
@@ -271,22 +247,6 @@ def _coerce(p: dict) -> dict:
         for k, v in vocab.split_place(first).items():
             if v is not None:
                 p[k] = v
-
-    # REMOTE BOUNDARY, last resort. Runs HERE, after the geography fallback above, because
-    # it reads `country` and that field is not populated until this point.
-    #
-    # A remote row whose location states no boundary still often carries a parsed country,
-    # and that is evidence rather than a guess: it is the country this posting is filed
-    # under. Measured on a 31,790-row harvest, of 2,791 remote rows with an unstated
-    # boundary, 408 carry country=US and ~130 carry a foreign one -- and those 130 are the
-    # reason to do this at all, since an unstated boundary is ADMITTED by the default
-    # region policy and they would otherwise ride through as "we don't know".
-    #
-    # Deliberately weaker than a stated boundary and deliberately last: anything the
-    # location actually said has already won.
-    if p.get("remote_type") == "remote" and p.get("remote_region") is None:
-        if p.get("country"):
-            p["remote_region"] = p["country"]
 
     # `locations` -- every place ONE posting names. Greenhouse separates them with
     # `;` ("Berlin, Germany; Munich, Germany") and 143 of 810 postings on one measured
@@ -354,11 +314,61 @@ def _coerce(p: dict) -> dict:
     return p
 
 
+def derive_remote(p: dict) -> dict:
+    """Fill remote_type / remote_basis / remote_region from the posting's own text.
+
+    RECORDS what it decided, which is the point. The gate used to call
+    scoring.remote_posting, take a bare bool and write nothing -- so a row admitted
+    because its title said "Remote" came out with all three fields None, indistinguishable
+    from a row nobody classified. Measured on a 31,790-row harvest that is 462
+    title-decided rows plus 1,642 body-decided ones, and it is why a downstream consumer
+    invented `remote_basis='derived'`, a value outside REMOTE_BASES.
+
+    ONLY fills what the adapter left None, the same discipline as the geography fallback
+    in _coerce: a source that sends a real structured signal always wins.
+
+    SEPARATE FROM _coerce, and deliberately called AFTER the relevance gate. This scans the
+    full job body, which is the single most expensive thing the per-posting path does --
+    measured, 69% of postings are discarded by a title-only relevance test microseconds
+    later, so doing it inside _coerce spent most of its cost on rows that were thrown away.
+    Emitted rows are unaffected: everything that survives to the store passes relevance
+    first, so it has been through here.
+    """
+    if p.get("remote_type") is None:
+        rtype, rbasis, rregion = remote_signal(
+            p.get("title", "") or "",
+            p.get("location", "") or "",
+            p.get("text", "") or "",
+        )
+        if rtype is not None:
+            p["remote_type"] = rtype
+            p["remote_basis"] = rbasis
+            # Never overwrite a region an adapter already stated (himalayas, jobicy and
+            # remotive all send one); only fill a gap.
+            if p.get("remote_region") is None:
+                p["remote_region"] = rregion
+    # A remote row whose location stated no boundary often still carries a parsed country,
+    # and that is evidence rather than a guess: it is the country this posting is filed
+    # under. Of 4,127 such rows in a 31,790-row harvest, 528 carry country=US and 131 a
+    # foreign one -- and those 131 are the reason to do it, since an unstated boundary is
+    # ADMITTED by the default region policy and they would otherwise ride through as
+    # "we don't know". The remaining ~3,470 have no country either and stay unstated.
+    if p.get("remote_type") == "remote" and p.get("remote_region") is None:
+        if p.get("country"):
+            p["remote_region"] = p["country"]
+    rt = p.get("remote_type")
+    p["remote"] = None if rt is None else rt == "remote"
+    return p
+
+
 def _consume(postings, hits, blocks, cfg, meta):
     for p in postings:
         _coerce(p)
         if not relevant(p.get("title", ""), cfg):
             continue
+        derive_remote(
+            p
+        )  # after the relevance gate: it scans the body, see its docstring
         if not is_remote(p, cfg):
             continue
         age = age_int(p.get("posted", ""))

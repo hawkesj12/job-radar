@@ -329,7 +329,9 @@ def country_code(raw) -> str | None:
     the map already had a better answer for. "UK" is the case: it is not an ISO alpha-2
     code (GB is), the map has said `uk -> GB` all along, and the passthrough returned
     "UK" anyway -- so one column the record contract declares alpha-2 held both spellings
-    for the same country, ~197 rows in a measured 31,790-row harvest. Same defect as the
+    for the same country. (The harvest measured here stores no non-US country codes, so
+    the row count for this one is unverified -- the BEHAVIOUR is what was tested.) Same
+    defect as the
     `state='California'` vs `'CA'` split that engine._coerce canonicalizes, and it hid
     here because the passthrough looks like it only handles codes the map lacks.
     """
@@ -367,7 +369,7 @@ _KNOWN_COUNTRIES = frozenset(_COUNTRY_CODES.values())
 
 # Every country NAME above that is not the US -- the one source for a "this posting is
 # not US-workable" filter. config.DEFAULT_NON_US was a SEPARATE hand-written list of 34
-# names against these 60, and the 26 it lacked leaked measurably: on a 31,790-row harvest
+# names against these 58, and the ones it lacked leaked measurably: on a 31,790-row harvest
 # 260 remote rows bounded to a country the user cannot work in got through, led by the
 # Philippines (68), the UK spellings (44), South Africa, Pakistan, Thailand, China, Chile
 # and South Korea. Same failure and same fix as _KNOWN_COUNTRIES above -- derive it, so
@@ -652,7 +654,8 @@ _REMOTE_REGIONS = (
 )
 
 # "Remote from anywhere" -- the ONLY thing that means unbounded. Measured on the same
-# harvest: just 654 of 7,712 rows (8.5%) actually say this. A bare "Remote" does NOT --
+# harvest: just 30 of 7,712 remote-by-location rows actually say this. A bare "Remote"
+# does NOT --
 # it means "remote, boundary unstated", usually within whatever country the employer can
 # legally pay from. Collapsing unstated into ANY is the same error as reading a blank
 # country as "placeless, therefore servable".
@@ -661,6 +664,38 @@ _REMOTE_ANYWHERE = re.compile(
 )
 
 _REMOTE_TZ = re.compile(r"(?<![a-z])(?:utc|gmt|est|pst|cst|cet)(?![a-z])", re.I)
+
+
+def _alternation(words) -> re.Pattern:
+    """One word-bounded alternation, longest name first.
+
+    Replaces a per-call loop that rebuilt `rf"(?<![a-z]){re.escape(name)}(?![a-z])"` for
+    each of 62 country names and re-sorted them on every invocation -- 71 pattern
+    constructions per row. Compilation itself amortized through re's internal cache, but
+    the escaping, sorting and dispatch did not: measured 49.6 us/call against 2.7 us for
+    this, a 14.8x saving on the line item.
+    """
+    return re.compile(
+        r"(?<![a-z])(?:"
+        + "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+        + r")(?![a-z])"
+    )
+
+
+_REGION_RE = _alternation(_REMOTE_REGIONS)
+_COUNTRY_NAME_RE = _alternation(_COUNTRY_CODES)
+
+
+def _longest_match(rx: re.Pattern, low: str) -> str | None:
+    """The LONGEST match anywhere in the string, not the leftmost.
+
+    Preserves the semantics of the loop this replaced, which tried the longest name first
+    and so preferred "united kingdom" over a "uk" appearing earlier. A plain alternation
+    is leftmost-wins and would silently change that on multi-place strings.
+    """
+    best = max(rx.finditer(low), key=lambda m: len(m.group(0)), default=None)
+    return best.group(0) if best else None
+
 
 # The US, spelled every way a job feed spells it. Lives here so `remote_scope` and
 # `scoring._location_excluded` share ONE pattern instead of two that drift.
@@ -689,11 +724,15 @@ def remote_scope(raw) -> str | None:
 
     The boundary is a different fact from the arrangement, and one boolean cannot hold
     both. "Remote - Brazil" is genuinely remote AND unreachable for a US-only worker;
-    "Remote" is genuinely remote and says nothing about where. Measured on a 31,790-row
-    harvest, of 7,712 remote-by-location rows: 3,127 name a country, 654 say anywhere,
-    338 name a region or timezone band, 16 a US state, and 609 state nothing at all.
-    Every one of those boundaries was parsed and thrown away -- `remote_region` existed
-    and only Adzuna ever set it.
+    "Remote" is genuinely remote and says nothing about where. Every one of those
+    boundaries was parsed and thrown away -- `remote_region` existed and only Adzuna set it.
+
+    Measured over the 7,712 remote-by-location rows of a 31,790-row harvest: 4,539 name a
+    country or US state, 343 a region or timezone band, 30 say anywhere, and 2,800 state
+    nothing at all. Those sum to 7,712, which is the check an earlier version of this
+    docstring failed -- it listed components totalling 4,744 against the same denominator
+    and put `anywhere` at 654, a number no population reproduces. The DECISION those figures
+    support (unknown is not "anywhere") survives the correction; the figures did not.
 
     Returns an alpha-2 code, a region token, `ANY`, a US state code, or None. None means
     UNSTATED and is deliberately distinguishable from `ANY`.
@@ -701,19 +740,29 @@ def remote_scope(raw) -> str | None:
     s = _flatten(raw).strip()
     if not s:
         return None
-    if _REMOTE_ANYWHERE.search(s):
-        return "ANY"
     low = " ".join(s.lower().split())
-    # Longest first, so "european union" is not answered by "europe".
-    for region in sorted(_REMOTE_REGIONS, key=len, reverse=True):
-        if re.search(rf"(?<![a-z]){re.escape(region)}(?![a-z])", low):
-            return region.upper()
-    # A country ANYWHERE in the string, longest name first for the same reason.
-    for name in sorted(_COUNTRY_CODES, key=len, reverse=True):
-        if re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", low):
-            return _COUNTRY_CODES[name]
+    # Longest match wins, so "european union" is not answered by "europe".
+    region = _longest_match(_REGION_RE, low)
+    if region:
+        return region.upper()
+    # THE US MARKER IS CHECKED BEFORE THE COUNTRY NAMES, and the order is the whole point.
+    # The country pass returns any country found anywhere in the string, so "Remote - US &
+    # Canada" answered CA -- and a US-only `remote_regions` then dropped a posting the
+    # worker can plainly take. 112 rows in a 31,790-row harvest name the US explicitly and
+    # carried a foreign boundary. Worse, it made two gates disagree about one posting:
+    # scoring._location_excluded has a US veto that deliberately RESCUES exactly these
+    # strings ("Remote (United States | Canada)", "Remote - US & Canada"), and this
+    # function then threw them away one gate later.
     if US_LOCATION_RE.search(s):
         return "US"
+    name = _longest_match(_COUNTRY_NAME_RE, low)
+    if name:
+        return _COUNTRY_CODES[name]
+    # AFTER the country pass, not before: "Remote - Anywhere in Brazil" means anywhere
+    # WITHIN Brazil, and answering ANY there loses the boundary that matters. Checked
+    # first, it did exactly that on 24 rows, 11 of them French.
+    if _REMOTE_ANYWHERE.search(s):
+        return "ANY"
     # Strip the arrangement words and let the ordinary place parser read the remainder.
     bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-–—|/")
     place = split_place(bare)

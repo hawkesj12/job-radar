@@ -48,13 +48,19 @@ def _present(text: str, tokset: set, fw: dict, singles, multis) -> list:
 # description (their APIs carry no reliable remote flag).
 #
 # _REMOTE_BODY_RE does NOT establish ROLE-level remoteness, which this comment and
-# remote_posting's docstring both used to claim. Measured downstream on a 31,790-row
-# harvest, of 6,070 rows derived remote from the body alone, 1,874 name a real place
-# with no remote wording. Two shapes account for it: employer-level policy read as
-# role-level (512 rows -- "we are a fully remote global company", the identical
-# sentence appearing on postings in Mexico, Brazil and Canada at once), and hybrid
-# schedules (614 rows -- "3 days of remote work each week" matches the `remote work`
-# branch, though job-radar already has a `hybrid` state for exactly that).
+# remote_posting's docstring both used to claim. Two shapes account for the failure:
+# employer-level policy read as role-level ("we are a fully remote global company", the
+# identical sentence appearing on postings in Mexico, Brazil and Canada at once), and hybrid
+# schedules ("3 days of remote work each week" matches the `remote work` branch, though this
+# package already has a `hybrid` state for exactly that).
+#
+# The row counts this comment used to carry -- "of 6,070 rows derived remote from the body
+# alone, 1,874 name a real place", split 512 boilerplate / 614 hybrid -- were WRONG and are
+# removed rather than patched. 6,070 is a downstream consumer's count of its own `derived`
+# rows, and only ~1,455 of them are head-silent: the majority were decided by the LOCATION,
+# so "from the body alone" was false for most of the denominator, and no reading of the
+# corpus reproduces the three splits. The shapes are real and reproducible; the numbers
+# attached to them were not, and a number nobody can re-derive is worse than none.
 #
 # This alternation is deliberately UNCHANGED, and the fix went somewhere better. Tightening
 # it has a real false-negative cost -- "this position allows remote work from anywhere in
@@ -160,6 +166,24 @@ _HYBRID_RE = re.compile(
 )
 
 
+# The complete set of literals each body pattern CANNOT match without. Deriving these by
+# hand is the risk: a first version omitted `anywhere` and silently lost 192 remote
+# verdicts, because _ROLE_REMOTE_RE matches "from anywhere in the US" with no other literal
+# present. If you edit a pattern above, re-derive its set here -- the equivalence test in
+# tests/test_core.py is what catches you if you don't.
+#
+# The patterns themselves are NOT duplicated case-sensitively. _REMOTE_NEG_RE is shared
+# with remote_posting(), whose behaviour is frozen public API, and two copies of one
+# alternation is the drift this package has been bitten by three times.
+_NEG_LITERALS = ("remote", "site", "office")
+_HYBRID_LITERALS = ("hybrid", "office")
+_ROLE_LITERALS = ("remote", "anywhere", "telecommut", "telework")
+
+
+def _has(low: str, literals: tuple) -> bool:
+    return any(w in low for w in literals)
+
+
 def remote_signal(title: str, location: str, body: str = "") -> tuple:
     """A posting's work arrangement WITH its provenance and boundary.
 
@@ -189,14 +213,23 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
        ~93 rows) and a bare mention with no context (773 rows) land here on purpose --
        neither says THIS role is remote, and unknown must not become True.
     """
-    head = f"{title} {location}"
-    if _REMOTE_NEG_RE.search(head):
+    title, location = title or "", location or ""
+    # The basis names the field the evidence CAME FROM, so these test the two fields
+    # separately rather than a concatenated head. Testing `f"{title} {location}"` and
+    # reporting "location" was a lie about provenance on 106 measured rows whose deciding
+    # word was in the title -- exactly the defect this function exists to abolish, and
+    # `title` was already a legal basis when it happened.
+    if _REMOTE_NEG_RE.search(location):
         return ("onsite", "location", None)
+    if _REMOTE_NEG_RE.search(title):
+        return ("onsite", "title", None)
     # (1) hybrid in the head wins over a remote token beside it
-    if _HYBRID_HEAD_RE.search(head):
+    if _HYBRID_HEAD_RE.search(location):
         return ("hybrid", "location", None)
+    if _HYBRID_HEAD_RE.search(title):
+        return ("hybrid", "title", None)
     # (2) the location is the strongest text evidence and the only one carrying a boundary
-    if _REMOTE_RE.search(location or ""):
+    if _REMOTE_RE.search(location):
         scope = vocab.remote_scope(location)
         # A location that yields NO boundary is weak evidence: it is either a bare token
         # or an office name wearing a "(Remote)" suffix, which is the measured 2,887-row
@@ -209,13 +242,26 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
             return ("hybrid", "text", None)
         return ("remote", "location", scope)
     # (3) title-only -- the sole evidence in existence on greenhouse and lever
-    if _REMOTE_RE.search(title or ""):
+    if _REMOTE_RE.search(title):
         return ("remote", "title", None)
-    if body and not _REMOTE_NEG_RE.search(body):
-        # (5) before (4): a posting that asserts remote AND states a split week is hybrid.
-        if _HYBRID_RE.search(body):
+    if body:
+        # LOWERED ONCE, then every body pattern runs case-sensitive against it, each behind
+        # a cheap literal gate. The patterns carried re.I and scanned 202 MB of prose on
+        # every posting; measured, the body stage cost 16.18s over a 31,790-row corpus and
+        # this takes it to 5.30s -- 3.05x, with byte-identical verdicts on every row.
+        #
+        # The gate words are load-bearing and easy to get wrong: a first version omitted
+        # `anywhere` and silently lost 192 remote verdicts, because _ROLE_REMOTE_RE matches
+        # "from anywhere in the US" with no other literal present. Each set below is the
+        # complete set of literals its pattern cannot match without.
+        low = body.lower()
+        if _has(low, _NEG_LITERALS) and _REMOTE_NEG_RE.search(low):
+            return (None, None, None)
+        # (4) before (5): a posting that states a split week is hybrid even when it also
+        # asserts remoteness -- the specific schedule beats the general claim.
+        if _has(low, _HYBRID_LITERALS) and _HYBRID_RE.search(low):
             return ("hybrid", "text", None)
-        if _ROLE_REMOTE_RE.search(body):
+        if _has(low, _ROLE_LITERALS) and _ROLE_REMOTE_RE.search(low):
             return ("remote", "text", None)
     return (None, None, None)
 
@@ -343,10 +389,9 @@ def _region_allowed(p: dict, cfg) -> bool:
     if not allowed:
         return True
     allowed = {str(x).upper() for x in allowed}
-    # Onsite/hybrid rows are the remote gate's business, not the boundary's; if they got
-    # this far the caller is not filtering on remoteness and a region test is meaningless.
-    if p.get("remote_type") not in (None, "remote"):
-        return True
+    # No hybrid/onsite bypass here: is_remote returns False for those before this is ever
+    # reached, so a branch for them would be unreachable and would only mislead a reader
+    # into thinking region filtering applies to a hybrid row.
     scope = p.get("remote_region")
     if scope is None:
         return "UNSTATED" in allowed

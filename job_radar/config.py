@@ -186,8 +186,9 @@ DEFAULT_FIT_WEIGHTS = {
 
 
 # The default non-US exclusion now DERIVES from the country vocabulary and lives in
-# `vocab.NON_US_LOCATION_TOKENS`. It was a 34-name hand list against vocab's 60, and the
-# 26 it lacked leaked 260 remote rows bounded to countries the user cannot work in.
+# `vocab.NON_US_LOCATION_TOKENS`. It was a 34-name hand list against vocab's 58 non-US
+# names, and the ones it lacked leaked 260 remote rows bounded to countries the user cannot
+# work in (population: remote-by-location rows naming a non-US country with no US marker).
 # Word-bounded matching is what makes the bigger list safe: as a bare substring "india"
 # also matched indianA (73 US rows, "Anderson, Indiana, United States") and "apac" matched
 # cAPACity, dropping a Capacity Planning role in Austin as Asia-Pacific.
@@ -340,7 +341,7 @@ class Config:
     # Measured on a 31,790-row harvest of 7,712 remote-by-location rows:
     #   ["US", "ANY"]               ~5,700 rows -- positively US-workable only
     #   ["US", "ANY", "UNSTATED"]    ~6,324 rows -- plus the ones that never said
-    # UNSTATED is a separate opt-in because unknown is not "anywhere": only 654 rows
+    # UNSTATED is a separate opt-in because unknown is not "anywhere": only 30 rows
     # actually say anywhere, and a bare "Remote" usually means "within the country the
     # employer can pay from". Admitting it is a deliberate, ~1%-contamination trade, not
     # an assumption baked into the parser.
@@ -510,6 +511,27 @@ def load_config(path: str | os.PathLike | None) -> Config:
         if section.get(key) is not None:
             setattr(cfg, attr, section[key])
 
+    def take_list(section: dict, key: str, attr: str):
+        """`take`, but a bare scalar is repaired instead of silently iterated.
+
+        `take` is an unguarded setattr, so a YAML scalar lands where a list is expected and
+        every consumer that iterates it walks the STRING. For `remote_regions` that meant
+        `remote_regions: US` became the character set {'U','S'}, which matches no real
+        two-letter scope, so a single missing bracket produced a silent, total,
+        unexplained zero-result harvest on a brand-new key. Loud repair beats a quiet
+        empty board -- the same reasoning as the parse-error message above.
+        """
+        val = section.get(key)
+        if val is None:
+            return
+        if isinstance(val, str):
+            print(
+                f"  config: filters.{key} should be a list; read '{val}' as [{val}]",
+                file=sys.stderr,
+            )
+            val = [val]
+        setattr(cfg, attr, list(val))
+
     take(prof, "title_queries", "title_queries")
     take(prof, "signal_titles", "title_signal")
     for k, a in [
@@ -536,9 +558,9 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("min_score", "min_score"),
         ("exclude_titles", "exclude_titles"),
         ("exclude_locations", "exclude_locations"),
-        ("remote_regions", "remote_regions"),
     ]:
         take(filt, k, a)
+    take_list(filt, "remote_regions", "remote_regions")
     for k, a in [
         ("ats", "depth_sources"),
         ("boards", "breadth_sources"),
