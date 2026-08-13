@@ -417,6 +417,18 @@ def test_the_body_literal_gates_change_no_verdict():
     for body, want in cases:
         assert scoring.remote_signal("Engineer", "Austin, TX", body)[0] == want, body
 
+    # Each of these carries exactly ONE of the declared literals and no other, so a set
+    # that is short by that word fails here rather than silently dropping verdicts in the
+    # field. "anywhere" is the one that already went missing once, at a cost of 192 rows.
+    isolating = [
+        ("You can work from anywhere.", "remote"),  # only `anywhere`
+        ("Telecommuting is offered.", "remote"),  # only `telecommut`
+        ("You will spend 3 days in the office each week.", "hybrid"),  # only `office`
+        ("On-site only.", None),  # only `site`
+    ]
+    for body, want in isolating:
+        assert scoring.remote_signal("Engineer", "Austin, TX", body)[0] == want, body
+
 
 def test_remote_signal_records_how_it_decided():
     """`is_remote` called remote_posting, took a bare bool and wrote NOTHING -- so a row
