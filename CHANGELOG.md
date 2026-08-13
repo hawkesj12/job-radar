@@ -7,8 +7,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > **About every number below.** All counts come from **one** harvest of 31,790 rows,
-> composed **78% greenhouse · 12% ashby · 4% lever**; 8 of the 19 wired sources contributed
-> under 250 rows between them and 8 contributed none. It was read from a downstream
+> composed **78.5% greenhouse · 12.5% ashby · 4.3% lever · 3.5% himalayas**; the other
+> 7 sources present contributed 375 rows between them, and **8 of the 19 wired sources
+> contributed nothing at all**. It was read from a downstream
 > consumer's store, not from `harvest()` output. Each claim names the population it was
 > measured over, because several of these counts move by 2× depending on whether the
 > population is "all rows" or "remote-by-location rows", and on which token list is in play.
