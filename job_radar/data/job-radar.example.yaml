@@ -64,7 +64,12 @@ filters:
   stale_after_days: 30     # penalize (don't drop) past this
   min_score: 22            # hide anything below this
   exclude_titles: [intern, recruiter, sales, marketing, support engineer]
-  exclude_locations: [india, canada, europe, emea, apac, "(eu)"]  # non-US-remote
+  # exclude_locations REPLACES the default, it does not extend it -- so setting it here
+  # was a DOWNGRADE: this key shipped with 6 names while the built-in default covers
+  # every country the package knows plus the multi-country regions (66 tokens). Left
+  # commented so `init` inherits the full list. Uncomment only to NARROW the filter,
+  # e.g. if you can legally work in Canada:
+  # exclude_locations: [india, europe, emea, apac, "(eu)"]
 
 # ── sources: default = all official public APIs ─────────────────────────────
 sources:

@@ -2149,6 +2149,25 @@ def test_split_place_still_resolves_real_cities():
     assert split_place("Remote - US, France")["city"] == "Remote - US"
 
 
+def test_country_code_prefers_a_known_alias_over_the_two_letter_passthrough():
+    """ "UK" is not an ISO alpha-2 code -- GB is -- and the name map has said `uk -> GB`
+    all along, but the unvalidated two-letter passthrough answered first. So a column the
+    record contract declares alpha-2 held both spellings for one country, ~197 rows in a
+    31,790-row harvest. Same defect as the state='California' vs 'CA' split."""
+    from job_radar.vocab import country_code
+
+    assert country_code("UK") == "GB"
+    assert country_code("uk") == "GB"
+    assert country_code("United Kingdom") == "GB"
+    # Bulgaria was missing from the map entirely, so this returned None while the old
+    # hand-written non-US filter did list it.
+    assert country_code("Bulgaria") == "BG"
+    # The passthrough still applies to codes the map does not carry -- that is deliberate
+    # (this module is not the authority on the ISO list), and only ALIASES now win.
+    assert country_code("ZZ") == "ZZ"
+    assert country_code("NZ") == "NZ"
+
+
 def test_no_country_name_is_also_a_us_state_name():
     """The invariant split_place's bare-name lookup depends on, pinned here because
     nothing else enforces it. _COUNTRY_CODES is hand-curated and currently missing

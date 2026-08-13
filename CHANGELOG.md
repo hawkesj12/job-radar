@@ -6,7 +6,62 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Removed a latent import cycle: `config → vocab → dedup → config`.** `vocab` imports
+  `dedup` for its title vocabularies and `dedup` imported `config` at module level, which
+  worked only while nothing read an attribute during import — so it was fine until
+  `DEFAULT_NON_US` began deriving from `vocab` and broke outright whenever `vocab` was
+  imported first. Fixed at the root rather than sequenced around: `dedup` now defers its
+  `config` import into `fuzzy_title_match`, its single call site. Every module is now
+  importable first. Caught by importing them in each order, not by reasoning about it.
+
 ### Fixed
+
+- **The non-US location filter matched bare substrings, so it dropped US jobs.** `"india"`
+  matched india**na** and `"apac"` matched c**apac**ity — measured on a 31,790-row harvest,
+  202 rows were excluded by collision, including `"Anderson, Indiana, United States"` and a
+  Capacity Planning role in Austin. Matching is now word-bounded. The boundary is
+  `(?<![a-z])…(?![a-z])` rather than `\b`, because real tokens are not all word-shaped:
+  `"(eu)"` shipped in the example config and `\b(eu)\b` does not mean what it appears to.
+
+- **A posting listing several eligible countries was dropped on the foreign one.**
+  `"Remote (United States | Canada)"`, `"Americas (USA or Canada)"` and `"Remote - US &
+Canada"` were all discarded because `canada` matched — losing jobs that are workable from
+  the US. **339 rows in one harvest.** A US marker in the location now vetoes the
+  exclusion; the veto reads the location only, never the title, because titles carry "US"
+  incidentally ("US client") and would rescue genuinely foreign rows. This long predates
+  the change below — `canada` was in the old hand-written list — and only became visible
+  when the filter was measured instead of read.
+
+- **The default non-US filter was 34 hand-written names against a 60-name vocabulary.**
+  The 26 it lacked leaked 260 remote rows bounded to countries the user cannot work in —
+  led by the Philippines (68), the UK spellings (44), South Africa, Pakistan, Thailand,
+  China, Chile and South Korea. It now derives from `vocab._COUNTRY_CODES`, the same fix
+  and the same reasoning as `_KNOWN_COUNTRIES`: adding a country to the map is sufficient,
+  and there is no second list to go stale. A test pins the coverage so it cannot drift
+  again. The leak measures 260 → 2.
+
+- **`country_code("UK")` returned `"UK"`.** That is not a valid ISO alpha-2 code — `GB` is
+  — and the name map has said `uk → GB` all along, but the unvalidated two-letter
+  passthrough answered first. So one column the record contract declares alpha-2 held both
+  spellings for the same country, ~197 rows in the measured harvest. The map is now
+  consulted before the passthrough; a genuinely unlisted code still rides through, which is
+  the behaviour that passthrough exists for. Same class of bug as the
+  `state='California'` vs `'CA'` split `engine._coerce` already canonicalizes.
+
+- **`bulgaria` and `dominican republic` were missing from the country vocabulary.**
+  Bulgaria was in the old hand-written filter but not the map, so `country_code("Bulgaria")`
+  returned `None`; deriving the filter from the map surfaced it by letting 23 Bulgarian rows
+  through. Santo Domingo leaked 18 the same way. The map is deliberately incomplete and
+  grows on evidence — note that `georgia` must never be added, since it is a US state as
+  well as a country and `split_place`'s bare-name lookup is guarded on that collision.
+
+- **The shipped example config downgraded the filter it was meant to demonstrate.** It set
+  `exclude_locations` to six names, and a YAML list _replaces_ the default rather than
+  extending it, so `job-radar init` handed every new user a weaker filter than the built-in
+  one. The key is now commented out with an explanation, and a test fails if it is ever set
+  to a strict subset again.
 
 - **`split_place()` read a work arrangement in the city slot as a city.** All three
   resolving branches assigned `city` from the head of the string without ever testing

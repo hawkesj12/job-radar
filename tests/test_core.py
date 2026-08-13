@@ -108,6 +108,92 @@ def test_shipped_example_config_enables_every_adapter(tmp_path):
     assert set(sources.BREADTH_ALL) == set(c.breadth_sources)
 
 
+def test_shipped_example_config_does_not_weaken_the_non_us_filter(tmp_path):
+    """The example SET `exclude_locations` to six names, and a YAML list REPLACES the
+    default rather than extending it -- so `job-radar init` handed every new user a
+    filter weaker than the built-in one, which is the opposite of an example's job.
+    The key is commented out; this fails if it is ever set to a strict subset again."""
+    p = tmp_path / "shipped.yaml"
+    p.write_text(cli._packaged("job-radar.example.yaml"), encoding="utf-8")
+    c = config.load_config(p)
+    assert set(c.exclude_locations) >= set(config.DEFAULT_NON_US)
+
+
+def test_the_non_us_filter_covers_every_non_us_country_in_the_vocabulary():
+    """The invariant that keeps two country lists from drifting apart again.
+
+    `DEFAULT_NON_US` was 34 hand-written names against vocab's 60, and the 26 it lacked
+    leaked 260 remote rows bounded to countries the user cannot work in. It now derives
+    from the vocabulary, and this fails the moment a country is added to the map without
+    reaching the filter."""
+    missing = {
+        name
+        for name, code in vocab._COUNTRY_CODES.items()
+        if code != "US" and name not in set(config.DEFAULT_NON_US)
+    }
+    assert not missing, missing
+
+
+def test_non_us_exclusion_matches_whole_words_not_substrings():
+    """`x in blob` dropped 202 rows by collision on a 31,790-row harvest, and the two
+    worst were US employers: "india" matches indianA and "apac" matches cAPACity."""
+    c = config.Config(remote_only=True)
+    assert (
+        scoring.is_remote({"title": "AI Engineer", "location": "Remote - India"}, c)
+        is False
+    )
+    # ...but Indiana is in the United States, and so is a Capacity Planning role.
+    assert (
+        scoring.is_remote(
+            {"title": "AI Engineer", "location": "Indianapolis, IN (Remote)"}, c
+        )
+        is True
+    )
+    assert (
+        scoring.is_remote(
+            {"title": "Capacity Planning Engineer", "location": "Austin, TX (Remote)"},
+            c,
+        )
+        is True
+    )
+    # "European Union" must still be caught -- word boundaries make it unreachable from
+    # the token "europe" alone, which is why `european` is listed beside it.
+    assert (
+        scoring.is_remote(
+            {"title": "AI Engineer", "location": "European Union (Remote)"}, c
+        )
+        is False
+    )
+
+
+def test_a_us_marker_in_the_location_vetoes_a_non_us_exclusion():
+    """A posting may list several eligible countries. Dropping it on the foreign token
+    alone loses a job the user can actually take: "Remote (United States | Canada)" (32
+    rows), "Americas (USA or Canada)" (16) and "Remote - US & Canada" (7) were all
+    discarded on `canada`. 339 rows in one harvest. The veto reads the LOCATION only --
+    titles carry "US" incidentally ("US client"), which would rescue foreign rows."""
+    c = config.Config(remote_only=True)
+    for loc in (
+        "Remote (United States | Canada)",
+        "Americas (USA or Canada) (Remote)",
+        "Remote - US & Canada",
+    ):
+        assert (
+            scoring.is_remote({"title": "AI Engineer", "location": loc}, c) is True
+        ), loc
+    # Canada ALONE is still excluded -- the veto needs a real US marker in the location.
+    assert (
+        scoring.is_remote({"title": "AI Engineer", "location": "Remote - Canada"}, c)
+        is False
+    )
+    assert (
+        scoring.is_remote(
+            {"title": "AI Engineer for US client", "location": "Remote - Canada"}, c
+        )
+        is False
+    )
+
+
 # The repo-root copies of the example files are GONE, and so are the two tests that
 # pinned them byte-equal to the packaged ones. There is now exactly one copy of each
 # — job_radar/data/, the copy the wheel ships and `init` writes — so there is nothing

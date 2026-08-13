@@ -27,7 +27,13 @@ import re
 
 from rapidfuzz import fuzz as _rf_fuzz
 
-from . import config
+# `config` is imported inside fuzzy_title_match -- its ONE call site -- not here. A
+# module-level import made config <- vocab <- dedup <- config a live cycle: vocab imports
+# this module for its title vocabularies, so importing vocab first re-entered a
+# half-initialised config. It survived only while nothing read an attribute during import,
+# which made an unrelated edit to config able to break it (config.DEFAULT_NON_US deriving
+# from vocab did exactly that). One deferred import in one function removes the cycle
+# instead of sequencing around it.
 
 _CORP_SUFFIX = re.compile(r"\b(inc|llc|ltd|corp|co|company|the)\b")
 # Work-arrangement / modifier tokens that DON'T distinguish one role from another
@@ -320,6 +326,8 @@ def company_block(p: dict) -> str:
 
 
 def fuzzy_title_match(a: str, b: str, cfg=None) -> bool:
+    from . import config  # deferred: see the import note at the top of this module
+
     cfg = cfg or config.active()
     if not a or not b:
         return False

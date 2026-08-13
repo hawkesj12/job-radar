@@ -302,6 +302,18 @@ _COUNTRY_CODES = {
     "hong kong": "HK", "taiwan": "TW", "malaysia": "MY", "indonesia": "ID",
     "thailand": "TH", "vietnam": "VN", "philippines": "PH", "australia": "AU",
     "new zealand": "NZ", "kazakhstan": "KZ",
+    # Added 2026-08-13 by measurement, not by working through an ISO list. Both were
+    # absent while appearing in a live harvest: `bulgaria` was in the old hand-written
+    # non-US filter but NOT here, so deriving that filter from this map (see
+    # NON_US_LOCATION_TOKENS) initially let 23 Bulgarian rows through -- and
+    # country_code("Bulgaria") had been returning None all along. `dominican republic`
+    # leaked 18 rows the same way.
+    #
+    # This map is deliberately INCOMPLETE and grows on evidence. Two consequences worth
+    # knowing: a country absent here is a foreign row the non-US filter cannot see, and
+    # "georgia" must NEVER be added -- it is a US state as well as a country, and
+    # split_place's bare-name lookup is guarded on exactly that collision.
+    "bulgaria": "BG", "dominican republic": "DO",
 }  # fmt: skip
 
 
@@ -312,13 +324,26 @@ def country_code(raw) -> str | None:
     checked against a list: sources that send codes send real ones, and rejecting an
     unlisted-but-valid code would discard data to enforce a list this module has no
     business being the authority on.
+
+    The NAME MAP IS CONSULTED FIRST, because the passthrough was answering for tokens
+    the map already had a better answer for. "UK" is the case: it is not an ISO alpha-2
+    code (GB is), the map has said `uk -> GB` all along, and the passthrough returned
+    "UK" anyway -- so one column the record contract declares alpha-2 held both spellings
+    for the same country, ~197 rows in a measured 31,790-row harvest. Same defect as the
+    `state='California'` vs `'CA'` split that engine._coerce canonicalizes, and it hid
+    here because the passthrough looks like it only handles codes the map lacks.
     """
     s = _flatten(raw).strip()
     if not s:
         return None
+    # Aliases the map knows win over the passthrough; a genuinely unlisted code still
+    # rides through unvalidated, which is the behaviour the docstring above defends.
+    known = _COUNTRY_CODES.get(s.lower())
+    if known:
+        return known
     if len(s) == 2 and s.isalpha():
         return s.upper()
-    return _COUNTRY_CODES.get(s.lower())
+    return None
 
 
 # The 50 states + DC + the territories that appear in job feeds. A two-letter token
@@ -339,6 +364,44 @@ _US_STATES = frozenset(
 # a US state and a country -- AR CA CO DE ID IL IN -- are exactly why split_place needs
 # structural evidence before reading a two-letter token as a country.
 _KNOWN_COUNTRIES = frozenset(_COUNTRY_CODES.values())
+
+# Every country NAME above that is not the US -- the one source for a "this posting is
+# not US-workable" filter. config.DEFAULT_NON_US was a SEPARATE hand-written list of 34
+# names against these 60, and the 26 it lacked leaked measurably: on a 31,790-row harvest
+# 260 remote rows bounded to a country the user cannot work in got through, led by the
+# Philippines (68), the UK spellings (44), South Africa, Pakistan, Thailand, China, Chile
+# and South Korea. Same failure and same fix as _KNOWN_COUNTRIES above -- derive it, so
+# adding a country to the map is sufficient and there is no second list to go stale.
+#
+# NAMES, not codes: the filter matches prose ("Remote - Philippines"), and two-letter
+# codes are far too collision-prone for that even with word boundaries ("in", "us").
+NON_US_COUNTRY_NAMES = tuple(
+    sorted(name for name, code in _COUNTRY_CODES.items() if code != "US")
+)
+
+# Multi-country regions, blocs and hub cities -- the non-US markers that are NOT country
+# names, so they cannot be derived and are enumerated. `european` sits beside `europe`
+# deliberately: matching is word-bounded (scoring._excluded_re), so "European Union" is
+# unreachable from "europe" alone.
+_NON_US_REGIONS = (
+    "emea",
+    "apac",
+    "asia-pacific",
+    "asia pacific",
+    "latam",
+    "europe",
+    "european",
+    "(eu)",
+    "dubai",
+    "uae",
+)
+
+# The default `exclude_locations`. It LIVES HERE, not in config, because config <- vocab
+# <- dedup <- config is a real import cycle that survives only while every participant
+# binds the module and reads attributes at CALL time. Building this list in config meant a
+# module-level `vocab.NON_US_COUNTRY_NAMES` read, which fails outright when vocab is
+# imported first -- caught by importing vocab before config, not by reasoning about it.
+NON_US_LOCATION_TOKENS = (*NON_US_COUNTRY_NAMES, *_NON_US_REGIONS)
 
 
 _STATE_NAMES = {

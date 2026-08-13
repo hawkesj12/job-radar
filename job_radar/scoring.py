@@ -110,6 +110,61 @@ def relevant(title: str, cfg=None) -> bool:
     return any(has(x, t) for x in cfg.title_signal)
 
 
+@lru_cache(maxsize=8)
+def _excluded_re(tokens: tuple) -> re.Pattern | None:
+    """Compile an exclude_locations list into ONE word-boundary alternation.
+
+    `x in b` was a bare substring test, which is wrong for country names and measurably
+    so: on a 31,790-row harvest it dropped 202 rows by collision, and the two worst were
+    US employers. "india" matches indianA -- 73 rows including "Anderson, Indiana,
+    United States" -- and "apac" matches cAPACity, so a Capacity Planning role in Austin
+    was excluded as Asia-Pacific. `brazil`, `japan` and `europe` each cost a handful more.
+
+    A boundary is `(?<![a-z])tok(?![a-z])` rather than `\\b`, because several real tokens
+    are not word-shaped: "(eu)" is in the shipped example config and `\\b(eu)\\b` does not
+    mean what it looks like next to parentheses. Tokens are regex-escaped for the same
+    reason -- these come from a user's YAML, not from us.
+
+    Cached on the token tuple: the list is per-config and stable for a whole run, so this
+    compiles once rather than per posting.
+    """
+    if not tokens:
+        return None
+    alts = "|".join(re.escape(t.lower()) for t in tokens if t)
+    if not alts:
+        return None
+    return re.compile(rf"(?<![a-z])(?:{alts})(?![a-z])")
+
+
+# A US marker in the LOCATION, which vetoes a non-US exclusion below. Deliberately not
+# matched against the title: eligibility is a fact about the place, and titles carry "US"
+# incidentally ("US client", "US hours"), which would rescue genuinely foreign rows.
+_US_LOCATION_RE = re.compile(
+    r"(?<![a-z])(?:u\.?s\.?a?|us|united states(?: of america)?|america)(?![a-z])", re.I
+)
+
+
+def _location_excluded(location: str, blob: str, tokens: tuple) -> bool:
+    """True when a posting should be dropped as not-workable-from-the-US.
+
+    An excluded token is IGNORED when the location also names the US, because a posting
+    can list more than one eligible country and dropping it loses a job the user can
+    actually take. Measured on a 31,790-row harvest: "Remote (United States | Canada)"
+    (32 rows), "Americas (USA or Canada)" (16), "Remote - US & Canada" (7) and several
+    multi-city US lists that happen to include Toronto were all being discarded on the
+    `canada` token alone. The same shape rescues global-eligibility postings that
+    enumerate a dozen countries including the United States.
+
+    This predates the derived token list -- `canada` was in the old hand-written 34 --
+    so it is a long-standing false negative that only became visible when the filter was
+    measured rather than read.
+    """
+    rx = _excluded_re(tokens)
+    if not (rx and rx.search(blob)):
+        return False
+    return not _US_LOCATION_RE.search(location)
+
+
 def is_remote(p: dict, cfg=None) -> bool:
     """The remote GATE (config-aware), as opposed to `remote_posting` (a pure text
     predicate).
@@ -143,8 +198,9 @@ def is_remote(p: dict, cfg=None) -> bool:
             return False
     elif not flag:
         return False
-    b = f"{p.get('title', '')} {p.get('location', '')}".lower()
-    return not any(x in b for x in cfg.exclude_locations)
+    loc = p.get("location", "") or ""
+    b = f"{p.get('title', '')} {loc}".lower()
+    return not _location_excluded(loc, b, tuple(cfg.exclude_locations))
 
 
 def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:

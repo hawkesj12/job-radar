@@ -15,6 +15,12 @@ import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+# config -> vocab is a plain one-way edge. It was briefly a CYCLE -- vocab imports dedup
+# for its title vocabularies and dedup imported config at module level -- which broke the
+# moment DEFAULT_NON_US below started deriving from vocab. Fixed at the root: dedup now
+# defers its config import into the one function that uses it.
+from . import vocab
+
 
 def _env_int(name: str, default: int) -> int:
     """Read an int from the environment, falling back on a missing/garbage value
@@ -177,42 +183,18 @@ DEFAULT_FIT_WEIGHTS = {
     "lead": 1,
     "staff": 1,
 }
-DEFAULT_NON_US = [
-    "india",
-    "australia",
-    "united kingdom",
-    "england",
-    "ireland",
-    "germany",
-    "denmark",
-    "sweden",
-    "finland",
-    "norway",
-    "singapore",
-    "canada",
-    "poland",
-    "spain",
-    "portugal",
-    "france",
-    "netherlands",
-    "japan",
-    "brazil",
-    "mexico",
-    "colombia",
-    "argentina",
-    "emea",
-    "apac",
-    "latam",
-    "europe",
-    "(eu)",
-    "romania",
-    "bulgaria",
-    "czech",
-    "ukraine",
-    "israel",
-    "dubai",
-    "uae",
-]
+
+
+# The default non-US exclusion now DERIVES from the country vocabulary and lives in
+# `vocab.NON_US_LOCATION_TOKENS`. It was a 34-name hand list against vocab's 60, and the
+# 26 it lacked leaked 260 remote rows bounded to countries the user cannot work in.
+# Word-bounded matching is what makes the bigger list safe: as a bare substring "india"
+# also matched indianA (73 US rows, "Anderson, Indiana, United States") and "apac" matched
+# cAPACity, dropping a Capacity Planning role in Austin as Asia-Pacific.
+#
+DEFAULT_NON_US = list(vocab.NON_US_LOCATION_TOKENS)
+
+
 # NOTE: there is deliberately no ALL_DEPTH / ALL_BREADTH name list here. This module
 # used to carry copies of the adapter names purely to seed the defaults below, which
 # made sources.py's registries and this file two sources of truth that had to be kept
