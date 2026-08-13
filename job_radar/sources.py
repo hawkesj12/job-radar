@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from . import config
+from . import iso3166
 from . import vocab
 from .vocab import country_code, remote_type, salary, salary_period, split_place
 from .util import (
@@ -566,6 +567,62 @@ def _relative_posted(text: str) -> str:
 # This lived as a literal tuple inside search_google_jobs while search_adzuna had
 # no equivalent at all, which is exactly how the two drifted.
 _NON_PLACE = ("", "remote", "anywhere", "any")
+
+
+def stated_scope(values, raw: str | None = None) -> dict:
+    """A vendor's STATED eligibility list -> the three boundary fields.
+
+    Several sources send this as a real array (himalayas `locationRestrictions`) or as a
+    comma-joined string (jobicy `jobGeo`, remotive `candidate_required_location`). It is
+    where a candidate may LIVE, not where the job is -- reading it as a workplace mis-files
+    every row, which the catalog profiles say in as many words.
+
+    AN EMPTY LIST IS NOT A MISSING ONE. himalayas' own API doc: "An empty array [] means the
+    job is open worldwide with no geographic restrictions." The adapter used to write
+    `", ".join(...) or None`, which turned that into "we don't know" on 29 measured rows and
+    threw away the most permissive rows in the feed -- the inverse of the error this
+    package's contract exists to prevent. `[]` survives as `[]`.
+
+    THE JOIN IS KEPT, but only for `remote_scope_raw`, which is display. Using a joined
+    string as DATA is what broke: ISO country names contain commas -- "Congo, The Democratic
+    Republic of the", "Micronesia, Federated States of" are both real -- so re-splitting on
+    ", " produced fragments like "Federated States of" as if they were countries. Nothing
+    re-splits it now; the codes come from the list.
+
+    Names resolve through `iso3166`, the generated ISO table, NOT through vocab's 62-name
+    prose map -- these are structured vendor fields where the string is known to be a
+    country, which is exactly the case that table exists for.
+    """
+    if values is None:
+        return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
+    if isinstance(values, str):
+        values = [v.strip() for v in values.split(",")]
+    names = [v for v in values if isinstance(v, str) and v.strip()]
+
+    areas, regions, unmapped = set(), set(), False
+    for n in names:
+        code = iso3166.alpha2(n)
+        if code:
+            areas.add(code)
+        elif n.strip().upper() in vocab.REMOTE_REGION_TOKENS:
+            regions.add(n.strip().upper())
+        else:
+            unmapped = True
+    # `[]` only when the vendor genuinely sent an empty list. A non-empty list whose members
+    # we could not map is UNSTATED, never "worldwide" -- that distinction is the whole point
+    # of the field, and asserting unbounded because a lookup failed would be the worst
+    # possible direction to be wrong in.
+    if names and not areas:
+        areas_out = None
+    else:
+        areas_out = sorted(areas)
+    if unmapped and not areas and not regions:
+        areas_out = None
+    return {
+        "remote_areas": areas_out,
+        "remote_regions": sorted(regions) or None,
+        "remote_scope_raw": raw if raw is not None else (", ".join(names) or None),
+    }
 
 
 def _is_remote_query(cfg) -> bool:
@@ -1575,7 +1632,7 @@ def search_remotive(queries, strict: bool = False):
                 "location": (j.get("candidate_required_location") or "") + " (Remote)",
                 # The same string, read for what it IS: where a candidate may live.
                 # 31/31, and today it is only concatenated into the display string.
-                "remote_region": j.get("candidate_required_location") or None,
+                **stated_scope(j.get("candidate_required_location")),
                 "url": j.get("url", ""),
                 **posted_from(j.get("publication_date")),
                 "department": j.get("category", ""),
@@ -1639,7 +1696,7 @@ def search_jobicy(queries):
                 ),
                 # `jobGeo` is where a remote worker may sit ("USA", "EMEA, UK"),
                 # 100/100 -- a region, never a city.
-                "remote_region": j.get("jobGeo") or None,
+                **stated_scope(j.get("jobGeo")),
                 "text": text,
                 "source": "jobicy",
             }
@@ -1865,12 +1922,12 @@ def _himalayas_rows(jobs, out, seen=None):
                 # here is remote because that is what this board is. Collapsing the two
                 # into one label is what the basis field exists to prevent.
                 "remote_basis": "board",
-                # `locationRestrictions` is a COUNTRY list ("United States", or forty
-                # of them) -- never a city. That is a region, which is exactly what
-                # remote_region means, and it was only being joined into the display
-                # string.
-                "remote_region": ", ".join(x for x in regions if isinstance(x, str))
-                or None,
+                # `locationRestrictions` is a COUNTRY LIST ("United States", or forty of
+                # them) -- never a city -- and it is passed through as a list. It used to be
+                # joined into a string, which is unsplittable because ISO country names
+                # contain commas, and `or None` turned the empty array (himalayas' documented
+                # "open worldwide") into "unknown" on 29 rows. See stated_scope.
+                **stated_scope(j.get("locationRestrictions")),
                 # 20/20 on BOTH lanes -- the only wired source that actually
                 # populates an expiry.
                 "expires": to_date(j.get("expiryDate")),
@@ -2021,7 +2078,7 @@ def search_adzuna(queries):
                         # `area == ["US"]` does not just mean "remote", it names the
                         # REGION a remote worker may sit in -- and that was the whole
                         # signal, flattened to a boolean. area[0] is the country.
-                        "remote_region": country if is_remote else None,
+                        "remote_areas": [country] if (is_remote and country) else None,
                         "employment_type": j.get("contract_time", ""),
                         "salary": salary_range(
                             j.get("salary_min"), j.get("salary_max")
@@ -2309,7 +2366,7 @@ def _usajobs_text(d: dict) -> str:
 
 
 def _usajobs_remote(d: dict) -> dict:
-    """USAJOBS row -> {remote_type, remote_basis, remote_region}.
+    """USAJOBS row -> {remote_type, remote_basis, remote_areas}.
 
     `RemoteIndicator` on a FEDERAL posting means nationwide within the US -- the
     location display literally reads "Anywhere in the U.S. (remote job)" -- so the
@@ -2317,15 +2374,15 @@ def _usajobs_remote(d: dict) -> dict:
     """
     ua = (d.get("UserArea") or {}).get("Details") or {}
     if "RemoteIndicator" not in ua and "TeleworkEligible" not in ua:
-        return {"remote_type": None, "remote_basis": None, "remote_region": None}
+        return {"remote_type": None, "remote_basis": None, "remote_areas": None}
     if ua.get("RemoteIndicator") is True:
         return {
             "remote_type": "remote",
             "remote_basis": "stated",
-            "remote_region": "US",
+            "remote_areas": ["US"],
         }
     rt = "hybrid" if ua.get("TeleworkEligible") is True else "onsite"
-    return {"remote_type": rt, "remote_basis": "stated", "remote_region": None}
+    return {"remote_type": rt, "remote_basis": "stated", "remote_areas": None}
 
 
 def _usajobs_place(locations) -> dict:

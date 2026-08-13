@@ -336,7 +336,8 @@ class Config:
     # `Remote - Brazil` and `Remote` are the same arrangement with different boundaries.
     #
     # None = no region filter (every remote row, the behaviour before this existed). A list
-    # of alpha-2 codes filters on `remote_region`, and two sentinels join it: `ANY` for a
+    # of alpha-2 codes filters on the row's `remote_areas`/`remote_regions`, and two
+    # sentinels join it: `ANY` for a
     # posting that really says anywhere, and `UNSTATED` for one that names no boundary. A
     # US state scope is ISO 3166-2 (`US-CA`) and counts as US, as do the US-inclusive
     # regions AMERICAS and NORTH AMERICA.

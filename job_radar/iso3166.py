@@ -31,7 +31,21 @@ they disappear once the array is passed through intact. The last three are below
 #   kosovo    -- has NO ISO 3166-1 code. XK is the de-facto placeholder used by the EU and
 #                most payment systems. Recorded so the value is legible rather than dropped;
 #                a consumer that needs strict ISO can reject it on sight.
-_ALIASES = {"turkey": "TR", "palestine": "PS", "kosovo": "XK"}
+#   usa / u.s. / uk / great britain / england -- informal spellings. A GENERATED ISO table
+#                carries official and common names only, correctly, so the colloquial forms
+#                vendors actually send have to be added here. `USA` is the single most
+#                common value one source sends; without it that source's rows map to nothing.
+_ALIASES = {
+    "turkey": "TR",
+    "palestine": "PS",
+    "kosovo": "XK",
+    "usa": "US",
+    "u.s.": "US",
+    "u.s.a.": "US",
+    "uk": "GB",
+    "great britain": "GB",
+    "england": "GB",
+}
 
 
 def alpha2(name) -> str | None:

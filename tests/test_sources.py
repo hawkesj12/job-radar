@@ -2149,6 +2149,40 @@ def test_split_place_still_resolves_real_cities():
     assert split_place("Remote - US, France")["city"] == "Remote - US"
 
 
+def test_an_empty_restriction_list_means_worldwide_not_unknown():
+    """himalayas' own API doc: "An empty array [] means the job is open worldwide with no
+    geographic restrictions." The adapter wrote `", ".join(...) or None`, which recorded
+    that as "we don't know" on 29 measured rows -- throwing away the most permissive rows in
+    the feed. catalog/himalayas.md had documented the rule; the code ignored it."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope([])["remote_areas"] == []
+    assert stated_scope(None)["remote_areas"] is None
+    # and the two are not the same thing -- that distinction is the whole point
+    assert stated_scope([])["remote_areas"] is not None
+
+
+def test_a_country_name_containing_a_comma_survives_intact():
+    """The list was joined into a string, and ISO names contain commas: "Congo, The
+    Democratic Republic of the" and "Micronesia, Federated States of" are both real and both
+    in the corpus. Re-splitting on ", " produced fragments like "Federated States of" as if
+    they were countries. The join survives only as the DISPLAY string."""
+    from job_radar.sources import stated_scope
+
+    got = stated_scope(["Congo, The Democratic Republic of the", "United States"])
+    assert got["remote_areas"] == ["CD", "US"]
+    assert "Congo, The Democratic Republic of the" in got["remote_scope_raw"]
+
+
+def test_an_unmappable_restriction_is_unstated_never_worldwide():
+    """A non-empty list whose members do not resolve must NOT collapse to `[]`. Asserting
+    "open worldwide" because a lookup failed is the worst available direction to be wrong."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope(["Narnia"])["remote_areas"] is None
+    assert stated_scope(["Narnia"])["remote_scope_raw"] == "Narnia"
+
+
 def test_remote_scope_returns_areas_and_regions_separately():
     """Two fields because they are two kinds of value. `areas` are ISO codes; `regions` are
     multi-country tokens that have no ISO code and whose membership only the employer can
@@ -2570,13 +2604,14 @@ def test_usajobs_reads_the_rows_remote_field_not_our_query_parameter():
     assert remote == {
         "remote_type": "remote",
         "remote_basis": "stated",
-        "remote_region": "US",
+        # a LIST now, and a federal remote role is US-bounded by construction
+        "remote_areas": ["US"],
     }
     # Telework-eligible but not remote is partly-in-office, which is what hybrid means.
     hybrid = sources._usajobs_remote(
         {"UserArea": {"Details": {"RemoteIndicator": False, "TeleworkEligible": True}}}
     )
-    assert hybrid["remote_type"] == "hybrid" and hybrid["remote_region"] is None
+    assert hybrid["remote_type"] == "hybrid" and hybrid["remote_areas"] is None
     onsite = sources._usajobs_remote(
         {"UserArea": {"Details": {"RemoteIndicator": False, "TeleworkEligible": False}}}
     )

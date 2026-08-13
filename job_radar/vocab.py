@@ -638,7 +638,7 @@ def split_place(raw) -> dict:
 
 
 # Multi-country regions and timezone bands a remote role can be bounded to. These are NOT
-# countries and have no alpha-2, so `remote_region` carries them verbatim-uppercased --
+# countries and have no alpha-2, so `remote_regions` carries them verbatim-uppercased --
 # the same two-vocabularies-in-one-column shape as `state`, and named here rather than
 # silently decided. Measured: 338 of 7,712 remote-by-location rows are bounded this way.
 _REMOTE_REGIONS = (
