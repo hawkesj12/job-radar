@@ -253,10 +253,16 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
     if _REMOTE_RE.search(title):
         return ("remote", "title", None)
     if body:
-        # LOWERED ONCE, then every body pattern runs case-sensitive against it, each behind
-        # a cheap literal gate. The patterns carried re.I and scanned 202 MB of prose on
-        # every posting; measured, the body stage cost 16.18s over a 31,790-row corpus and
-        # this takes it to 5.30s -- 3.05x, with byte-identical verdicts on every row.
+        # LOWERED ONCE, then every body pattern runs against that copy behind a cheap
+        # literal gate. Measured over 203 MB of real bodies (31,790 rows): ungated 16.02s,
+        # this 8.70s -- 1.84x, verdicts byte-identical on every row.
+        #
+        # The .lower() allocates a copy of every job description, which looks like the
+        # expensive part and is not. The alternative -- one case-insensitive regex gate,
+        # no copy, patterns left on the raw text -- measures 16.44s, NO BETTER THAN NO GATE
+        # AT ALL. All of the win is `str.__contains__` on a lowered string being a fast C
+        # substring scan that no case-insensitive regex can approach, and the copy is what
+        # buys access to it. Measured, because the opposite is the intuitive guess.
         #
         # The gate words are load-bearing and easy to get wrong: a first version omitted
         # `anywhere` and silently lost 192 remote verdicts, because _ROLE_REMOTE_RE matches

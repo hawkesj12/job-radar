@@ -125,6 +125,15 @@ Remote"` scopes to a state, and nothing knew a state is inside the country, so
   If you want the old recall back, `remote_only: false` plus your own filter on
   `remote_type` reproduces it exactly and leaves the labels intact.
 
+- **A harvest costs more CPU per posting: about 2.1× on the per-row path.** Typing the
+  arrangement means reading the job body, which the old bare-bool gate mostly did not. Two
+  things keep it from being much worse: `derive_remote` runs _after_ the relevance gate, so
+  the ~69% of postings discarded on a title test never have their body scanned at all, and
+  the body patterns sit behind cheap literal gates. Measured over 31,790 real postings the
+  per-row path goes from 1.69s to 3.50s; it was 6.25× before those two changes. This is
+  CPU on a run whose wall-clock is dominated by network, so it is unlikely to be visible —
+  but it is real, it is single-threaded, and you should not discover it from a profiler.
+
 - **Removed a latent import cycle: `config → vocab → dedup → config`.** `vocab` imports
   `dedup` for its title vocabularies and `dedup` imported `config` at module level, which
   worked only while nothing read an attribute during import — so it was fine until
