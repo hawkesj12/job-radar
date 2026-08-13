@@ -2162,8 +2162,27 @@ def test_remote_scope_reads_the_boundary_not_the_arrangement():
     assert remote_scope("Canada - Remote (ON, AB, BC, or NS Only)") == "CA"
     assert remote_scope("Remote (North America)") == "NORTH AMERICA"
     assert remote_scope("Remote - EMEA") == "EMEA"
-    assert remote_scope("Remote - TX") == "TX"
-    assert remote_scope("Atlanta, GA - Remote") == "GA"
+    # ISO 3166-2, never a bare state code: AR CA CO DE ID IL IN are each BOTH a US state
+    # and an ISO country, so "Los Angeles, CA" and "Canada" would otherwise be the same
+    # value in one column -- undecidable on 586 rows.
+    assert remote_scope("Remote - TX") == "US-TX"
+    assert remote_scope("Atlanta, GA - Remote") == "US-GA"
+    assert remote_scope("Los Angeles, CA - Remote") == "US-CA"
+    assert remote_scope("Remote - Canada") == "CA"
+
+
+def test_remote_scope_does_not_read_south_america_as_the_us():
+    """`america` was a member of the US marker pattern, so "South America" answered US --
+    and because the non-US exclusion reads the same pattern as its veto, a posting naming
+    Argentina, Chile and South America survived a US-only search. 44 rows carry one of
+    these. They are now scoped as the regions they are."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Remote - South America") == "SOUTH AMERICA"
+    assert remote_scope("Remote - Latin America") == "LATIN AMERICA"
+    # ...while the real thing still resolves, including the spelled-out long form.
+    assert remote_scope("Remote - United States of America") == "US"
+    assert remote_scope("Remote (North America)") == "NORTH AMERICA"
     # "us" is NOT a key in the country name map -- it is the English pronoun and far too
     # collision-prone for prose -- so these hundreds of rows needed their own pattern.
     for s in ("Remote - US", "Remote US", "US Remote", "US - Remote", "Remote, US"):

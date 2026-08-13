@@ -251,6 +251,123 @@ def test_remote_posting_reads_body():
     assert not scoring.remote_posting("Engineer", "Austin, TX", "")
 
 
+def test_a_us_state_scope_satisfies_a_us_region_filter():
+    """The new key's HEADLINE use case was losing US jobs. "Atlanta, GA - Remote" scopes to
+    US-GA, and `remote_regions=["US","ANY"]` dropped it because nothing knew a state is
+    inside the country -- 62 unambiguously state-scoped US remote rows vanished from a
+    US-only search."""
+    c = config.Config(remote_only=True, remote_regions=["US", "ANY"])
+
+    def row(loc):
+        return engine.derive_remote(
+            engine._coerce(
+                {
+                    "title": "AI Engineer",
+                    "company": "A",
+                    "url": "https://x/" + loc,
+                    "source": "greenhouse",
+                    "location": loc,
+                }
+            )
+        )
+
+    for loc in ("Atlanta, GA - Remote", "Boston, MA / Remote", "Remote - TX"):
+        assert scoring.is_remote(row(loc), c) is True, loc
+    # a US-INCLUSIVE region counts too; a non-US one does not
+    assert scoring.is_remote(row("Remote - North America"), c) is True
+    assert scoring.is_remote(row("Remote - South America"), c) is False
+    assert scoring.is_remote(row("Remote - Brazil"), c) is False
+
+
+def test_company_mission_copy_is_not_a_remote_role():
+    """A bare "from anywhere in" matched marketing prose, not a policy: "reimagine the way
+    people come together, from anywhere in the world" (105 rows, one employer, all located
+    San Mateo CA). 219 rows were admitted on that phrase and at least 152 were copy of this
+    shape. They emitted basis='text' — identical to a genuine assertion — so discounting
+    `text` meant losing the real ones too."""
+    assert scoring.remote_signal(
+        "Software Engineer",
+        "San Mateo, CA, United States",
+        "Our vision is to reimagine the way people come together, from anywhere in the "
+        "world, and on any device.",
+    ) == (None, None, None)
+    # the genuine phrasing still resolves
+    assert scoring.remote_signal(
+        "Engineer", "Austin, TX", "You may work from anywhere in the US."
+    ) == ("remote", "text", None)
+
+
+def test_a_us_town_named_after_a_country_is_not_dropped():
+    """Turkey TX, Peru IN, Greece NY, China ME, Italy TX and Egypt TX are real US places,
+    and the non-US filter matches country NAMES against raw text. The pipeline already did
+    this correctly one step earlier -- _coerce reads "Turkey, TX" as country=US -- and the
+    gate then threw the row away on the word "turkey". The row's own parsed country wins,
+    which is this package's standing rule applied to the last gate that ignored it."""
+    c = config.Config(remote_only=True)
+    for loc in ("Turkey, TX", "Peru, IN", "Greece, NY", "China, ME", "Egypt, TX"):
+        p = engine.derive_remote(
+            engine._coerce(
+                {
+                    "title": "AI Engineer",
+                    "company": "A",
+                    "url": "https://x/" + loc,
+                    "source": "greenhouse",
+                    "location": loc,
+                    "text": "This is a remote position open across the US.",
+                }
+            )
+        )
+        assert p["country"] == "US", loc
+        assert scoring.is_remote(p, c) is True, loc
+    # ...and a genuinely foreign row is still excluded: only a parsed US country vetoes.
+    fr = engine.derive_remote(
+        engine._coerce(
+            {
+                "title": "AI Engineer",
+                "company": "A",
+                "url": "https://x/fr",
+                "source": "greenhouse",
+                "location": "Paris, France",
+                "text": "This is a remote position.",
+            }
+        )
+    )
+    assert scoring.is_remote(fr, c) is False
+
+
+def test_remote_regions_survives_the_yaml_load_path(tmp_path, capsys):
+    """Every other remote_regions test builds a Config in Python, so the YAML path this
+    key actually arrives through had no coverage at all. Both failure modes are silent
+    board-emptiers: a missing bracket, and a plausible-but-wrong value."""
+    p = tmp_path / "c.yaml"
+    p.write_text("filters:\n  remote_regions: US\n", encoding="utf-8")
+    c = config.load_config(p)
+    assert c.remote_regions == ["US"], "a bare scalar must be repaired, not iterated"
+    assert "should be a list" in capsys.readouterr().err
+
+    # a well-formed list whose VALUE is wrong -- shape repair cannot catch this
+    p.write_text("filters:\n  remote_regions: [USA, ANY]\n", encoding="utf-8")
+    config.load_config(p)
+    assert "unrecognised" in capsys.readouterr().err
+
+    p.write_text("filters:\n  remote_regions: [US, ANY]\n", encoding="utf-8")
+    assert config.load_config(p).remote_regions == ["US", "ANY"]
+    assert capsys.readouterr().err == "", "a correct list must warn about nothing"
+
+
+def test_remote_scope_only_emits_values_the_vocabulary_knows():
+    """`remote_region` gets the same closed-set discipline as `remote_basis`. Without it a
+    config can name a boundary no posting ever carries and silently filter a board to
+    nothing -- which is exactly the `remote_regions: [USA]` trap."""
+    for s in (
+        "Remote - Brazil", "United States (Remote)", "Remote - EMEA", "Remote - TX",
+        "Remote (North America)", "Remote - Anywhere", "Remote, UTC -8", "Remote",
+        "Atlanta, GA - Remote", "Philippines (Remote)",
+    ):  # fmt: skip
+        sc = vocab.remote_scope(s)
+        assert sc is None or sc in vocab.KNOWN_REMOTE_SCOPES, (s, sc)
+
+
 def test_both_gates_agree_about_a_us_inclusive_posting():
     """The two gates USED TO CONTRADICT each other on the same row, and the counterexample
     was already sitting in this file: `_location_excluded`'s US veto deliberately rescues

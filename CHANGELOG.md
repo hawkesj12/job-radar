@@ -27,9 +27,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   basis was broken by the gate itself, which is why a downstream consumer invented
   `remote_basis='derived'`, a value outside `REMOTE_BASES`.
 
-  Across all 31,790 rows, `engine.derive_remote()` now labels **7,618 remote · 4,183 hybrid
-  · 2,009 onsite**, leaving 17,980 honestly unknown. By provenance: `stated` 4,805 ·
-  `location` 4,525 · `text` 2,729 · `board` 1,244 · `title` 507. Only the last three are
+  Across all 31,790 rows, `engine.derive_remote()` now labels **7,457 remote · 4,183 hybrid
+  · 2,009 onsite**, leaving 18,141 honestly unknown. By provenance: `stated` 4,805 ·
+  `location` 4,525 · `text` 2,568 · `board` 1,244 · `title` 507. Only the last three are
   new work; `stated` and `board` come from the adapters and are never overwritten.
   `remote_posting()` is unchanged — it is released public API — so this is a typed sibling,
   not a rewrite.
@@ -49,8 +49,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The boundary was being parsed and discarded: the field existed and only Adzuna ever set
   it. `vocab.remote_scope()` now reads an alpha-2 code, a US state, a multi-country region
   (`EMEA`, `NORTH AMERICA`), or `ANY`, falling back to the row's own `country` —
-  **4,150 of 7,618 remote rows now carry a boundary.** The new `remote_regions` config key
-  filters on it: unset 6,521 rows, `[US, ANY]` 2,862, `[US, ANY, UNSTATED]` 6,428.
+  **4,029 of 7,457 remote rows now carry a boundary.** The new `remote_regions` config key
+  filters on it: unset 6,353 rows, `[US, ANY]` 2,817, `[US, ANY, UNSTATED]` 6,331.
   `remote_only` stays a bool; this is a separate key, because changing a released field's
   type would break consumers.
 
@@ -68,17 +68,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not carry, and inferring `US` from a city name is exactly the plausible-looking
   default the record contract forbids.
 
+### Fixed (found by sampling the rows this change moves)
+
+- **Company mission copy was being read as a remote policy.** `_ROLE_REMOTE_RE` matched a
+  bare `from anywhere in`, which is marketing prose far more often than a work arrangement:
+  _"reimagine the way people come together, from anywhere in the world"_ (105 rows, one
+  employer, every one located San Mateo CA) and _"work together in real time from anywhere
+  in the world"_ (47 rows, another). **219 rows were admitted on that phrase alone and at
+  least 152 were copy of this shape.** They emitted `basis="text"` — identical to a genuine
+  role-level assertion — so a consumer discounting `text` had to lose the real ones to shed
+  these. That is the one case where this design's "every row carries a basis you can
+  discount" defence actually failed. Only `work from anywhere` now matches.
+
+- **`remote_regions` lost US jobs, which is the key's entire purpose.** `"Atlanta, GA -
+Remote"` scopes to a state, and nothing knew a state is inside the country, so
+  `[US, ANY]` dropped it — **72 state-scoped US remote rows** vanished from a US-only
+  search.
+
+- **`remote_region` could not tell California from Canada.** Seven codes are both a US
+  state and an ISO country — `AR CA CO DE ID IL IN` — so `"Los Angeles, CA - Remote"` and
+  `"Remote - Canada"` produced the same value. State scopes are now **ISO 3166-2**
+  (`US-CA`), which resolves the ambiguity and is what makes the fix above possible.
+
+- **`"South America"` was read as the United States.** `US_LOCATION_RE` carried a bare
+  `america`, and since the non-US exclusion uses that same pattern as its US veto, a
+  posting naming Argentina, Chile and South America survived a US-only search. 44 rows
+  carry one of these; they are now scoped as the regions they are.
+
+- **A US town named after a country was dropped.** The exclusion matches country names
+  against raw text, and Turkey TX, Peru IN, Greece NY, China ME, Italy TX and Egypt TX are
+  real US places. `_coerce` had already read `"Turkey, TX"` correctly as `country=US`, and
+  the gate then discarded the row on the word "turkey". The row's own parsed country now
+  wins — this package's standing rule applied to the last gate ignoring it. 6 rows here,
+  but this corpus is 78% big-city tech; a small-town US harvest is where it bites.
+
+- **A typo'd `remote_regions` value silently emptied the board.** `[USA, ANY]` is
+  well-formed, so shape repair could not catch it, and `USA` matches no boundary this
+  package emits — every remote row filtered away with no error. Unrecognised values now
+  warn against `vocab.KNOWN_REMOTE_SCOPES`, the new closed vocabulary for `remote_region`.
+
 ### Changed
 
 - **A `remote_only` harvest returns a different set of rows. Read this before upgrading.**
   The gate now reads the arrangement the engine derived, and a posting that states a split
   week is `hybrid`, which is not remote. Measured over all 31,790 rows with the location
-  filter held constant: **556 rows that used to pass no longer do, and 286 now pass that
-  did not** — a net −270, or **−3.1%** of the 8,688 a remote-only run surfaced before.
+  filter held constant: **556 rows that used to pass no longer do, and 126 now pass that
+  did not** — a net −430, or **−4.9%** of the 8,688 a remote-only run surfaced before.
 
   The 556 are postings whose body states a split week ("2 days a week in the office") while
   nothing in the title or location said remote; the old gate saw the word "remote" in that
-  same sentence and admitted them. The 286 are postings whose title or location says remote
+  same sentence and admitted them. The 126 are postings whose title or location says remote
   where nothing previously typed them at all. Both directions are the intended effect and
   neither is a silent reweighting — every row now carries a `remote_basis` saying how it
   was decided, so a consumer that disagrees can filter on the basis rather than re-derive.

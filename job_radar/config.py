@@ -530,7 +530,23 @@ def load_config(path: str | os.PathLike | None) -> Config:
                 file=sys.stderr,
             )
             val = [val]
-        setattr(cfg, attr, list(val))
+        val = list(val)
+        # A well-formed list can still be silently fatal. `remote_regions: [USA, ANY]` is
+        # the natural typo -- USA is not an alpha-2 code, matches no boundary this package
+        # ever emits, and so filters every remote row away forever with no error. Shape
+        # repair alone does not catch it, because the shape is fine and the VALUE is wrong.
+        # Same reasoning as the unknown-key warning further down: a loud line beats a quiet
+        # empty board.
+        if attr == "remote_regions":
+            known = vocab.KNOWN_REMOTE_SCOPES
+            unknown = [x for x in val if str(x).upper() not in known]
+            if unknown:
+                print(
+                    f"  config: filters.{key} has unrecognised {unknown} — no posting "
+                    f"carries those, so they match nothing",
+                    file=sys.stderr,
+                )
+        setattr(cfg, attr, val)
 
     take(prof, "title_queries", "title_queries")
     take(prof, "signal_titles", "title_signal")

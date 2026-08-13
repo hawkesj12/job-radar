@@ -126,7 +126,15 @@ def remote_posting(title: str, location: str, body: str = "") -> bool:
 _ROLE_REMOTE_RE = re.compile(
     r"\b(?:this|the)\s+(?:position|role|job)\s+(?:is|will\s+be)\s+(?:fully\s+)?remote\b"
     r"|\bthis\s+is\s+a\s+(?:fully\s+)?remote\s+(?:position|role|job|opportunity)\b"
-    r"|\bwork\s+from\s+anywhere\b|\bfrom\s+anywhere\s+in\b"
+    # `work from anywhere` only. A bare `from anywhere in` was matching COMPANY MISSION
+    # COPY, not a remote policy: "reimagine the way people come together, from anywhere in
+    # the world" (105 rows, one employer, every one located San Mateo CA) and "work
+    # together in real time from anywhere in the world" (47 rows, another). 219 rows were
+    # admitted on that phrase alone and at least 152 were marketing prose. They emitted
+    # basis='text', identical to a genuine role-level assertion, so a consumer discounting
+    # `text` had to throw away the good ones to lose the bad -- the one case where this
+    # design's "every row carries a basis you can discount" defence actually failed.
+    r"|\bwork\s+from\s+anywhere\b"
     r"|\byou\s+may\s+work\s+remotely\b|\bmay\s+work\s+remotely\s+from\b"
     r"|\b(?:100%|fully)\s+remote\s+(?:position|role|job|opportunity)\b"
     r"|\btelecommut\w*|\btelework\w*",
@@ -363,7 +371,24 @@ def is_remote(p: dict, cfg=None) -> bool:
         return False
     loc = p.get("location", "") or ""
     b = f"{p.get('title', '')} {loc}".lower()
-    if _location_excluded(loc, b, tuple(cfg.exclude_locations)):
+    # THE ROW'S OWN PARSED COUNTRY BEATS A SUBSTRING IN ITS RAW STRING, which is this
+    # package's standing rule ("a structured signal beats re-deriving it from prose")
+    # applied to the one gate that was still ignoring it.
+    #
+    # The non-US filter matches country NAMES against raw text, and a good many country
+    # names are also real US towns: Turkey TX, Peru IN, Greece NY, China ME, Italy TX,
+    # Egypt TX, Norway MI, Poland OH, Denmark SC. For those the pipeline has already done
+    # the work correctly one step earlier -- _coerce reads "Turkey, TX" as country=US,
+    # state=TX -- and then this gate threw the row away on the word "turkey". Six rows in
+    # a 31,790-row harvest, but that harvest is 78% big-city tech; a small-town US harvest
+    # is where this bites, and the class was widened by deriving the token list from the
+    # full country vocabulary (it already existed for denmark/norway/poland/japan).
+    #
+    # Only `US` short-circuits, not any parsed country: this filter's whole job is "can a
+    # US-based worker take it", so a parsed `country == "FR"` is a reason to drop, not keep.
+    if p.get("country") != "US" and _location_excluded(
+        loc, b, tuple(cfg.exclude_locations)
+    ):
         return False
     return _region_allowed(p, cfg)
 
@@ -397,6 +422,12 @@ def _region_allowed(p: dict, cfg) -> bool:
         return "UNSTATED" in allowed
     scope = str(scope).upper()
     if scope in allowed:
+        return True
+    # A US STATE IS INSIDE THE US, which this did not know and which broke the flag's
+    # headline use case: "Atlanta, GA - Remote" scopes to US-GA, and a `["US","ANY"]`
+    # filter dropped it. 62 unambiguously state-scoped US remote rows vanished from a
+    # US-only search -- the new key losing exactly the jobs it exists to find.
+    if scope.startswith("US-") and allowed & _US_INCLUSIVE_SCOPES:
         return True
     # A US-inclusive multi-region scope satisfies a request for the US.
     return bool(scope in _US_INCLUSIVE_SCOPES and allowed & _US_INCLUSIVE_SCOPES)

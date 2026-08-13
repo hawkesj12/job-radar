@@ -643,6 +643,13 @@ def split_place(raw) -> dict:
 # silently decided. Measured: 338 of 7,712 remote-by-location rows are bounded this way.
 _REMOTE_REGIONS = (
     "north america",
+    # South/Latin/Central America are listed so they are SCOPED rather than merely not-US.
+    # They were previously answered "US" outright, because US_LOCATION_RE carried a bare
+    # `america`; naming them here means the region pass claims them before that check ever
+    # runs, and a US-only filter excludes them because they are not US-inclusive.
+    "south america",
+    "latin america",
+    "central america",
     "latam",
     "emea",
     "apac",
@@ -705,8 +712,15 @@ def _longest_match(rx: re.Pattern, low: str) -> str | None:
 # unrecognised -- "Remote - US" (227), "Remote US" (119), "Remote, US" (105), "US Remote"
 # (55), "US - Remote" (35). It is excluded from the map on purpose: as a country NAME, a
 # bare "us" is the English pronoun and far too collision-prone for prose matching.
+# `america` is NOT a member, and leaving it in was a real bug: it made
+# remote_scope("South America") and ("Latin America") answer "US", and because
+# scoring._location_excluded reads this same pattern as its US veto, a posting reading
+# "Argentina, Chile, Colombia, Mexico, South America (Remote)" survived a US-only search.
+# 44 rows in a 31,790-row harvest carry South/Latin/Central America. "United States of
+# America" still matches in full, and "North America" is answered by the region pass that
+# runs before this one.
 US_LOCATION_RE = re.compile(
-    r"(?<![a-z])(?:u\.?s\.?a?|us|united states(?: of america)?|america)(?![a-z])", re.I
+    r"(?<![a-z])(?:u\.?s\.?a?|us|united states(?: of america)?)(?![a-z])", re.I
 )
 
 # Strip the arrangement words so what remains can go through the ordinary place parser
@@ -767,12 +781,18 @@ def remote_scope(raw) -> str | None:
     bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-–—|/")
     place = split_place(bare)
     if place["state"]:
-        return place["state"]
+        # `US-CA`, not `CA`. Seven codes are BOTH a US state and an ISO country -- AR CA CO
+        # DE ID IL IN -- so a bare state code made this column undecidable: "Los Angeles,
+        # CA - Remote" and "Remote - Canada" both answered `CA`, on 586 rows, and no
+        # consumer could tell California from Canada. The prefix is ISO 3166-2, the
+        # existing standard for exactly this, and it makes a state scope self-evidently
+        # inside the US, which is what lets a US region filter accept it.
+        return f"US-{place['state']}"
     if place["country"]:
         return place["country"]
     # A bare two-letter US state, which has no comma for split_place to work with.
     if len(bare) == 2 and bare.upper() in _US_STATES:
-        return bare.upper()
+        return f"US-{bare.upper()}"  # ISO 3166-2, see the state branch above
     if _REMOTE_TZ.search(s):
         return "TZ"
     # A lone city ("New York (Remote)") stays UNSTATED. Recognising it would need a
@@ -781,6 +801,22 @@ def remote_scope(raw) -> str | None:
     # ~2,600 rows -- admitted by the default region policy, excluded by a strict one.
     return None
 
+
+# Everything `remote_scope` can emit, so `remote_region` gets the same discipline as
+# `remote_basis` and the other closed sets: a value outside it is a one-line diff to spot,
+# and a config naming a boundary no posting can carry is caught at load time instead of
+# silently filtering a board to nothing.
+#
+# It is a UNION OF TWO VOCABULARIES and that is a real, named residual, the same shape as
+# `state`: ISO alpha-2 codes and US state codes are two-letter and overlap (CA is both
+# California and Canada), while regions are multi-word names with no code to map to. Read
+# it together with `remote_type` and the posting's own `country`, never alone.
+KNOWN_REMOTE_SCOPES = frozenset(
+    _KNOWN_COUNTRIES
+    | {f"US-{s}" for s in _US_STATES}  # ISO 3166-2; never a bare state code
+    | {r.upper() for r in _REMOTE_REGIONS}
+    | {"ANY", "TZ"}  # sentinels: stated-unbounded, and a timezone band
+)
 
 # The closed vocabulary for `remote_basis`. Kept here beside the other vocabularies
 # rather than as a comment, so a value outside it is a one-line diff to spot.
