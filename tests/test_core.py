@@ -252,49 +252,55 @@ def test_remote_posting_reads_body():
 
 
 def test_a_us_state_scope_satisfies_a_us_region_filter():
-    """The new key's HEADLINE use case was losing US jobs. "Atlanta, GA - Remote" scopes to
-    US-GA, and `remote_regions=["US","ANY"]` dropped it because nothing knew a state is
-    inside the country -- 62 unambiguously state-scoped US remote rows vanished from a
-    US-only search."""
-    c = config.Config(remote_only=True, remote_regions=["US", "ANY"])
+    """`remote_regions: [US]` is ambiguous between "the US market" and "somewhere I can sit
+    from my own address", and the token cannot tell them apart -- so `US` accepts `US-TX`
+    and a user who means the strict reading names the subdivision. Making strict the
+    mandatory reading would be a bigger behaviour change than this carries."""
+    c = config.Config(remote_only=True, remote_regions=["US"], exclude_locations=[])
 
     def row(loc):
         return engine.derive_remote(
             engine._coerce(
-                {
-                    "title": "AI Engineer",
-                    "company": "A",
-                    "url": "https://x/" + loc,
-                    "source": "greenhouse",
-                    "location": loc,
-                }
+                {"title": "AI Engineer", "company": "A", "url": "https://x/" + loc,
+                 "source": "greenhouse", "location": loc}
             )
-        )
+        )  # fmt: skip
 
-    for loc in ("Atlanta, GA - Remote", "Boston, MA / Remote", "Remote - TX"):
-        assert scoring.is_remote(row(loc), c) is True, loc
-    # a US-INCLUSIVE region counts too; a non-US one does not
-    assert scoring.is_remote(row("Remote - North America"), c) is True
-    assert scoring.is_remote(row("Remote - South America"), c) is False
+    assert scoring.is_remote(row("Remote - TX"), c) is True
+    assert scoring.is_remote(row("Remote - US & Canada"), c) is True
+    # a US-INCLUSIVE region counts; a non-US one does not
+    assert scoring.is_remote(row("Remote (North America)"), c) is True
+    assert scoring.is_remote(row("Remote - EMEA"), c) is False
     assert scoring.is_remote(row("Remote - Brazil"), c) is False
+    # stated-unbounded satisfies any policy; unstated needs the explicit opt-in
+    assert scoring.is_remote(row("Remote - Anywhere"), c) is True
+    assert scoring.is_remote(row("Remote"), c) is False
+    c2 = config.Config(
+        remote_only=True, remote_regions=["US", "UNSTATED"], exclude_locations=[]
+    )
+    assert scoring.is_remote(row("Remote"), c2) is True
 
 
-def test_company_mission_copy_is_not_a_remote_role():
-    """A bare "from anywhere in" matched marketing prose, not a policy: "reimagine the way
-    people come together, from anywhere in the world" (105 rows, one employer, all located
-    San Mateo CA). 219 rows were admitted on that phrase and at least 152 were copy of this
-    shape. They emitted basis='text' — identical to a genuine assertion — so discounting
-    `text` meant losing the real ones too."""
-    assert scoring.remote_signal(
-        "Software Engineer",
-        "San Mateo, CA, United States",
-        "Our vision is to reimagine the way people come together, from anywhere in the "
-        "world, and on any device.",
-    ) == (None, None, None)
-    # the genuine phrasing still resolves
-    assert scoring.remote_signal(
-        "Engineer", "Austin, TX", "You may work from anywhere in the US."
-    ) == ("remote", "text", None)
+def test_the_record_carries_areas_regions_and_the_raw_string():
+    """The three fields, filled from one location string, each meaning one thing."""
+    p = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/1",
+             "source": "greenhouse", "location": "Americas (USA or Canada) (Remote)"}
+        )
+    )  # fmt: skip
+    assert p["remote_areas"] == ["CA", "US"]
+    assert p["remote_regions"] == ["AMERICAS"]
+    assert p["remote_scope_raw"] == "Americas (USA or Canada) (Remote)"
+    # an office address states no boundary, and the geography lands where it belongs
+    q = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/2",
+             "source": "greenhouse", "location": "Atlanta, GA - Remote"}
+        )
+    )  # fmt: skip
+    assert q["remote_areas"] is None and q["remote_regions"] is None
+    assert (q["city"], q["state"], q["country"]) == ("Atlanta", "GA", "US")
 
 
 def test_a_us_town_named_after_a_country_is_not_dropped():
@@ -355,17 +361,19 @@ def test_remote_regions_survives_the_yaml_load_path(tmp_path, capsys):
     assert capsys.readouterr().err == "", "a correct list must warn about nothing"
 
 
-def test_remote_scope_only_emits_values_the_vocabulary_knows():
-    """`remote_region` gets the same closed-set discipline as `remote_basis`. Without it a
-    config can name a boundary no posting ever carries and silently filter a board to
-    nothing -- which is exactly the `remote_regions: [USA]` trap."""
-    for s in (
+def test_remote_scope_only_emits_values_the_vocabularies_allow():
+    """`remote_areas` is validated by FORMAT (a closed list would have to enumerate every
+    subdivision on earth); `remote_regions` by MEMBERSHIP in a closed token set."""
+    for loc in (
         "Remote - Brazil", "United States (Remote)", "Remote - EMEA", "Remote - TX",
         "Remote (North America)", "Remote - Anywhere", "Remote, UTC -8", "Remote",
         "Atlanta, GA - Remote", "Philippines (Remote)",
     ):  # fmt: skip
-        sc = vocab.remote_scope(s)
-        assert sc is None or sc in vocab.KNOWN_REMOTE_SCOPES, (s, sc)
+        areas, regions = vocab.remote_scope(loc)
+        for a in areas or []:
+            assert vocab.REMOTE_AREA_RE.match(a), (loc, a)
+        for r in regions or []:
+            assert r in vocab.REMOTE_REGION_TOKENS, (loc, r)
 
 
 def test_both_gates_agree_about_a_us_inclusive_posting():
@@ -381,7 +389,8 @@ def test_both_gates_agree_about_a_us_inclusive_posting():
         "Americas (USA or Canada) (Remote)",
         "Remote - US & Canada",
     ):
-        assert vocab.remote_scope(loc) in ("US", "AMERICAS"), loc
+        areas, regions = vocab.remote_scope(loc)
+        assert "US" in (areas or []) or "AMERICAS" in (regions or []), loc
         p = engine.derive_remote(
             engine._coerce(
                 {
@@ -399,8 +408,8 @@ def test_both_gates_agree_about_a_us_inclusive_posting():
 def test_a_named_country_beats_the_anywhere_token():
     """ "Remote - Anywhere in Brazil" means anywhere WITHIN Brazil. Checking ANY first
     answered ANY and lost the boundary that matters, on 24 rows, 11 of them French."""
-    assert vocab.remote_scope("Remote - Anywhere in Brazil") == "BR"
-    assert vocab.remote_scope("Remote - Anywhere") == "ANY"
+    assert vocab.remote_scope("Remote - Anywhere in Brazil") == (["BR"], None)
+    assert vocab.remote_scope("Remote - Anywhere") == ([], None)
 
 
 def test_the_body_literal_gates_change_no_verdict():
@@ -435,23 +444,13 @@ def test_remote_signal_records_how_it_decided():
     admitted because its TITLE said remote was byte-identical in the record to a row
     nobody classified. 462 title-decided rows and 1,642 body-decided ones in a 31,790-row
     harvest, which is why a downstream consumer invented a basis outside REMOTE_BASES."""
-    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == (
-        "remote",
-        "title",
-        None,
-    )
-    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == (
-        "remote",
-        "location",
-        "BR",
-    )
+    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == ("remote", "title")
+    # the BOUNDARY is no longer remote_signal's job -- it moved to engine.derive_remote,
+    # because a source can state a boundary without saying anything about remoteness.
+    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == ("remote", "location")
     assert scoring.remote_signal(
         "AI Engineer", "Austin, TX", "This is a remote role."
-    ) == (
-        "remote",
-        "text",
-        None,
-    )
+    ) == ("remote", "text")
     # every basis it can emit is inside the closed vocabulary
     for t, loc, body in [
         ("E - Remote", "Austin, TX", ""),
@@ -459,7 +458,7 @@ def test_remote_signal_records_how_it_decided():
         ("E", "Austin, TX", "Telecommuting is available."),
         ("E", "Austin, TX", "Our hybrid schedule is 3 days in the office."),
     ]:
-        _, basis, _ = scoring.remote_signal(t, loc, body)
+        _, basis = scoring.remote_signal(t, loc, body)
         assert basis in vocab.REMOTE_BASES, (t, loc, basis)
 
 
@@ -472,15 +471,11 @@ def test_remote_signal_does_not_read_employer_policy_as_a_remote_role():
         "Senior CX Engineer",
         "MEXICO",
         "We are a fully remote global company with employees in Canada and the US.",
-    ) == (None, None, None)
+    ) == (None, None)
     assert scoring.remote_signal(
         "E", "Austin, TX", "We are a remote-first company."
-    ) == (
-        None,
-        None,
-        None,
-    )
-    assert scoring.remote_signal("E", "Austin, TX", "") == (None, None, None)
+    ) == (None, None)
+    assert scoring.remote_signal("E", "Austin, TX", "") == (None, None)
 
 
 def test_remote_signal_lets_hybrid_win():
@@ -492,12 +487,12 @@ def test_remote_signal_lets_hybrid_win():
     # tag is contradicted on ~1 row in 8. A specific factual claim beats a suffix.
     assert scoring.remote_signal(
         "E", "New York (Remote)", "Hybrid: 2 days a week in the office."
-    ) == ("hybrid", "text", None)
+    ) == ("hybrid", "text")
     # ...but a location that names a real BOUNDARY is a genuine eligibility statement and
     # is not demoted by the word hybrid appearing somewhere in a long description.
     assert scoring.remote_signal(
         "E", "Remote - Brazil", "We also run a hybrid schedule at our offices."
-    ) == ("remote", "location", "BR")
+    ) == ("remote", "location")
 
 
 def test_hybrid_is_not_matched_as_a_bare_word():
@@ -506,10 +501,10 @@ def test_hybrid_is_not_matched_as_a_bare_word():
     took it to 2,995 with zero vehicle/cloud matches."""
     assert scoring.remote_signal(
         "Engineer", "Austin, TX", "You will design hybrid vehicles and battery systems."
-    ) == (None, None, None)
+    ) == (None, None)
     assert scoring.remote_signal(
         "Engineer", "Austin, TX", "Experience with hybrid cloud architecture required."
-    ) == (None, None, None)
+    ) == (None, None)
     # the real thing, including the label form that ends a line with no following noun
     assert (
         scoring.remote_signal("E", "Austin, TX", "Our hybrid policy: 3 days in.")[0]

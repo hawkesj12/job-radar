@@ -550,8 +550,20 @@ def load_config(path: str | os.PathLike | None) -> Config:
         # Same reasoning as the unknown-key warning further down: a loud line beats a quiet
         # empty board.
         if attr == "remote_regions":
-            known = vocab.KNOWN_REMOTE_SCOPES
-            unknown = [x for x in val if str(x).upper() not in known]
+            # Validate against BOTH vocabularies plus the sentinels. A member is legal if
+            # it is an ISO area (format-checked -- a closed list would have to enumerate
+            # every subdivision on earth), a closed region token, or UNSTATED. `ANY` is
+            # accepted for the configs already written against it, but the record now says
+            # "stated unbounded" with an empty list rather than a sentinel.
+            def _legal(x: str) -> bool:
+                x = str(x).upper()
+                return bool(
+                    vocab.REMOTE_AREA_RE.match(x)
+                    or x in vocab.REMOTE_REGION_TOKENS
+                    or x in ("UNSTATED", "ANY")
+                )
+
+            unknown = [x for x in val if not _legal(x)]
             if unknown:
                 print(
                     f"  config: filters.{key} has unrecognised {unknown} — no posting "

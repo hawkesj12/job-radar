@@ -89,7 +89,14 @@ def _nested(r: dict) -> dict:
         "remote": {
             "is_remote": r.get("remote"),
             "type": r.get("remote_type"),
-            "region": r.get("remote_region"),
+            # WHERE a remote worker may sit. `areas` are ISO codes, `regions` are
+            # multi-country tokens, and they are separate because they are different kinds
+            # of value -- one key holding both is what this replaced. `areas: []` means the
+            # posting STATED it is unbounded; `null` means it said nothing. JSON keeps that
+            # distinction for free, which a CSV column could not.
+            "areas": r.get("remote_areas"),
+            "regions": r.get("remote_regions"),
+            "raw": r.get("remote_scope_raw"),
             "basis": r.get("remote_basis"),
         },
         "posted": r.get("posted") or None,

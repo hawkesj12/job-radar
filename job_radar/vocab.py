@@ -682,8 +682,12 @@ def _alternation(words) -> re.Pattern:
     the escaping, sorting and dispatch did not: measured 49.6 us/call against 2.7 us for
     this, a 14.8x saving on the line item.
     """
+    # `(?<!new )` because "New Mexico" is a US state and the plain lookbehind accepts a
+    # space -- `_longest_match` hid this (united states, 13 chars, beat mexico, 6), so
+    # collecting ALL matches surfaced it: 63 corpus rows became (['MX','US']). Multi-word
+    # names starting with "new" are unaffected: "new zealand" matches from its own start.
     return re.compile(
-        r"(?<![a-z])(?:"
+        r"(?<![a-z])(?<!new )(?:"
         + "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
         + r")(?![a-z])"
     )
@@ -733,90 +737,106 @@ _REMOTE_STRIP = re.compile(
 )
 
 
-def remote_scope(raw) -> str | None:
-    """A location string -> WHERE a remote worker may sit, or None when unstated.
+def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
+    """A location string -> `(areas, regions)`, the STATED remote eligibility boundary.
 
-    The boundary is a different fact from the arrangement, and one boolean cannot hold
-    both. "Remote - Brazil" is genuinely remote AND unreachable for a US-only worker;
-    "Remote" is genuinely remote and says nothing about where. Every one of those
-    boundaries was parsed and thrown away -- `remote_region` existed and only Adzuna set it.
+    `areas` are ISO codes -- alpha-2 for a country, ISO 3166-2 for a US state. `regions` are
+    multi-country tokens from `REMOTE_REGION_TOKENS` and NEVER a country code. Keeping them
+    apart is the whole point: one column holding codes, subdivisions, region names and
+    sentinels at once is a documented failure mode, and it forced a US-inclusive special case
+    that only existed because a SET was being stored as a STRING.
 
-    Measured over the 7,712 remote-by-location rows of a 31,790-row harvest: 4,539 name a
-    country or US state, 343 a region or timezone band, 30 say anywhere, and 2,800 state
-    nothing at all. Those sum to 7,712, which is the check an earlier version of this
-    docstring failed -- it listed components totalling 4,744 against the same denominator
-    and put `anywhere` at 654, a number no population reproduces. The DECISION those figures
-    support (unknown is not "anywhere") survives the correction; the figures did not.
+    THREE STATES, and they are distinct on purpose:
+      (None, None)   nothing was stated
+      ([],   None)   stated UNBOUNDED -- the posting really says "anywhere"
+      (["US"], None) enumerated
 
-    Returns an alpha-2 code, a region token, `ANY`, a US state code, or None. None means
-    UNSTATED and is deliberately distinguishable from `ANY`.
+    STATED ONLY. A boundary inferred from an office city is not a boundary: measured on 73
+    US-subdivision rows, 58 came from a city head ("Boston, MA / Remote" is where the office
+    is, not where you must live) and only 14 stated one with no city at all ("Remote - TX").
+    The same is true of countries -- "Sao Paulo, Brazil - Remote" infers BR from an address --
+    so the rule is stated-vs-inferred, not subdivision-vs-country, or it is a carve-out rather
+    than a principle. The office anchor keeps living in `city`/`state`/`country`.
+
+    ALL matches, not the longest. "Remote - US & Canada" is two countries, and 13 measured
+    rows name several US states; a scalar picked one arbitrarily and dropped the rest.
     """
     s = _flatten(raw).strip()
     if not s:
-        return None
+        return (None, None)
     low = " ".join(s.lower().split())
-    # Longest match wins, so "european union" is not answered by "europe".
-    region = _longest_match(_REGION_RE, low)
-    if region:
-        return region.upper()
-    # THE US MARKER IS CHECKED BEFORE THE COUNTRY NAMES, and the order is the whole point.
-    # The country pass returns any country found anywhere in the string, so "Remote - US &
-    # Canada" answered CA -- and a US-only `remote_regions` then dropped a posting the
-    # worker can plainly take. 112 rows in a 31,790-row harvest name the US explicitly and
-    # carried a foreign boundary. Worse, it made two gates disagree about one posting:
-    # scoring._location_excluded has a US veto that deliberately RESCUES exactly these
-    # strings ("Remote (United States | Canada)", "Remote - US & Canada"), and this
-    # function then threw them away one gate later.
-    if US_LOCATION_RE.search(s):
-        return "US"
-    name = _longest_match(_COUNTRY_NAME_RE, low)
-    if name:
-        return _COUNTRY_CODES[name]
-    # AFTER the country pass, not before: "Remote - Anywhere in Brazil" means anywhere
-    # WITHIN Brazil, and answering ANY there loses the boundary that matters. Checked
-    # first, it did exactly that on 24 rows, 11 of them French.
-    if _REMOTE_ANYWHERE.search(s):
-        return "ANY"
-    # Strip the arrangement words and let the ordinary place parser read the remainder.
-    bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-–—|/")
+
+    regions = sorted(
+        {m.group(0).upper() for m in _REGION_RE.finditer(low)}
+        | ({"TIMEZONE"} if _REMOTE_TZ.search(s) else set())
+    )
+
+    # THE CITY TEST IS THE STATED-VS-INFERRED GATE, and it governs AREAS ONLY.
+    #
+    # A country found in a string that also has a city head came from an office address,
+    # not a boundary: "Munich, Germany" and "Costa Mesa, California, United States" are
+    # where the desk is. Measured, 6,779 of 15,371 area-carrying rows are this shape, so
+    # applying the rule only to US subdivisions -- as the first version did -- made it the
+    # carve-out this docstring says it must not be, and on those rows `remote_areas` meant
+    # nothing more than `country`.
+    #
+    # Regions are NOT suppressed by a city, because a region name is never an office
+    # address: "Bengaluru, Karnataka, India, APAC" states APAC while sitting on a city.
+    bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-\u2013\u2014|/")
     place = split_place(bare)
-    if place["state"]:
-        # `US-CA`, not `CA`. Seven codes are BOTH a US state and an ISO country -- AR CA CO
-        # DE ID IL IN -- so a bare state code made this column undecidable: "Los Angeles,
-        # CA - Remote" and "Remote - Canada" both answered `CA`, on 586 rows, and no
-        # consumer could tell California from Canada. The prefix is ISO 3166-2, the
-        # existing standard for exactly this, and it makes a state scope self-evidently
-        # inside the US, which is what lets a US region filter accept it.
-        return f"US-{place['state']}"
-    if place["country"]:
-        return place["country"]
-    # A bare two-letter US state, which has no comma for split_place to work with.
-    if len(bare) == 2 and bare.upper() in _US_STATES:
-        return f"US-{bare.upper()}"  # ISO 3166-2, see the state branch above
-    if _REMOTE_TZ.search(s):
-        return "TZ"
-    # A lone city ("New York (Remote)") stays UNSTATED. Recognising it would need a
-    # gazetteer this package does not carry, and guessing "US" from a city name is the
-    # kind of plausible-looking default the record contract forbids. Measured, that is
-    # ~2,600 rows -- admitted by the default region policy, excluded by a strict one.
-    return None
+    has_city = bool(place["city"])
+
+    areas: set[str] = set()
+    if not has_city:
+        areas = {_COUNTRY_CODES[m.group(0)] for m in _COUNTRY_NAME_RE.finditer(low)}
+        if US_LOCATION_RE.search(s):
+            areas.add("US")
+        # A bare US state with no city -- "Remote - TX". `US-TX`, not `TX`: seven codes are
+        # both a US state and an ISO country (AR CA CO DE ID IL IN), so a bare code left the
+        # column undecidable between California and Canada.
+        if len(bare) == 2 and bare.upper() in _US_STATES:
+            areas.add(f"US-{bare.upper()}")
+        elif place["state"]:
+            areas.add(f"US-{place['state']}")
+
+    # BOTH are returned when both are present. An early return on regions discarded every
+    # country in the string on 111 measured rows -- "Americas (USA or Canada) (Remote)" lost
+    # US and CA -- which defeats the point of having built two fields.
+    if areas or regions:
+        return (sorted(areas) if areas else None, regions or None)
+
+    # AFTER the country pass: "Remote - Anywhere in Brazil" means anywhere WITHIN Brazil,
+    # so answering unbounded there would lose the boundary that matters.
+    if _REMOTE_ANYWHERE.search(s):
+        return ([], None)
+
+    # Everything else is inferred or unreadable -- a lone city, an office address. Unstated.
+    return (None, None)
 
 
-# Everything `remote_scope` can emit, so `remote_region` gets the same discipline as
-# `remote_basis` and the other closed sets: a value outside it is a one-line diff to spot,
-# and a config naming a boundary no posting can carry is caught at load time instead of
-# silently filtering a board to nothing.
+# The closed token set for `remote_regions`. A multi-country region is NOT a place and has
+# no ISO code -- EMEA, APAC and LATAM are business groupings whose membership only the
+# employer can settle -- so they get their own field and their own vocabulary rather than
+# sharing a column with country codes.
 #
-# It is a UNION OF TWO VOCABULARIES and that is a real, named residual, the same shape as
-# `state`: ISO alpha-2 codes and US state codes are two-letter and overlap (CA is both
-# California and Canada), while regions are multi-word names with no code to map to. Read
-# it together with `remote_type` and the posting's own `country`, never alone.
-KNOWN_REMOTE_SCOPES = frozenset(
-    _KNOWN_COUNTRIES
-    | {f"US-{s}" for s in _US_STATES}  # ISO 3166-2; never a bare state code
-    | {r.upper() for r in _REMOTE_REGIONS}
-    | {"ANY", "TZ"}  # sentinels: stated-unbounded, and a timezone band
-)
+# THE INVARIANT: no member is a valid alpha-2 code. That is what makes the two fields
+# non-overlapping by construction, and a test asserts it against the FULL ISO set in
+# `iso3166`, not against this module's narrow 62-name map -- checking the narrow map is how
+# the first version of this passed vacuously while shipping `TZ`, which is Tanzania.
+# The timezone sentinel is spelled `TIMEZONE` for exactly that reason.
+#
+# These deliberately do NOT resolve to country lists. This package's own country map is 62
+# names and cannot name 181 of the countries the sources send, so an enumeration would be a
+# confidently wrong list in a filterable column -- strictly worse than the token it replaced.
+# Whether a region includes the US is a POLICY question, answered in `scoring`, where being
+# approximate is honest because the user chose the policy.
+REMOTE_REGION_TOKENS = frozenset({r.upper() for r in _REMOTE_REGIONS} | {"TIMEZONE"})
+
+# `remote_areas` is validated by FORMAT, not by membership: alpha-2, or ISO 3166-2 with the
+# country prefix. A closed list would have to enumerate every subdivision on earth, and the
+# format is what actually carries the guarantee -- a bare two-letter subdivision is
+# unrepresentable, which is the collision (California vs Canada) that started this.
+REMOTE_AREA_RE = re.compile(r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$")
 
 # The closed vocabulary for `remote_basis`. Kept here beside the other vocabularies
 # rather than as a comment, so a value outside it is a one-line diff to spot.

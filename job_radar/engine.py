@@ -97,7 +97,17 @@ _CONTRACT_FIELDS = (
     "state",
     "country",
     "remote_type",  # remote | hybrid | onsite | None
-    "remote_region",  # where a remote worker may sit, when stated
+    # WHERE a remote worker may sit -- the eligibility boundary, which is a different fact
+    # from where the work is (that is city/state/country). Three fields because they are
+    # three different kinds of thing; one column holding all of them is the failure this
+    # replaced. `remote_areas` is [] when a posting states it is unbounded and None when it
+    # states nothing -- those are not the same and a consumer must be able to tell.
+    #
+    # Per schema.org's applicantLocationRequirements, which models this concept: it records
+    # where applicants may APPLY FROM and is explicitly NOT a citizenship or work-visa claim.
+    "remote_areas",  # list[str] | None -- ISO alpha-2 / 3166-2. [] = stated worldwide
+    "remote_regions",  # list[str] | None -- closed tokens, never a country code
+    "remote_scope_raw",  # str | None -- the vendor's own words, kept verbatim
     "remote_basis",  # stated | board | location | text | None -- vocab.REMOTE_BASES
     # money
     "salary_min",  # float | None -- what an employer COMMITTED to
@@ -242,9 +252,24 @@ def _coerce(p: dict) -> dict:
     # geography always wins -- this can add, never overwrite. split_place refuses
     # anything it cannot read with confidence, so an unparseable location stays None
     # rather than becoming a guess.
+    #
+    # STRIP THE ARRANGEMENT WORDS FIRST, THEN FALL BACK TO THE RAW STRING. This block used
+    # to parse the raw location only, while `vocab.remote_scope` strips first -- so
+    # "Atlanta, GA - Remote" resolved to nothing here even though the parser reads it fine
+    # once "Remote" is out of the way. Measured: 1,341 rows go empty -> resolved.
+    #
+    # The fallback is not belt-and-braces, it is required. Stripping INSTEAD OF parsing raw
+    # regresses "Remote, TX", "Remote, CO" and "Hybrid, NY": those resolve today because the
+    # tail is a US state and the head is placeless, and stripping leaves a bare "TX" with no
+    # comma, which split_place cannot read. Those are exactly the stated bare-state rows the
+    # boundary field exists to carry, so losing them would be the worst possible trade.
     if p.get("city") is None and p.get("state") is None and p.get("country") is None:
         first = (p.get("location") or "").split(";")[0]
-        for k, v in vocab.split_place(first).items():
+        bare = " ".join(vocab._REMOTE_STRIP.sub(" ", first).split()).strip(" ,-–—|/")
+        place = vocab.split_place(bare)
+        if not any(place.values()):
+            place = vocab.split_place(first)
+        for k, v in place.items():
             if v is not None:
                 p[k] = v
 
@@ -315,7 +340,7 @@ def _coerce(p: dict) -> dict:
 
 
 def derive_remote(p: dict) -> dict:
-    """Fill remote_type / remote_basis / remote_region from the posting's own text.
+    """Fill the remote arrangement AND its boundary from the posting's own text.
 
     RECORDS what it decided, which is the point. The gate used to call
     scoring.remote_posting, take a bare bool and write nothing -- so a row admitted
@@ -325,7 +350,10 @@ def derive_remote(p: dict) -> dict:
     invented `remote_basis='derived'`, a value outside REMOTE_BASES.
 
     ONLY fills what the adapter left None, the same discipline as the geography fallback
-    in _coerce: a source that sends a real structured signal always wins.
+    in _coerce: a source that sends a real structured signal always wins. The arrangement
+    and the boundary are derived independently, because a source can state one and not the
+    other -- himalayas sends a country restriction on every row and says nothing per-row
+    about remoteness.
 
     SEPARATE FROM _coerce, and deliberately called AFTER the relevance gate. This scans the
     full job body, which is the single most expensive thing the per-posting path does --
@@ -334,28 +362,29 @@ def derive_remote(p: dict) -> dict:
     Emitted rows are unaffected: everything that survives to the store passes relevance
     first, so it has been through here.
     """
+    location = p.get("location", "") or ""
     if p.get("remote_type") is None:
-        rtype, rbasis, rregion = remote_signal(
-            p.get("title", "") or "",
-            p.get("location", "") or "",
-            p.get("text", "") or "",
+        rtype, rbasis = remote_signal(
+            p.get("title", "") or "", location, p.get("text", "") or ""
         )
         if rtype is not None:
             p["remote_type"] = rtype
             p["remote_basis"] = rbasis
-            # Never overwrite a region an adapter already stated (himalayas, jobicy and
-            # remotive all send one); only fill a gap.
-            if p.get("remote_region") is None:
-                p["remote_region"] = rregion
-    # A remote row whose location stated no boundary often still carries a parsed country,
-    # and that is evidence rather than a guess: it is the country this posting is filed
-    # under. Of 4,127 such rows in a 31,790-row harvest, 528 carry country=US and 131 a
-    # foreign one -- and those 131 are the reason to do it, since an unstated boundary is
-    # ADMITTED by the default region policy and they would otherwise ride through as
-    # "we don't know". The remaining ~3,470 have no country either and stay unstated.
-    if p.get("remote_type") == "remote" and p.get("remote_region") is None:
-        if p.get("country"):
-            p["remote_region"] = p["country"]
+
+    # The BOUNDARY is derived independently of the arrangement, because a source can state
+    # one without the other -- himalayas sends a country array on every row while saying
+    # nothing per-row about remoteness. Only fills gaps: an adapter that sent its own
+    # structured list always wins, and `[]` is a real value that must not be overwritten,
+    # so this tests `is None` rather than falsiness.
+    if p.get("remote_areas") is None and p.get("remote_regions") is None:
+        areas, regions = vocab.remote_scope(location)
+        if areas is not None:
+            p["remote_areas"] = areas
+        if regions is not None:
+            p["remote_regions"] = regions
+    if p.get("remote_scope_raw") is None and location:
+        p["remote_scope_raw"] = location
+
     rt = p.get("remote_type")
     p["remote"] = None if rt is None else rt == "remote"
     return p

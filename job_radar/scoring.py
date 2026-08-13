@@ -195,7 +195,12 @@ def _has(low: str, literals: tuple) -> bool:
 def remote_signal(title: str, location: str, body: str = "") -> tuple:
     """A posting's work arrangement WITH its provenance and boundary.
 
-    `(remote_type, remote_basis, remote_region)`, each `None` when nothing was said.
+    `(remote_type, remote_basis)`, each `None` when nothing was said.
+
+    The BOUNDARY is not here. It moved to `engine.derive_remote`, because a source can
+    state where a worker may sit without saying anything about remoteness -- himalayas
+    sends a country restriction on every row and says nothing per-row about arrangement --
+    so deriving them together forced one to wait on the other.
     The typed sibling of `remote_posting`, which stays a bare bool forever because it is
     released public API that jobfitr imports.
 
@@ -241,17 +246,18 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
     # word was in the title -- exactly the defect this function exists to abolish, and
     # `title` was already a legal basis when it happened.
     if _REMOTE_NEG_RE.search(location):
-        return ("onsite", "location", None)
+        return ("onsite", "location")
     if _REMOTE_NEG_RE.search(title):
-        return ("onsite", "title", None)
+        return ("onsite", "title")
     # (1) hybrid in the head wins over a remote token beside it
     if _HYBRID_HEAD_RE.search(location):
-        return ("hybrid", "location", None)
+        return ("hybrid", "location")
     if _HYBRID_HEAD_RE.search(title):
-        return ("hybrid", "title", None)
+        return ("hybrid", "title")
     # (2) the location is the strongest text evidence and the only one carrying a boundary
     if _REMOTE_RE.search(location):
-        scope = vocab.remote_scope(location)
+        areas, regions = vocab.remote_scope(location)
+        scope = areas or regions  # did the location state a boundary of ANY kind?
         # A location that yields NO boundary is weak evidence: it is either a bare token
         # or an office name wearing a "(Remote)" suffix, which is the measured 2,887-row
         # "City (Remote)" shape whose body states a split week on 346 of them. A specific
@@ -260,11 +266,11 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
         # and stands -- "Remote - Brazil" is not demoted by the word hybrid appearing
         # somewhere in a long description.
         if scope is None and body and _HYBRID_RE.search(body):
-            return ("hybrid", "text", None)
-        return ("remote", "location", scope)
+            return ("hybrid", "text")
+        return ("remote", "location")
     # (3) title-only -- the sole evidence in existence on greenhouse and lever
     if _REMOTE_RE.search(title):
-        return ("remote", "title", None)
+        return ("remote", "title")
     if body:
         # LOWERED ONCE, then every body pattern runs against that copy behind a cheap
         # literal gate. Measured over 203 MB of real bodies (31,790 rows): ungated 16.02s,
@@ -283,14 +289,14 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
         # complete set of literals its pattern cannot match without.
         low = body.lower()
         if _has(low, _NEG_LITERALS) and _REMOTE_NEG_RE.search(low):
-            return (None, None, None)
+            return (None, None)
         # (4) before (5): a posting that states a split week is hybrid even when it also
         # asserts remoteness -- the specific schedule beats the general claim.
         if _has(low, _HYBRID_LITERALS) and _HYBRID_RE.search(low):
-            return ("hybrid", "text", None)
+            return ("hybrid", "text")
         if _has(low, _ROLE_LITERALS) and _ROLE_REMOTE_RE.search(low):
-            return ("remote", "text", None)
-    return (None, None, None)
+            return ("remote", "text")
+    return (None, None)
 
 
 def relevant(title: str, cfg=None) -> bool:
@@ -434,22 +440,39 @@ def _region_allowed(p: dict, cfg) -> bool:
         return True
     allowed = {str(x).upper() for x in allowed}
     # No hybrid/onsite bypass here: is_remote returns False for those before this is ever
-    # reached, so a branch for them would be unreachable and would only mislead a reader
-    # into thinking region filtering applies to a hybrid row.
-    scope = p.get("remote_region")
-    if scope is None:
+    # reached, so a branch for them would be unreachable and would only mislead a reader.
+    areas = p.get("remote_areas")
+    regions = p.get("remote_regions")
+
+    if areas is None and regions is None:
         return "UNSTATED" in allowed
-    scope = str(scope).upper()
-    if scope in allowed:
+    # `[]` is STATED UNBOUNDED -- the posting says anywhere -- so it satisfies any policy.
+    # This is why the field distinguishes it from None; collapsing the two would either
+    # drop the most permissive rows in the feed or admit the ones nobody classified.
+    if areas == []:
         return True
-    # A US STATE IS INSIDE THE US, which this did not know and which broke the flag's
-    # headline use case: "Atlanta, GA - Remote" scopes to US-GA, and a `["US","ANY"]`
-    # filter dropped it. 62 unambiguously state-scoped US remote rows vanished from a
-    # US-only search -- the new key losing exactly the jobs it exists to find.
-    if scope.startswith("US-") and allowed & _US_INCLUSIVE_SCOPES:
-        return True
-    # A US-inclusive multi-region scope satisfies a request for the US.
-    return bool(scope in _US_INCLUSIVE_SCOPES and allowed & _US_INCLUSIVE_SCOPES)
+
+    for a in areas or []:
+        a = str(a).upper()
+        if a in allowed:
+            return True
+        # A US STATE IS INSIDE THE US, and the default stays permissive. `remote_regions:
+        # [US]` is ambiguous between "the US market" and "somewhere I can sit from my own
+        # address", and the token cannot tell them apart -- so `US` accepts `US-TX`, and a
+        # user who means the strict reading names the subdivision. Making strict the
+        # mandatory reading would be a bigger behaviour change than this release should
+        # carry, on 14 measured rows.
+        if a.startswith("US-") and a.split("-")[0] in allowed:
+            return True
+    # A region is resolved HERE, not in the record: whether EMEA or AMERICAS includes the
+    # US is policy, and policy belongs to the caller who chose the filter. Storing it in
+    # the row was the original mistake.
+    return any(
+        str(r).upper() in allowed
+        or (str(r).upper() in _US_INCLUSIVE_SCOPES and allowed & _US_INCLUSIVE_SCOPES)
+        for r in regions or []
+    )
+
 
 
 def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:

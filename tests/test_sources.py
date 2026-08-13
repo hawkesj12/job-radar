@@ -2149,60 +2149,75 @@ def test_split_place_still_resolves_real_cities():
     assert split_place("Remote - US, France")["city"] == "Remote - US"
 
 
-def test_remote_scope_reads_the_boundary_not_the_arrangement():
-    """WHERE a remote worker may sit is a different fact from whether the role is remote,
-    and one boolean could not hold both -- which is how "Remote - Brazil" and "Remote"
-    became the same value in a shortlist. Measured on 7,712 remote-by-location rows:
-    3,127 name a country, 654 say anywhere, 338 a region/timezone, 609 nothing."""
+def test_remote_scope_returns_areas_and_regions_separately():
+    """Two fields because they are two kinds of value. `areas` are ISO codes; `regions` are
+    multi-country tokens that have no ISO code and whose membership only the employer can
+    settle. One column holding both is the failure this replaced."""
     from job_radar.vocab import remote_scope
 
-    assert remote_scope("Remote - Brazil") == "BR"
-    assert remote_scope("Philippines (Remote)") == "PH"
-    assert remote_scope("United States (Remote)") == "US"
-    assert remote_scope("Canada - Remote (ON, AB, BC, or NS Only)") == "CA"
-    assert remote_scope("Remote (North America)") == "NORTH AMERICA"
-    assert remote_scope("Remote - EMEA") == "EMEA"
-    # ISO 3166-2, never a bare state code: AR CA CO DE ID IL IN are each BOTH a US state
-    # and an ISO country, so "Los Angeles, CA" and "Canada" would otherwise be the same
-    # value in one column -- undecidable on 586 rows.
-    assert remote_scope("Remote - TX") == "US-TX"
-    assert remote_scope("Atlanta, GA - Remote") == "US-GA"
-    assert remote_scope("Los Angeles, CA - Remote") == "US-CA"
-    assert remote_scope("Remote - Canada") == "CA"
+    assert remote_scope("Remote - Brazil") == (["BR"], None)
+    assert remote_scope("Philippines (Remote)") == (["PH"], None)
+    assert remote_scope("Remote - EMEA") == (None, ["EMEA"])
+    # ALL matches, not the longest: this string names two countries and used to keep one.
+    assert remote_scope("Remote - US & Canada") == (["CA", "US"], None)
+    # BOTH fields when the string states both. An early return on regions discarded every
+    # country on 111 measured rows.
+    assert remote_scope("Americas (USA or Canada) (Remote)") == (["CA", "US"], ["AMERICAS"])
+    # ISO 3166-2 for a stated US state -- never a bare `TX`, because seven codes are both a
+    # US state and an ISO country and the column would be undecidable.
+    assert remote_scope("Remote - TX") == (["US-TX"], None)
 
 
-def test_remote_scope_does_not_read_south_america_as_the_us():
-    """`america` was a member of the US marker pattern, so "South America" answered US --
-    and because the non-US exclusion reads the same pattern as its veto, a posting naming
-    Argentina, Chile and South America survived a US-only search. 44 rows carry one of
-    these. They are now scoped as the regions they are."""
+def test_remote_scope_takes_only_STATED_boundaries():
+    """An office address is not an eligibility boundary. The rule applies to countries and
+    subdivisions alike -- scoping it to subdivisions made it a carve-out, and on 6,779
+    area-carrying rows `remote_areas` then meant nothing more than `country`."""
     from job_radar.vocab import remote_scope
 
-    assert remote_scope("Remote - South America") == "SOUTH AMERICA"
-    assert remote_scope("Remote - Latin America") == "LATIN AMERICA"
-    # ...while the real thing still resolves, including the spelled-out long form.
-    assert remote_scope("Remote - United States of America") == "US"
-    assert remote_scope("Remote (North America)") == "NORTH AMERICA"
-    # "us" is NOT a key in the country name map -- it is the English pronoun and far too
-    # collision-prone for prose -- so these hundreds of rows needed their own pattern.
-    for s in ("Remote - US", "Remote US", "US Remote", "US - Remote", "Remote, US"):
-        assert remote_scope(s) == "US", s
+    for office in (
+        "Munich, Germany",
+        "Sao Paulo, Brazil - Remote",
+        "Costa Mesa, California, United States",
+        "Atlanta, GA - Remote",
+        "New York (Remote)",
+    ):
+        assert remote_scope(office) == (None, None), office
 
 
-def test_remote_scope_never_reads_unstated_as_anywhere():
-    """Only 654 of 7,712 rows actually say anywhere. A bare "Remote" means "remote,
-    boundary unstated" -- usually within whatever country the employer can pay from.
-    Collapsing unstated into ANY is the blank-country-means-placeless bug again."""
+def test_remote_scope_does_not_read_new_mexico_as_mexico():
+    """The word-boundary lookbehind accepts a space, so `mexico` matched inside `New
+    Mexico` once ALL matches were collected -- 63 rows. `_longest_match` had hidden it."""
     from job_radar.vocab import remote_scope
 
-    assert remote_scope("Remote") is None
-    assert remote_scope("") is None
-    # A lone city stays unstated too: recognising it needs a gazetteer this package does
-    # not carry, and "US" inferred from a city name is a plausible-looking default.
-    assert remote_scope("New York (Remote)") is None
-    # ...while the real thing is ANY, and distinguishable.
-    assert remote_scope("Remote - Anywhere") == "ANY"
-    assert remote_scope("Worldwide") == "ANY"
+    areas, _ = remote_scope("Remote - New Mexico")
+    assert areas is None or "MX" not in areas
+    assert remote_scope("Remote - Mexico") == (["MX"], None)
+
+
+def test_remote_scope_distinguishes_unstated_from_stated_unbounded():
+    """Three states, and the middle one is why this is a list. `[]` is a posting that says
+    anywhere; `None` is one that says nothing. Collapsing them either drops the most
+    permissive rows in the feed or admits the ones nobody classified."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Remote") == (None, None)
+    assert remote_scope("") == (None, None)
+    assert remote_scope("Remote - Anywhere") == ([], None)
+    assert remote_scope("Worldwide") == ([], None)
+    # ...but a country named alongside "anywhere" wins: "anywhere IN Brazil" is bounded.
+    assert remote_scope("Remote - Anywhere in Brazil") == (["BR"], None)
+
+
+def test_no_region_token_is_a_valid_country_code():
+    """THE ANTI-MIXING INVARIANT, and it must be checked against the FULL ISO set. Checking
+    only this module's narrow 62-name map is how the first version passed vacuously while
+    shipping `TZ` as the timezone sentinel -- TZ is Tanzania."""
+    from job_radar.iso3166 import NAME_TO_ALPHA2
+    from job_radar.vocab import REMOTE_AREA_RE, REMOTE_REGION_TOKENS
+
+    assert not (REMOTE_REGION_TOKENS & frozenset(NAME_TO_ALPHA2.values()))
+    # and no region token is even SHAPED like an ISO area
+    assert not [t for t in REMOTE_REGION_TOKENS if REMOTE_AREA_RE.match(t)]
 
 
 def test_country_code_prefers_a_known_alias_over_the_two_letter_passthrough():
