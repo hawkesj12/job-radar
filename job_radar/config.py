@@ -337,14 +337,26 @@ class Config:
     #
     # None = no region filter (every remote row, the behaviour before this existed). A list
     # of alpha-2 codes filters on `remote_region`, and two sentinels join it: `ANY` for a
-    # posting that really says anywhere, and `UNSTATED` for one that names no boundary.
-    # Measured on a 31,790-row harvest of 7,712 remote-by-location rows:
-    #   ["US", "ANY"]               ~5,700 rows -- positively US-workable only
-    #   ["US", "ANY", "UNSTATED"]    ~6,324 rows -- plus the ones that never said
+    # posting that really says anywhere, and `UNSTATED` for one that names no boundary. A
+    # US state scope is ISO 3166-2 (`US-CA`) and counts as US, as do the US-inclusive
+    # regions AMERICAS and NORTH AMERICA.
+    #
+    # Measured over all 31,790 rows of one harvest, admitted by a remote_only run:
+    #   unset                        6,353 rows -- no boundary filter
+    #   ["US", "ANY"]                2,817 rows -- positively US-workable only
+    #   ["US", "ANY", "UNSTATED"]    6,331 rows -- plus the ones that never said
+    # The gap between the last two is large because a source that STATES a row is remote
+    # usually states no boundary, so most vendor-stated remote rows are UNSTATED rather
+    # than US -- the strict list drops far more than just the foreign ones.
+    #
+    # (An earlier version of this comment said ~5,700 and ~6,324. Those were pre-build
+    # estimates that were never re-measured, and they disagreed with the CHANGELOG's
+    # figures for the same setting -- the exact two-sources-of-truth drift this package
+    # keeps getting bitten by, in a comment about a feature that did not exist yet.)
+    #
     # UNSTATED is a separate opt-in because unknown is not "anywhere": only 30 rows
     # actually say anywhere, and a bare "Remote" usually means "within the country the
-    # employer can pay from". Admitting it is a deliberate, ~1%-contamination trade, not
-    # an assumption baked into the parser.
+    # employer can pay from".
     remote_regions: list | None = None
     max_age_days: int = 60
     stale_after_days: int = 30

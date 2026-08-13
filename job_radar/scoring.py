@@ -208,18 +208,31 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
 
     Precedence, and each step is a measurement rather than a preference:
 
-    1. An explicit hybrid word in the title/location beats a remote token in the SAME
-       string. 41 rows read "Palo Alto - Hybrid (Remote)", and the old order could not see
-       it because `_REMOTE_RE` matched and returned first.
-    2. The location says remote -> `location`, with the boundary parsed out.
-    3. The title says remote and the location is silent -> `title`. The 462.
-    4. The body ASSERTS the role is remote -> `text`.
-    5. The body states a split week -> `hybrid`/`text`. This deliberately overrides a
-       "(Remote)" suffix on an office name: "2 days in the office" is a specific factual
-       claim, a suffix on a city is not.
-    6. Nothing -> all `None`. Employer boilerplate ("we are a fully remote company",
-       ~93 rows) and a bare mention with no context (773 rows) land here on purpose --
-       neither says THIS role is remote, and unknown must not become True.
+    1. A negation in the location, then in the title -> `onsite`.
+    2. An explicit hybrid word in the location, then the title, beats a remote token in the
+       SAME string. 41 rows read "Palo Alto - Hybrid (Remote)", and the old order could not
+       see it because `_REMOTE_RE` matched and returned first.
+    3. The location says remote -> `location`, with the boundary parsed out. If that
+       boundary is None the location is weak evidence (a bare token, or an office name
+       wearing a "(Remote)" suffix), so a body stating a split week overrides it -- the
+       measured "City (Remote)" shape, contradicted by its own text on 1 row in 8.
+    4. The title says remote and the location is silent -> `title`. 507 rows end up here.
+    5. THE BODY, in this order: a split week -> `hybrid`, THEN an assertion that the role
+       is remote -> `remote`. Hybrid first is deliberate: a posting that claims remote AND
+       states a split week is hybrid, because the specific schedule beats the general
+       claim.
+    6. Nothing -> all `None`. Employer boilerplate ("we are a fully remote company") and a
+       bare mention with no claim attached land here on purpose -- neither says THIS role
+       is remote, and unknown must not become True.
+
+    Steps 1-2 test the two fields SEPARATELY rather than a concatenated head, because the
+    basis has to name the field the evidence came from; testing them together reported
+    "location" for 106 rows decided by the title.
+
+    (This list is numbered in EXECUTION order. An earlier version put the body's assertion
+    branch before its split-week branch, which is the reverse of what the code does, and a
+    reviewer found a body that returned step 5's answer while the docstring promised
+    step 4's.)
     """
     title, location = title or "", location or ""
     # The basis names the field the evidence CAME FROM, so these test the two fields
