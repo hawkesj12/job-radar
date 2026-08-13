@@ -45,6 +45,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A `remote_only` harvest returns a different set of rows. Read this before upgrading.**
+  The gate now reads the arrangement the engine derived, and a posting that states a split
+  week is `hybrid`, which is not remote. Measured on a 31,790-row harvest with the location
+  filter held constant: **808 rows that used to pass no longer do, and 292 now pass that
+  did not** — a net −516, roughly −6% of what a remote-only run surfaces.
+
+  The 808 are postings whose body states a split week ("2 days a week in the office") while
+  nothing in the title or location said remote; the old gate saw the word "remote" in that
+  same sentence and admitted them. The 292 are postings whose title or location says remote
+  where nothing previously typed them at all. Both directions are the intended effect and
+  neither is a silent reweighting — every row now carries a `remote_basis` saying how it
+  was decided, so a consumer that disagrees can filter on the basis rather than re-derive.
+
+  If you want the old recall back, `remote_only: false` plus your own filter on
+  `remote_type` reproduces it exactly and leaves the labels intact.
+
 - **Removed a latent import cycle: `config → vocab → dedup → config`.** `vocab` imports
   `dedup` for its title vocabularies and `dedup` imported `config` at module level, which
   worked only while nothing read an attribute during import — so it was fine until
