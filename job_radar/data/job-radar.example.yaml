@@ -64,6 +64,15 @@ filters:
   stale_after_days: 30     # penalize (don't drop) past this
   min_score: 22            # hide anything below this
   exclude_titles: [intern, recruiter, sales, marketing, support engineer]
+  # WHERE a remote worker may sit, as opposed to whether the role is remote at all.
+  # Unset = no boundary filter. "Remote - Brazil" and "Remote" are the same arrangement
+  # with different boundaries, and this is what tells them apart.
+  #   [US, ANY]             -> positively US-workable only
+  #   [US, ANY, UNSTATED]   -> plus postings that never named a boundary
+  # UNSTATED is a separate opt-in on purpose: a bare "Remote" usually means "within the
+  # country the employer can pay from", so unknown is NOT the same as anywhere.
+  # remote_regions: [US, ANY, UNSTATED]
+  #
   # exclude_locations REPLACES the default, it does not extend it -- so setting it here
   # was a DOWNGRADE: this key shipped with 6 names while the built-in default covers
   # every country the package knows plus the multi-country regions (66 tokens). Left

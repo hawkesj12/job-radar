@@ -635,6 +635,104 @@ def split_place(raw) -> dict:
     return empty
 
 
+# Multi-country regions and timezone bands a remote role can be bounded to. These are NOT
+# countries and have no alpha-2, so `remote_region` carries them verbatim-uppercased --
+# the same two-vocabularies-in-one-column shape as `state`, and named here rather than
+# silently decided. Measured: 338 of 7,712 remote-by-location rows are bounded this way.
+_REMOTE_REGIONS = (
+    "north america",
+    "latam",
+    "emea",
+    "apac",
+    "asia-pacific",
+    "asia pacific",
+    "americas",
+    "europe",
+    "european union",
+)
+
+# "Remote from anywhere" -- the ONLY thing that means unbounded. Measured on the same
+# harvest: just 654 of 7,712 rows (8.5%) actually say this. A bare "Remote" does NOT --
+# it means "remote, boundary unstated", usually within whatever country the employer can
+# legally pay from. Collapsing unstated into ANY is the same error as reading a blank
+# country as "placeless, therefore servable".
+_REMOTE_ANYWHERE = re.compile(
+    r"(?<![a-z])(?:anywhere|world[- ]?wide|globally|global|any location)(?![a-z])", re.I
+)
+
+_REMOTE_TZ = re.compile(r"(?<![a-z])(?:utc|gmt|est|pst|cst|cet)(?![a-z])", re.I)
+
+# The US, spelled every way a job feed spells it. Lives here so `remote_scope` and
+# `scoring._location_excluded` share ONE pattern instead of two that drift.
+#
+# `us` is the reason this exists rather than a _COUNTRY_CODES lookup: the name map carries
+# "united states", "usa" and "u.s." but NOT the bare "us", so hundreds of rows went
+# unrecognised -- "Remote - US" (227), "Remote US" (119), "Remote, US" (105), "US Remote"
+# (55), "US - Remote" (35). It is excluded from the map on purpose: as a country NAME, a
+# bare "us" is the English pronoun and far too collision-prone for prose matching.
+US_LOCATION_RE = re.compile(
+    r"(?<![a-z])(?:u\.?s\.?a?|us|united states(?: of america)?|america)(?![a-z])", re.I
+)
+
+# Strip the arrangement words so what remains can go through the ordinary place parser
+# rather than a second address grammar living here. "Atlanta, GA - Remote" -> "Atlanta,
+# GA", which split_place already reads as Georgia/US.
+_REMOTE_STRIP = re.compile(
+    r"(?<![a-z])(?:remote|hybrid|onsite|on-site|wfh|work from home|telecommute)(?![a-z])"
+    r"|\(\s*\)|\[\s*\]",
+    re.I,
+)
+
+
+def remote_scope(raw) -> str | None:
+    """A location string -> WHERE a remote worker may sit, or None when unstated.
+
+    The boundary is a different fact from the arrangement, and one boolean cannot hold
+    both. "Remote - Brazil" is genuinely remote AND unreachable for a US-only worker;
+    "Remote" is genuinely remote and says nothing about where. Measured on a 31,790-row
+    harvest, of 7,712 remote-by-location rows: 3,127 name a country, 654 say anywhere,
+    338 name a region or timezone band, 16 a US state, and 609 state nothing at all.
+    Every one of those boundaries was parsed and thrown away -- `remote_region` existed
+    and only Adzuna ever set it.
+
+    Returns an alpha-2 code, a region token, `ANY`, a US state code, or None. None means
+    UNSTATED and is deliberately distinguishable from `ANY`.
+    """
+    s = _flatten(raw).strip()
+    if not s:
+        return None
+    if _REMOTE_ANYWHERE.search(s):
+        return "ANY"
+    low = " ".join(s.lower().split())
+    # Longest first, so "european union" is not answered by "europe".
+    for region in sorted(_REMOTE_REGIONS, key=len, reverse=True):
+        if re.search(rf"(?<![a-z]){re.escape(region)}(?![a-z])", low):
+            return region.upper()
+    # A country ANYWHERE in the string, longest name first for the same reason.
+    for name in sorted(_COUNTRY_CODES, key=len, reverse=True):
+        if re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", low):
+            return _COUNTRY_CODES[name]
+    if US_LOCATION_RE.search(s):
+        return "US"
+    # Strip the arrangement words and let the ordinary place parser read the remainder.
+    bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-–—|/")
+    place = split_place(bare)
+    if place["state"]:
+        return place["state"]
+    if place["country"]:
+        return place["country"]
+    # A bare two-letter US state, which has no comma for split_place to work with.
+    if len(bare) == 2 and bare.upper() in _US_STATES:
+        return bare.upper()
+    if _REMOTE_TZ.search(s):
+        return "TZ"
+    # A lone city ("New York (Remote)") stays UNSTATED. Recognising it would need a
+    # gazetteer this package does not carry, and guessing "US" from a city name is the
+    # kind of plausible-looking default the record contract forbids. Measured, that is
+    # ~2,600 rows -- admitted by the default region policy, excluded by a strict one.
+    return None
+
+
 # The closed vocabulary for `remote_basis`. Kept here beside the other vocabularies
 # rather than as a comment, so a value outside it is a one-line diff to spot.
 #
@@ -647,7 +745,15 @@ def split_place(raw) -> dict:
 # collapsing the two is exactly what this field exists to prevent. A consumer
 # tightening a remote filter should be able to discount a board-scope inference
 # without discarding a vendor's explicit flag.
-REMOTE_BASES = frozenset({"stated", "board", "location", "text"})
+# `title` was added 2026-08-13 for the same reason `board` was: a real provenance the
+# vocabulary could not express. Measured on a 31,790-row harvest, 462 rows say remote in
+# the TITLE with the location silent -- 422 greenhouse, 39 lever, 1 ashby, which is to say
+# almost entirely the two big depth adapters that send no structured remote field, so the
+# title is the ONLY evidence in existence. `remote_posting` already read them and the gate
+# already admitted them; nothing recorded it, so they were byte-identical in the emitted
+# record to a row nobody classified. `location` would be a lie about where we read it and
+# `stated` implies a vendor field, so neither could stand in.
+REMOTE_BASES = frozenset({"stated", "board", "location", "title", "text"})
 
 # `seniority_basis` -- same discipline, unchanged vocabulary.
 SENIORITY_BASES = frozenset({"stated", "title"})

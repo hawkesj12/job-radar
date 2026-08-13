@@ -330,6 +330,21 @@ class Config:
     radius_miles: int = 0  # 0 = API default; >0 sets a search radius around `location`
     exclude_titles: list = field(default_factory=lambda: list(DEFAULT_TITLE_EXCLUDE))
     exclude_locations: list = field(default_factory=lambda: list(DEFAULT_NON_US))
+    # WHERE a remote worker may sit, as opposed to whether the role is remote at all --
+    # two different questions that `remote_only` alone was forced to answer with one bool.
+    # `Remote - Brazil` and `Remote` are the same arrangement with different boundaries.
+    #
+    # None = no region filter (every remote row, the behaviour before this existed). A list
+    # of alpha-2 codes filters on `remote_region`, and two sentinels join it: `ANY` for a
+    # posting that really says anywhere, and `UNSTATED` for one that names no boundary.
+    # Measured on a 31,790-row harvest of 7,712 remote-by-location rows:
+    #   ["US", "ANY"]               ~5,700 rows -- positively US-workable only
+    #   ["US", "ANY", "UNSTATED"]    ~6,324 rows -- plus the ones that never said
+    # UNSTATED is a separate opt-in because unknown is not "anywhere": only 654 rows
+    # actually say anywhere, and a bare "Remote" usually means "within the country the
+    # employer can pay from". Admitting it is a deliberate, ~1%-contamination trade, not
+    # an assumption baked into the parser.
+    remote_regions: list | None = None
     max_age_days: int = 60
     stale_after_days: int = 30
     min_score: int = 22
@@ -521,6 +536,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("min_score", "min_score"),
         ("exclude_titles", "exclude_titles"),
         ("exclude_locations", "exclude_locations"),
+        ("remote_regions", "remote_regions"),
     ]:
         take(filt, k, a)
     for k, a in [

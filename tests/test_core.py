@@ -251,6 +251,169 @@ def test_remote_posting_reads_body():
     assert not scoring.remote_posting("Engineer", "Austin, TX", "")
 
 
+def test_remote_signal_records_how_it_decided():
+    """`is_remote` called remote_posting, took a bare bool and wrote NOTHING -- so a row
+    admitted because its TITLE said remote was byte-identical in the record to a row
+    nobody classified. 462 title-decided rows and 1,642 body-decided ones in a 31,790-row
+    harvest, which is why a downstream consumer invented a basis outside REMOTE_BASES."""
+    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == (
+        "remote",
+        "title",
+        None,
+    )
+    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == (
+        "remote",
+        "location",
+        "BR",
+    )
+    assert scoring.remote_signal(
+        "AI Engineer", "Austin, TX", "This is a remote role."
+    ) == (
+        "remote",
+        "text",
+        None,
+    )
+    # every basis it can emit is inside the closed vocabulary
+    for t, loc, body in [
+        ("E - Remote", "Austin, TX", ""),
+        ("E", "Remote - US", ""),
+        ("E", "Austin, TX", "Telecommuting is available."),
+        ("E", "Austin, TX", "Our hybrid schedule is 3 days in the office."),
+    ]:
+        _, basis, _ = scoring.remote_signal(t, loc, body)
+        assert basis in vocab.REMOTE_BASES, (t, loc, basis)
+
+
+def test_remote_signal_does_not_read_employer_policy_as_a_remote_role():
+    """The measured false positive: 93 rows carry "we are a fully remote global company",
+    the identical sentence appearing on postings in Mexico, Brazil and Canada at once, and
+    773 more merely mention remoteness with no claim at all. Neither says THIS role is
+    remote, so both must come back unknown rather than True."""
+    assert scoring.remote_signal(
+        "Senior CX Engineer",
+        "MEXICO",
+        "We are a fully remote global company with employees in Canada and the US.",
+    ) == (None, None, None)
+    assert scoring.remote_signal(
+        "E", "Austin, TX", "We are a remote-first company."
+    ) == (
+        None,
+        None,
+        None,
+    )
+    assert scoring.remote_signal("E", "Austin, TX", "") == (None, None, None)
+
+
+def test_remote_signal_lets_hybrid_win():
+    """Two measured cases the old order structurally could not see, because _REMOTE_RE
+    matched the head and returned before anything else was read."""
+    # 41 rows: hybrid and remote in the SAME string.
+    assert scoring.remote_signal("E", "Palo Alto - Hybrid  (Remote)", "")[0] == "hybrid"
+    # 346 of 2,887 "City (Remote)" rows state a split week in the body, so the location
+    # tag is contradicted on ~1 row in 8. A specific factual claim beats a suffix.
+    assert scoring.remote_signal(
+        "E", "New York (Remote)", "Hybrid: 2 days a week in the office."
+    ) == ("hybrid", "text", None)
+    # ...but a location that names a real BOUNDARY is a genuine eligibility statement and
+    # is not demoted by the word hybrid appearing somewhere in a long description.
+    assert scoring.remote_signal(
+        "E", "Remote - Brazil", "We also run a hybrid schedule at our offices."
+    ) == ("remote", "location", "BR")
+
+
+def test_hybrid_is_not_matched_as_a_bare_word():
+    """`\\bhybrid\\b` matched 5,491 bodies and the third-largest group was "hybrid
+    vehicles" -- automotive JDs, not work arrangements. Tightening to work-context nouns
+    took it to 2,995 with zero vehicle/cloud matches."""
+    assert scoring.remote_signal(
+        "Engineer", "Austin, TX", "You will design hybrid vehicles and battery systems."
+    ) == (None, None, None)
+    assert scoring.remote_signal(
+        "Engineer", "Austin, TX", "Experience with hybrid cloud architecture required."
+    ) == (None, None, None)
+    # the real thing, including the label form that ends a line with no following noun
+    assert (
+        scoring.remote_signal("E", "Austin, TX", "Our hybrid policy: 3 days in.")[0]
+        == "hybrid"
+    )
+    assert (
+        scoring.remote_signal("E", "Austin, TX", "Work arrangement: Hybrid")[0]
+        == "hybrid"
+    )
+
+
+def test_coerce_records_the_remote_decision_without_overwriting_a_source():
+    """The fallback may only ADD, the same discipline as the geography fallback."""
+    p = engine._coerce(
+        {
+            "title": "AI Engineer - Remote",
+            "company": "A",
+            "url": "https://x/1",
+            "source": "greenhouse",
+            "location": "Austin, TX",
+        }
+    )
+    assert (p["remote_type"], p["remote_basis"]) == ("remote", "title")
+    assert p["remote"] is True, "the derived bool must reflect a newly-derived type"
+    # a source that sent its own structured signal keeps it
+    kept = engine._coerce(
+        {
+            "title": "AI Engineer - Remote",
+            "company": "A",
+            "url": "https://x/2",
+            "source": "ashby",
+            "location": "Austin, TX",
+            "remote_type": "hybrid",
+            "remote_basis": "stated",
+        }
+    )
+    assert (kept["remote_type"], kept["remote_basis"]) == ("hybrid", "stated")
+
+
+def test_remote_region_filter_separates_boundary_from_arrangement():
+    """ "Is this remote" and "may I sit where it is remote from" are different questions.
+    Measured on a 31,790-row harvest: no filter 7,442 rows; ["US","ANY"] 4,247;
+    ["US","ANY","UNSTATED"] 7,242."""
+
+    def row(loc):
+        return engine._coerce(
+            {
+                "title": "AI Engineer",
+                "company": "A",
+                "url": "https://x/" + loc,
+                "source": "greenhouse",
+                "location": loc,
+            }
+        )
+
+    us, br, anywhere, bare = (
+        row("United States (Remote)"),
+        row("Remote - Brazil"),
+        row("Remote - Anywhere"),
+        row("Remote"),
+    )
+    # unset = no region filter at all, exactly as before this existed
+    c = config.Config(remote_only=True, remote_regions=None, exclude_locations=[])
+    assert all(scoring.is_remote(p, c) for p in (us, br, anywhere, bare))
+    # US-only: Brazil goes, and an UNSTATED boundary is NOT admitted by default
+    c = config.Config(
+        remote_only=True, remote_regions=["US", "ANY"], exclude_locations=[]
+    )
+    assert scoring.is_remote(us, c) is True
+    assert scoring.is_remote(anywhere, c) is True
+    assert scoring.is_remote(br, c) is False
+    assert scoring.is_remote(bare, c) is False
+    # ...admitted only on an explicit opt-in, because unknown is not "anywhere"
+    c = config.Config(
+        remote_only=True, remote_regions=["US", "ANY", "UNSTATED"], exclude_locations=[]
+    )
+    assert scoring.is_remote(bare, c) is True
+    assert scoring.is_remote(br, c) is False
+    # a US-INCLUSIVE multi-region scope satisfies a US request -- "Americas" contains the US
+    c = config.Config(remote_only=True, remote_regions=["US"], exclude_locations=[])
+    assert scoring.is_remote(row("Remote (North America)"), c) is True
+
+
 def test_is_remote_gate_uses_body():
     # a body-only remote signal now passes the remote_only gate (recovers Adzuna/
     # USAJOBS roles that carry no remote flag in title/location)

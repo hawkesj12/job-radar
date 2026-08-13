@@ -6,6 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The remote gate now RECORDS what it decided.** It called `remote_posting()`, took a
+  bare `True`, and wrote nothing — so a row admitted because its title said "Remote" came
+  out with `remote_type`, `remote_basis` and `remote_region` all `None`, byte-identical in
+  the record to a row nobody classified. The 0.7.0 rule that every derived field carries a
+  basis was broken by the gate itself, which is why a downstream consumer invented
+  `remote_basis='derived'`, a value outside `REMOTE_BASES`. On a 31,790-row harvest the new
+  `scoring.remote_signal()` labels **8,342 remote** (7,915 `location`, 449 `title`, 3,068
+  `text` across all types) and **3,089 hybrid**, where the fallback previously recorded
+  nothing at all. `remote_posting()` is unchanged — it is released public API — so this is
+  a typed sibling, not a rewrite.
+
+- **`title` joins `REMOTE_BASES`.** 462 rows say remote in the title with the location
+  silent — 422 Greenhouse, 39 Lever, 1 Ashby, which is to say almost entirely the two big
+  depth adapters that send no structured remote field, so the title is the only evidence in
+  existence. `location` would have been a lie about where we read it and `stated` implies a
+  vendor field, so neither could stand in.
+
+- **`remote_region` is parsed for every source, and `remote_regions` filters on it.**
+  The boundary was being parsed and discarded: the field existed and only Adzuna ever set
+  it. `vocab.remote_scope()` now reads an alpha-2 code, a US state, a multi-country region
+  (`EMEA`, `NORTH AMERICA`), or `ANY`, falling back to the row's own `country` —
+  **6,115 of 8,342 remote rows now carry a boundary.** The new `remote_regions` config key
+  filters on it: unset 7,375 rows, `[US, ANY]` 4,216, `[US, ANY, UNSTATED]` 7,177.
+  `remote_only` stays a bool; this is a separate key, because changing a released field's
+  type would break consumers.
+
+  **`None` means UNSTATED and is deliberately not `ANY`.** Only 654 of 7,712
+  remote-by-location rows actually say anywhere; a bare `Remote` means "remote, boundary
+  unstated", usually within whatever country the employer can legally pay from. Admitting
+  those is an explicit opt-in rather than an assumption baked into the parser — the same
+  mistake as reading a blank country as "placeless, therefore servable". A lone city
+  (`New York (Remote)`) also stays unstated: recognising it needs a gazetteer this package
+  does not carry, and inferring `US` from a city name is exactly the plausible-looking
+  default the record contract forbids.
+
 ### Changed
 
 - **Removed a latent import cycle: `config → vocab → dedup → config`.** `vocab` imports
@@ -17,6 +54,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   importable first. Caught by importing them in each order, not by reasoning about it.
 
 ### Fixed
+
+- **A posting stating a split week was reported remote.** `_REMOTE_RE` matched the title or
+  location and returned before anything else could be read, so hybrid could not win even
+  when the posting said so plainly. Two measured cases: 41 rows read
+  `"Palo Alto - Hybrid (Remote)"`, and 346 of 2,887 `"City (Remote)"` rows state a split
+  week in the body — the location tag contradicted by the posting's own text on roughly 1
+  row in 8. A body claim now overrides a `(Remote)` suffix **only** when the location names
+  no real boundary, so `Remote - Brazil` is not demoted by the word hybrid appearing
+  somewhere in a long description.
+
+  `hybrid` is matched with different sensitivity per field, which is not a compromise but
+  the point: bare in a title or location, where the word can only mean the work
+  arrangement, and requiring a work-context noun in a body, where it usually does not. A
+  bare `\bhybrid\b` matched 5,491 bodies and the third-largest group was **"hybrid
+  vehicles"** — automotive job descriptions — with "hybrid environment" (as often hybrid
+  _cloud_ as hybrid work) close behind. Tightening took it to 2,995 with zero
+  vehicle/cloud matches. The head case regressed when both shared one tightened pattern,
+  and a test caught it rather than a reading.
 
 - **The non-US location filter matched bare substrings, so it dropped US jobs.** `"india"`
   matched india**na** and `"apac"` matched c**apac**ity — measured on a 31,790-row harvest,

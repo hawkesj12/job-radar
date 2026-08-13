@@ -2149,6 +2149,43 @@ def test_split_place_still_resolves_real_cities():
     assert split_place("Remote - US, France")["city"] == "Remote - US"
 
 
+def test_remote_scope_reads_the_boundary_not_the_arrangement():
+    """WHERE a remote worker may sit is a different fact from whether the role is remote,
+    and one boolean could not hold both -- which is how "Remote - Brazil" and "Remote"
+    became the same value in a shortlist. Measured on 7,712 remote-by-location rows:
+    3,127 name a country, 654 say anywhere, 338 a region/timezone, 609 nothing."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Remote - Brazil") == "BR"
+    assert remote_scope("Philippines (Remote)") == "PH"
+    assert remote_scope("United States (Remote)") == "US"
+    assert remote_scope("Canada - Remote (ON, AB, BC, or NS Only)") == "CA"
+    assert remote_scope("Remote (North America)") == "NORTH AMERICA"
+    assert remote_scope("Remote - EMEA") == "EMEA"
+    assert remote_scope("Remote - TX") == "TX"
+    assert remote_scope("Atlanta, GA - Remote") == "GA"
+    # "us" is NOT a key in the country name map -- it is the English pronoun and far too
+    # collision-prone for prose -- so these hundreds of rows needed their own pattern.
+    for s in ("Remote - US", "Remote US", "US Remote", "US - Remote", "Remote, US"):
+        assert remote_scope(s) == "US", s
+
+
+def test_remote_scope_never_reads_unstated_as_anywhere():
+    """Only 654 of 7,712 rows actually say anywhere. A bare "Remote" means "remote,
+    boundary unstated" -- usually within whatever country the employer can pay from.
+    Collapsing unstated into ANY is the blank-country-means-placeless bug again."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Remote") is None
+    assert remote_scope("") is None
+    # A lone city stays unstated too: recognising it needs a gazetteer this package does
+    # not carry, and "US" inferred from a city name is a plausible-looking default.
+    assert remote_scope("New York (Remote)") is None
+    # ...while the real thing is ANY, and distinguishable.
+    assert remote_scope("Remote - Anywhere") == "ANY"
+    assert remote_scope("Worldwide") == "ANY"
+
+
 def test_country_code_prefers_a_known_alias_over_the_two_letter_passthrough():
     """ "UK" is not an ISO alpha-2 code -- GB is -- and the name map has said `uk -> GB`
     all along, but the unvalidated two-letter passthrough answered first. So a column the

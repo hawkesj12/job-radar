@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-from . import config
+from . import config, vocab
 from .util import has
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -56,13 +56,24 @@ def _present(text: str, tokset: set, fw: dict, singles, multis) -> list:
 # schedules (614 rows -- "3 days of remote work each week" matches the `remote work`
 # branch, though job-radar already has a `hybrid` state for exactly that).
 #
-# Not yet fixed, deliberately. Tightening the alternation has a real false-negative
-# cost -- "this position allows remote work from anywhere in the US" is genuinely
-# remote and dies with the `work` token -- and that delta has to be measured over a
-# full harvest before shipping, the way every other rule in this file was. Note the
-# blast radius while it stands: is_remote() below passes `text` into this predicate
-# and remote_only defaults True, so these false positives enter our own shortlists,
-# not just a consumer's tags -- the same leak sources.py records for HN.
+# This alternation is deliberately UNCHANGED, and the fix went somewhere better. Tightening
+# it has a real false-negative cost -- "this position allows remote work from anywhere in
+# the US" is genuinely remote and dies with the `work` token -- so instead of making a bool
+# stricter, `remote_signal()` below answers the same question with a TYPE and a BASIS:
+# employer boilerplate and bare mentions become `None` (unknown) rather than True, and a
+# split week becomes `hybrid`, which is a state this package already has. That demotes weak
+# evidence without discarding it, which a boolean cannot do at any threshold.
+#
+# WHAT IS STILL TRUE, stated exactly: this alternation continues to govern ADMISSION. The
+# engine calls _coerce (which records remote_signal's verdict) before is_remote, so a typed
+# row is gated on its type -- but when remote_signal returns unknown, is_remote falls
+# through to remote_posting, and employer boilerplate still passes. Such a row is admitted
+# while recorded as unclassified, which is incoherent but is the LESS wrong of the two
+# options available today: making unknown mean "not remote" would drop the 773 rows that
+# merely mention remoteness with no claim, and some of those are genuinely remote. That
+# recall cost has never been measured, and this file's rule is that a threshold ships with
+# a row count. The gain here is that the ambiguity is now VISIBLE in the record instead of
+# being laundered into `remote: True`.
 _REMOTE_RE = re.compile(r"remote|anywhere|work from home|\bwfh\b", re.I)
 _REMOTE_BODY_RE = re.compile(
     r"\b(?:fully|100%|completely|permanently)\s+remote\b"
@@ -102,6 +113,113 @@ def remote_posting(title: str, location: str, body: str = "") -> bool:
     return False
 
 
+# Body language that asserts THIS ROLE is remote, as opposed to mentioning remoteness.
+# Measured over the 1,642 rows where the body actually decides: only 271 make a claim this
+# shape. That is the whole gap between `remote_posting` (does the word appear) and
+# `remote_signal` (did the posting say so).
+_ROLE_REMOTE_RE = re.compile(
+    r"\b(?:this|the)\s+(?:position|role|job)\s+(?:is|will\s+be)\s+(?:fully\s+)?remote\b"
+    r"|\bthis\s+is\s+a\s+(?:fully\s+)?remote\s+(?:position|role|job|opportunity)\b"
+    r"|\bwork\s+from\s+anywhere\b|\bfrom\s+anywhere\s+in\b"
+    r"|\byou\s+may\s+work\s+remotely\b|\bmay\s+work\s+remotely\s+from\b"
+    r"|\b(?:100%|fully)\s+remote\s+(?:position|role|job|opportunity)\b"
+    r"|\btelecommut\w*|\btelework\w*",
+    re.I,
+)
+
+# A split week. Measured: 505 of the 1,642 body-decided rows say something this shape, and
+# 346 of those sit on a row whose LOCATION carries a "(Remote)" tag -- so the tag is
+# contradicted by the posting's own text on roughly 1 row in 8.
+# In a TITLE or LOCATION, a bare `hybrid` IS the work arrangement -- that is what those
+# fields are for, and "Palo Alto - Hybrid (Remote)" is the measured 41-row shape. The
+# body-side pattern below has to be far stricter, so these are deliberately two patterns
+# rather than one shared compromise: a single tightened pattern misses the head case
+# (caught by a test, not by reading), and a single loose one calls a hybrid-vehicles JD an
+# office job. Sensitivity should follow the field, because the fields carry different prose.
+_HYBRID_HEAD_RE = re.compile(r"\bhybrid\b", re.I)
+
+# `hybrid` is NOT matched bare here. It is an ordinary technical adjective and the corpus proves
+# it: of 5,491 bodies a bare \bhybrid\b matched, the third-largest group was "hybrid
+# vehicles" (194 rows of automotive JDs), with "hybrid environment" close behind, which is
+# as often hybrid CLOUD as hybrid work. So the word must sit next to a work-arrangement
+# noun, on either side -- "hybrid work model", "hybrid schedule", "hybrid role", and the
+# label-style "Work arrangement: Hybrid" that ends a line with no following noun at all.
+# `environment` is deliberately absent: under-labelling leaves the row unknown, while
+# over-labelling calls a hybrid-cloud engineer's remote job an office job.
+_HYBRID_WORDS = (
+    r"work(?:ing|place|week)?|schedule|model|policy|role|position|job|setup|arrangement"
+)
+_HYBRID_RE = re.compile(
+    rf"\bhybrid\s+(?:{_HYBRID_WORDS})\b"
+    rf"|\b(?:{_HYBRID_WORDS}|type|location)\s*[:=-]?\s*hybrid\b"
+    r"|\b\d+\s*(?:-\s*\d+\s*)?days?\s+(?:a|per)?\s*week\s+(?:in|at|from)\s+(?:the\s+)?office\b"
+    r"|\b\d+\s*days?\s+in\s+(?:the\s+)?office\b"
+    r"|\bdays?\s+in\s+(?:the\s+)?office\b"
+    r"|\bin[- ]office\s+\d+\s*days?\b",
+    re.I,
+)
+
+
+def remote_signal(title: str, location: str, body: str = "") -> tuple:
+    """A posting's work arrangement WITH its provenance and boundary.
+
+    `(remote_type, remote_basis, remote_region)`, each `None` when nothing was said.
+    The typed sibling of `remote_posting`, which stays a bare bool forever because it is
+    released public API that jobfitr imports.
+
+    Why this exists: `is_remote` called `remote_posting`, got a bool, and wrote NOTHING.
+    So a row admitted because its title said "Remote" was byte-identical in the emitted
+    record to a row nobody classified -- the 0.7.0 contract's own rule that every derived
+    field carries a basis, broken by the gate itself. Measured on a 31,790-row harvest:
+    462 rows are decided by the title alone and 1,642 by the body alone, and all 2,104
+    came out as `remote_type=None, remote_basis=None`.
+
+    Precedence, and each step is a measurement rather than a preference:
+
+    1. An explicit hybrid word in the title/location beats a remote token in the SAME
+       string. 41 rows read "Palo Alto - Hybrid (Remote)", and the old order could not see
+       it because `_REMOTE_RE` matched and returned first.
+    2. The location says remote -> `location`, with the boundary parsed out.
+    3. The title says remote and the location is silent -> `title`. The 462.
+    4. The body ASSERTS the role is remote -> `text`.
+    5. The body states a split week -> `hybrid`/`text`. This deliberately overrides a
+       "(Remote)" suffix on an office name: "2 days in the office" is a specific factual
+       claim, a suffix on a city is not.
+    6. Nothing -> all `None`. Employer boilerplate ("we are a fully remote company",
+       ~93 rows) and a bare mention with no context (773 rows) land here on purpose --
+       neither says THIS role is remote, and unknown must not become True.
+    """
+    head = f"{title} {location}"
+    if _REMOTE_NEG_RE.search(head):
+        return ("onsite", "location", None)
+    # (1) hybrid in the head wins over a remote token beside it
+    if _HYBRID_HEAD_RE.search(head):
+        return ("hybrid", "location", None)
+    # (2) the location is the strongest text evidence and the only one carrying a boundary
+    if _REMOTE_RE.search(location or ""):
+        scope = vocab.remote_scope(location)
+        # A location that yields NO boundary is weak evidence: it is either a bare token
+        # or an office name wearing a "(Remote)" suffix, which is the measured 2,887-row
+        # "City (Remote)" shape whose body states a split week on 346 of them. A specific
+        # factual claim in the prose ("2 days in the office") beats a suffix on a city.
+        # A location that DOES name a country or region is a real eligibility statement
+        # and stands -- "Remote - Brazil" is not demoted by the word hybrid appearing
+        # somewhere in a long description.
+        if scope is None and body and _HYBRID_RE.search(body):
+            return ("hybrid", "text", None)
+        return ("remote", "location", scope)
+    # (3) title-only -- the sole evidence in existence on greenhouse and lever
+    if _REMOTE_RE.search(title or ""):
+        return ("remote", "title", None)
+    if body and not _REMOTE_NEG_RE.search(body):
+        # (5) before (4): a posting that asserts remote AND states a split week is hybrid.
+        if _HYBRID_RE.search(body):
+            return ("hybrid", "text", None)
+        if _ROLE_REMOTE_RE.search(body):
+            return ("remote", "text", None)
+    return (None, None, None)
+
+
 def relevant(title: str, cfg=None) -> bool:
     cfg = cfg or config.active()
     t = title.lower()
@@ -136,12 +254,11 @@ def _excluded_re(tokens: tuple) -> re.Pattern | None:
     return re.compile(rf"(?<![a-z])(?:{alts})(?![a-z])")
 
 
-# A US marker in the LOCATION, which vetoes a non-US exclusion below. Deliberately not
-# matched against the title: eligibility is a fact about the place, and titles carry "US"
-# incidentally ("US client", "US hours"), which would rescue genuinely foreign rows.
-_US_LOCATION_RE = re.compile(
-    r"(?<![a-z])(?:u\.?s\.?a?|us|united states(?: of america)?|america)(?![a-z])", re.I
-)
+# The US-marker pattern comes from vocab, which also uses it in remote_scope -- one
+# spelling table, not two. It is matched against the LOCATION only, never the title:
+# eligibility is a fact about the place, and titles carry "US" incidentally ("US client",
+# "US hours"), which would rescue genuinely foreign rows.
+_US_LOCATION_RE = vocab.US_LOCATION_RE
 
 
 def _location_excluded(location: str, blob: str, tokens: tuple) -> bool:
@@ -200,7 +317,44 @@ def is_remote(p: dict, cfg=None) -> bool:
         return False
     loc = p.get("location", "") or ""
     b = f"{p.get('title', '')} {loc}".lower()
-    return not _location_excluded(loc, b, tuple(cfg.exclude_locations))
+    if _location_excluded(loc, b, tuple(cfg.exclude_locations)):
+        return False
+    return _region_allowed(p, cfg)
+
+
+# Region scopes that INCLUDE the US, so a US-only searcher keeps them. "Americas" and
+# "North America" both contain the United States -- excluding them would drop rows the
+# user can take, the same mistake the US veto in _location_excluded fixes.
+_US_INCLUSIVE_SCOPES = frozenset({"US", "ANY", "AMERICAS", "NORTH AMERICA"})
+
+
+def _region_allowed(p: dict, cfg) -> bool:
+    """Does this posting's remote BOUNDARY satisfy cfg.remote_regions?
+
+    Separate from the remote gate above on purpose: "is this remote" and "may I sit where
+    it is remote from" are different questions, and collapsing them is why a bare `Remote`
+    and a `Remote - Brazil` were indistinguishable in a shortlist.
+
+    `None` (the default) means no region filter at all -- every remote row passes, exactly
+    as before this existed. An UNSTATED boundary is admitted only when the caller lists
+    `UNSTATED`, because unknown is not "anywhere".
+    """
+    allowed = cfg.remote_regions
+    if not allowed:
+        return True
+    allowed = {str(x).upper() for x in allowed}
+    # Onsite/hybrid rows are the remote gate's business, not the boundary's; if they got
+    # this far the caller is not filtering on remoteness and a region test is meaningless.
+    if p.get("remote_type") not in (None, "remote"):
+        return True
+    scope = p.get("remote_region")
+    if scope is None:
+        return "UNSTATED" in allowed
+    scope = str(scope).upper()
+    if scope in allowed:
+        return True
+    # A US-inclusive multi-region scope satisfies a request for the US.
+    return bool(scope in _US_INCLUSIVE_SCOPES and allowed & _US_INCLUSIVE_SCOPES)
 
 
 def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:
