@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-14
+
 ### Fixed — found by probing live vendor endpoints
 
 - **`"Worldwide"` was recorded as "we don't know".** himalayas declares an unrestricted
