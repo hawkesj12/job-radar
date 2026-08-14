@@ -265,7 +265,7 @@ def _coerce(p: dict) -> dict:
     # boundary field exists to carry, so losing them would be the worst possible trade.
     if p.get("city") is None and p.get("state") is None and p.get("country") is None:
         first = (p.get("location") or "").split(";")[0]
-        bare = " ".join(vocab._REMOTE_STRIP.sub(" ", first).split()).strip(" ,-–—|/")
+        bare = vocab.strip_arrangement(first)
         place = vocab.split_place(bare)
         if not any(place.values()):
             place = vocab.split_place(first)

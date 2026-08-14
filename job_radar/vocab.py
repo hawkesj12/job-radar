@@ -508,6 +508,23 @@ _PLACELESS = _QUAL_NOISE | {
 _PLACELESS_INTENSIFIERS = ("fully", "100%", "completely", "permanently", "partially")
 
 
+def _head_is_a_list(head: str) -> bool:
+    """True when a location head enumerates COUNTRIES rather than naming a city.
+
+    "Australia, Canada, Germany, United Kingdom" is a list of eligible countries that
+    `rpartition` leaves in the head slot, and writing it as `city` is the permanently-wrong
+    row this function's own docstring refuses to create. 74 measured rows.
+
+    The test is TWO OR MORE distinct country names, deliberately -- not "contains a comma".
+    A comma test would null "Austin, Texas" and "New York, New York", which are ordinary
+    city+state heads and account for most of the 6,644 separator-bearing values in a
+    31,790-row harvest. Refusing those would trade 74 wrong values for thousands of
+    right ones, which is the wrong direction and is why this is measured rather than
+    reasoned.
+    """
+    return len({m.group(0) for m in _COUNTRY_NAME_RE.finditer(head.lower())}) >= 2
+
+
 def _placeless_head(head: str) -> bool:
     """True when a location string's head names an arrangement instead of a place.
 
@@ -608,7 +625,7 @@ def split_place(raw) -> dict:
             # foreign-rows-made-American regression this branch was written to
             # prevent, so the country decided here is final.
             return {
-                "city": None if _placeless_head(city) else city,
+                "city": None if _placeless_head(city) or _head_is_a_list(city) else city,
                 "state": state,
                 "country": country,
             }
@@ -616,7 +633,7 @@ def split_place(raw) -> dict:
         # The state is real whether or not the head names a city, so a placeless
         # head loses only the city -- "Remote, TX" is a Texas row with no city.
         return {
-            "city": None if _placeless_head(head) else head,
+            "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
             "state": tail.upper(),
             "country": "US",
         }
@@ -630,7 +647,7 @@ def split_place(raw) -> dict:
         # Same as above: the country the string names survives, the invented city
         # does not -- "Remote, France" is a French row with no city.
         return {
-            "city": None if _placeless_head(head) else head,
+            "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
             "state": None,
             "country": code,
         }
@@ -737,6 +754,28 @@ _REMOTE_STRIP = re.compile(
 )
 
 
+def strip_arrangement(s: str) -> str:
+    """Remove the work-arrangement words and any brackets they leave behind.
+
+    RUNS TO A FIXED POINT, and a single pass is not enough: `re.sub` scans once, so the
+    `\\(\\s*\\)` alternative never revisits parentheses that the SAME pass just emptied.
+    `(Hybrid) Mansfield, MA` became `( ) Mansfield, MA`, and `split_place` then read the
+    city as `( ) Mansfield` -- a plausible-looking wrong value written into a data field,
+    which is the exact class of error the record contract exists to prevent. One row in a
+    31,790-row harvest, but that harvest is 78% one source and the shape is common
+    elsewhere; the cost of being wrong here is a permanently bad city.
+
+    Bounded rather than `while True`: this converges in two passes on every real input, and
+    an unbounded loop over user-supplied text is a hang waiting for a pathological string.
+    """
+    for _ in range(4):
+        out = _REMOTE_STRIP.sub(" ", s)
+        if out == s:
+            break
+        s = out
+    return " ".join(s.split()).strip(" ,-–—|/")
+
+
 def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     """A location string -> `(areas, regions)`, the STATED remote eligibility boundary.
 
@@ -782,15 +821,35 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     #
     # Regions are NOT suppressed by a city, because a region name is never an office
     # address: "Bengaluru, Karnataka, India, APAC" states APAC while sitting on a city.
-    bare = " ".join(_REMOTE_STRIP.sub(" ", s).split()).strip(" ,-\u2013\u2014|/")
+    bare = strip_arrangement(s)
     place = split_place(bare)
     has_city = bool(place["city"])
 
+    # Scanned on the WHOLE string, regardless of has_city, because it answers a second
+    # question: does this string name ANY place at all? That is what guards the unbounded
+    # fallback below, and gating it on `areas` alone was wrong -- `areas` is also empty when
+    # the country pass was SKIPPED by has_city, so "Anywhere in France, Belgium, Spain"
+    # (11 rows) and "Any location, United States" (12) claimed stated-worldwide while
+    # naming three countries and one. Asserting a posting is open to the world when it
+    # named a bound is the worst direction this field can be wrong in.
+    named = {_COUNTRY_CODES[m.group(0)] for m in _COUNTRY_NAME_RE.finditer(low)}
+    if US_LOCATION_RE.search(s):
+        named.add("US")
+    # Spelled-out US state names GUARD the unbounded fallback but never become an area on
+    # their own. A bare state name cannot be told from an office city -- "Anywhere in Texas"
+    # states a bound while "New York (Remote)" is where the desk is, and both are just a
+    # state name to a scanner. So a state name is enough to refuse "worldwide" and not
+    # enough to assert a boundary: "Anywhere in Texas" comes out unstated (1 measured row),
+    # which is the honest answer when the alternative is calling New York a restriction.
+    guards = named | {
+        _STATE_NAMES[n]
+        for n in _STATE_NAMES
+        if re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", low)
+    }
+
     areas: set[str] = set()
     if not has_city:
-        areas = {_COUNTRY_CODES[m.group(0)] for m in _COUNTRY_NAME_RE.finditer(low)}
-        if US_LOCATION_RE.search(s):
-            areas.add("US")
+        areas = set(named)
         # A bare US state with no city -- "Remote - TX". `US-TX`, not `TX`: seven codes are
         # both a US state and an ISO country (AR CA CO DE ID IL IN), so a bare code left the
         # column undecidable between California and Canada.
@@ -805,8 +864,11 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     if areas or regions:
         return (sorted(areas) if areas else None, regions or None)
 
-    # AFTER the country pass: "Remote - Anywhere in Brazil" means anywhere WITHIN Brazil,
-    # so answering unbounded there would lose the boundary that matters.
+    # "Anywhere" is only UNBOUNDED when the string names no place at all. "Remote - Anywhere
+    # in Brazil" means anywhere WITHIN Brazil; a posting that names a place and also says
+    # anywhere is bounded, and we report unstated rather than inventing which bound applies.
+    if guards:
+        return (None, None)
     if _REMOTE_ANYWHERE.search(s):
         return ([], None)
 

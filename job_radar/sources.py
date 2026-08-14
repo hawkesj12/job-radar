@@ -596,7 +596,18 @@ def stated_scope(values, raw: str | None = None) -> dict:
     if values is None:
         return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
     if isinstance(values, str):
-        values = [v.strip() for v in values.split(",")]
+        # A BLANK string is not an empty array. himalayas' `[]` means "open worldwide";
+        # remotive and jobicy send a plain string, and "" from them means the vendor said
+        # nothing. Collapsing the two would assert a posting is open to the world because a
+        # field happened to be blank.
+        if not values.strip():
+            return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
+        # WHOLE-STRING FIRST, then split. 15 ISO names contain a comma, and one of them
+        # re-splits into a different real country: "Congo, The Democratic Republic of the"
+        # (CD) becomes "Congo" (CG, Republic of the Congo) plus a fragment. That is a
+        # well-formed code naming the wrong country, which is worse than no code.
+        whole = iso3166.alpha2(values)
+        values = [values] if whole else [v.strip() for v in values.split(",")]
     names = [v for v in values if isinstance(v, str) and v.strip()]
 
     areas, regions, unmapped = set(), set(), False

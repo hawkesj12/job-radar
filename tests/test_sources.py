@@ -2202,6 +2202,65 @@ def test_remote_scope_returns_areas_and_regions_separately():
     assert remote_scope("Remote - TX") == (["US-TX"], None)
 
 
+def test_anywhere_is_unbounded_only_when_no_place_is_named():
+    """A posting that names a bound and also says "anywhere" is BOUNDED. Gating the
+    unbounded fallback on `areas` being empty was wrong, because areas is also empty when
+    the country pass was skipped by the city test -- so "Anywhere in France, Belgium, Spain"
+    (11 rows) and "Any location, United States" (12) claimed stated-worldwide while naming
+    three countries and one. Asserting a posting is open to the world when it named a bound
+    is the worst direction this field can be wrong in."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Anywhere in France, Belgium, Spain") == (["BE", "ES", "FR"], None)
+    assert remote_scope("Any location, United States")[0] != []
+    assert remote_scope("Anywhere in Texas")[0] != []
+    # the genuine article still resolves
+    assert remote_scope("Remote - Anywhere") == ([], None)
+    assert remote_scope("Worldwide") == ([], None)
+
+
+def test_a_list_of_countries_is_not_a_city():
+    """`rpartition` leaves an enumeration in the head slot, and writing it as `city` is the
+    permanently-wrong row split_place refuses to create. 74 measured rows.
+
+    The test is 2+ DISTINCT COUNTRY NAMES, not "contains a comma": a comma test would null
+    "Austin, Texas" and "New York, New York", ordinary city+state heads that account for
+    most of the 6,644 separator-bearing values in the harvest. Trading 74 wrong values for
+    thousands of right ones is the wrong direction."""
+    from job_radar.vocab import split_place, strip_arrangement
+
+    assert (
+        split_place(
+            strip_arrangement("Australia, Canada, Germany, United Kingdom (Remote)")
+        )["city"]
+        is None
+    )
+    # ...while an ordinary city+state head survives
+    assert split_place("Austin, Texas, United States")["city"] == "Austin, Texas"
+    assert split_place("Waco, TX")["city"] == "Waco"
+
+
+def test_a_blank_vendor_string_is_not_stated_worldwide():
+    """himalayas' EMPTY ARRAY means "open worldwide". A blank STRING from remotive or jobicy
+    means the vendor said nothing, and collapsing the two asserts a posting is open to the
+    world because a field happened to be empty."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope("")["remote_areas"] is None
+    assert stated_scope("   ")["remote_areas"] is None
+    assert stated_scope([])["remote_areas"] == []  # the array still means worldwide
+
+
+def test_a_comma_bearing_country_name_survives_the_string_branch():
+    """15 ISO names contain a comma and one re-splits into a DIFFERENT real country:
+    "Congo, The Democratic Republic of the" (CD) becomes "Congo" (CG). A well-formed code
+    naming the wrong country is worse than no code, so the whole string is tried first."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope("Congo, The Democratic Republic of the")["remote_areas"] == ["CD"]
+    assert stated_scope("USA, EMEA")["remote_areas"] == ["US"]
+
+
 def test_remote_scope_takes_only_STATED_boundaries():
     """An office address is not an eligibility boundary. The rule applies to countries and
     subdivisions alike -- scoping it to subdivisions made it a carve-out, and on 6,779
