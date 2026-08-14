@@ -456,7 +456,7 @@ def _region_allowed(p: dict, cfg) -> bool:
         a = str(a).upper()
         if a in allowed:
             return True
-        # A US STATE IS INSIDE THE US, and the default stays permissive. `remote_regions:
+        # A US STATE IS INSIDE THE US, and the default stays permissive. `allowed_scopes:
         # [US]` is ambiguous between "the US market" and "somewhere I can sit from my own
         # address", and the token cannot tell them apart -- so `US` accepts `US-TX`, and a
         # user who means the strict reading names the subdivision. Making strict the
