@@ -75,7 +75,7 @@ filters:
   # matching nothing, so a typo like [USA] tells you instead of emptying your board.
   # UNSTATED is a separate opt-in on purpose: a bare "Remote" usually means "within the
   # country the employer can pay from", so unknown is NOT the same as anywhere.
-  # remote_regions: [US, ANY, UNSTATED]
+  # allowed_scopes: [US, ANY, UNSTATED]
   #
   # exclude_locations REPLACES the default, it does not extend it -- so setting it here
   # was a DOWNGRADE: this key shipped with 6 names while the built-in default covers

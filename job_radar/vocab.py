@@ -513,14 +513,14 @@ def _head_is_a_list(head: str) -> bool:
 
     "Australia, Canada, Germany, United Kingdom" is a list of eligible countries that
     `rpartition` leaves in the head slot, and writing it as `city` is the permanently-wrong
-    row this function's own docstring refuses to create. 74 measured rows.
+    row this function's own docstring refuses to create. 99 measured locations.
 
     The test is TWO OR MORE distinct country names, deliberately -- not "contains a comma".
     A comma test would null "Austin, Texas" and "New York, New York", which are ordinary
-    city+state heads and account for most of the 6,644 separator-bearing values in a
-    31,790-row harvest. Refusing those would trade 74 wrong values for thousands of
-    right ones, which is the wrong direction and is why this is measured rather than
-    reasoned.
+    city+state heads: 7,785 locations in a 31,790-row harvest have a comma inside the head,
+    against the 99 that are genuinely country lists. Refusing those would trade 99 wrong
+    values for thousands of right ones, which is the wrong direction and is why this is
+    measured rather than reasoned.
     """
     return len({m.group(0) for m in _COUNTRY_NAME_RE.finditer(head.lower())}) >= 2
 

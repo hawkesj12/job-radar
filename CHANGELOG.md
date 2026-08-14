@@ -81,43 +81,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of them reaches the title fallback. Greenhouse is the source that genuinely has no remote
   field, and it is where this basis earns its keep.
 
-- **`remote_region` is parsed for every source, and `remote_regions` filters on it.**
-  The boundary was being parsed and discarded: the field existed and only Adzuna ever set
-  it. `vocab.remote_scope()` now reads an alpha-2 code, a US state, a multi-country region
-  (`EMEA`, `NORTH AMERICA`), or `ANY`, falling back to the row's own `country` —
-  **4,029 of 7,457 remote rows now carry a boundary.** The new `remote_regions` config key
-  filters on it: unset 6,353 rows, `[US, ANY]` 2,817, `[US, ANY, UNSTATED]` 6,331.
-  `remote_only` stays a bool; this is a separate key, because changing a released field's
-  type would break consumers.
+- **The boundary is now recorded for every source, and `scope_filter` selects on it.**
+  It was being parsed and thrown away: the field existed and only Adzuna ever set it.
+  **5,499 of 7,384 remote rows now carry a boundary.** The filter reads both new fields —
+  unset admits 6,281 rows, `[US, ANY]` 4,001, `[US, ANY, UNSTATED]` 6,257.
 
-  Worth knowing before you set it strictly: a row whose source _stated_ it is remote usually
-  states no boundary, so it is `UNSTATED` rather than `US`. That is why `[US, ANY]` is so
-  much smaller than `[US, ANY, UNSTATED]` — the strict list drops most vendor-stated remote
-  rows, not just the foreign ones.
+  Worth knowing before setting it strictly: a row whose source _stated_ it is remote usually
+  states no boundary, so it is `UNSTATED` rather than `US`. That is why the strict list is
+  smaller — it drops most vendor-stated remote rows, not just the foreign ones.
 
-  **`None` means UNSTATED and is deliberately not `ANY`.** Only 30 of 7,712
+  **`None` means UNSTATED and is deliberately not "anywhere".** Only 30 of 7,712
   remote-by-location rows actually say anywhere; a bare `Remote` means "remote, boundary
   unstated", usually within whatever country the employer can legally pay from. Admitting
-  those is an explicit opt-in rather than an assumption baked into the parser — the same
-  mistake as reading a blank country as "placeless, therefore servable". A lone city
-  (`New York (Remote)`) also stays unstated: recognising it needs a gazetteer this package
-  does not carry, and inferring `US` from a city name is exactly the plausible-looking
-  default the record contract forbids.
+  those is an explicit opt-in rather than an assumption baked into the parser.
 
 ### Fixed — `city` no longer holds a list of countries
 
 - **A location that enumerates eligible countries put that enumeration in `city`.**
   `rpartition` leaves everything before the last comma in the head slot, and the head became
   the city unconditionally — so `Australia, Canada, Germany, United Kingdom (Remote)` was
-  filed as a city of that name. **74 rows** in a 31,790-row harvest. They are now `None`,
+  filed as a city of that name. **99 locations** in a 31,790-row harvest. They are now `None`,
   which is what `split_place`'s own docstring has always promised: *"A None here costs a
   filter; a wrong city is a permanently wrong row."*
 
   The test is **two or more distinct country names**, and the precision matters. Refusing any
   head containing a comma — the obvious fix — would also null `Austin, Texas` and
-  `New York, New York`, ordinary city+state heads that make up most of the 6,644
-  separator-bearing values in the same harvest. That would trade 74 wrong values for
-  thousands of right ones, and only measuring the two populations separately showed it.
+  `New York, New York`, ordinary city+state heads — **7,785 locations have a comma inside the
+  head**, against the 99 that are genuinely country lists. That would trade 99 wrong values
+  for thousands of right ones, and only measuring the two populations separately showed it.
 
   Heads carrying a city+state pair are untouched and still imperfect: `Austin, Texas` remains
   in `city` rather than being split across `city` and `state`. That is pre-existing, larger
@@ -153,7 +144,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Vendors send **common** names and ISO ships **official** ones, so a raw ISO list mapped only
   210 of 231 real tokens; pycountry's common-name index takes it to 222, and a documented
   alias layer covers the rest (`usa`, `uk`, `england`, plus `turkey` — ISO renamed it Türkiye
-  in 2022 — `palestine`, and `kosovo`, which has no ISO code at all).
+  in 2022 — `palestine`, and `kosovo`).
+
+  **One contract caveat, stated because a strict validator will trip on it:** Kosovo has no
+  ISO 3166-1 code, and `remote_areas` emits **`XK`** for it — the user-assigned code the EU
+  and most payment systems use, not an ISO one. Recorded so the value is legible rather than
+  dropped; reject it on sight if you validate strictly against the ISO register.
 
 ### Fixed (found by sampling the rows this change moves)
 
@@ -192,17 +188,27 @@ Remote"` scopes to a state, and nothing knew a state is inside the country, so
 - **A typo'd `remote_regions` value silently emptied the board.** `[USA, ANY]` is
   well-formed, so shape repair could not catch it, and `USA` matches no boundary this
   package emits — every remote row filtered away with no error. Unrecognised values now
-  warn against `vocab.KNOWN_REMOTE_SCOPES`, the new closed vocabulary for `remote_region`.
+  warn against `vocab.REMOTE_REGION_TOKENS` (the closed region set) and
+  `vocab.REMOTE_AREA_RE` (the ISO format check) -- there is no single `KNOWN_REMOTE_SCOPES`
+  symbol; an earlier draft of these notes named one that does not exist.
 
 ### Changed
 
 - **A `remote_only` harvest returns a different set of rows. Read this before upgrading.**
   The gate now reads the arrangement the engine derived, and a posting that states a split
   week is `hybrid`, which is not remote. Measured over all 31,790 rows with the location
-  filter held constant: **556 rows that used to pass no longer do, and 126 now pass that
-  did not** — a net −430, or **−4.9%** of the 8,688 a remote-only run surfaced before.
+  filter held constant: **629 rows that used to pass no longer do, and 126 now pass that
+  did not** — a net −503, or **−5.8%** of the 8,688 a remote-only run surfaced before.
 
-  The 556 are postings whose body states a split week ("2 days a week in the office") while
+  Reproduce it exactly: run `scoring.is_remote` on both sides with `exclude_locations=[]`,
+  reconstructing each row's pre-derivation state as "the adapter supplied `remote_type` iff
+  `remote_basis in ('stated','board')`". That reconstruction reproduces the corpus's own
+  `remote` column on 31,790 of 31,790 rows, which is the control the figure rests on.
+  **The gate falls back to `remote_posting` when the derived type is unknown** — a reading
+  that omits that fallback reports roughly 1,430 lost instead of 629, and describes a gate
+  this package does not have.
+
+  The 629 are postings whose body states a split week ("2 days a week in the office") while
   nothing in the title or location said remote; the old gate saw the word "remote" in that
   same sentence and admitted them. The 126 are postings whose title or location says remote
   where nothing previously typed them at all. Both directions are the intended effect and

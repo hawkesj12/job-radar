@@ -331,6 +331,12 @@ class Config:
     radius_miles: int = 0  # 0 = API default; >0 sets a search radius around `location`
     exclude_titles: list = field(default_factory=lambda: list(DEFAULT_TITLE_EXCLUDE))
     exclude_locations: list = field(default_factory=lambda: list(DEFAULT_NON_US))
+    # NAMED `allowed_scopes`, NOT `remote_regions`, and the rename matters: the record has a
+    # field called `remote_regions` holding ONLY closed region tokens, while this key accepts
+    # country codes, US subdivisions, region tokens and sentinels alike. One name over two
+    # vocabularies is the exact collision this release exists to remove, and having it
+    # reappear between the config and the record would have been the same bug one layer up.
+    #
     # WHERE a remote worker may sit, as opposed to whether the role is remote at all --
     # two different questions that `remote_only` alone was forced to answer with one bool.
     # `Remote - Brazil` and `Remote` are the same arrangement with different boundaries.
@@ -358,7 +364,7 @@ class Config:
     # UNSTATED is a separate opt-in because unknown is not "anywhere": only 30 rows
     # actually say anywhere, and a bare "Remote" usually means "within the country the
     # employer can pay from".
-    remote_regions: list | None = None
+    allowed_scopes: list | None = None
     max_age_days: int = 60
     stale_after_days: int = 30
     min_score: int = 22
@@ -528,8 +534,8 @@ def load_config(path: str | os.PathLike | None) -> Config:
         """`take`, but a bare scalar is repaired instead of silently iterated.
 
         `take` is an unguarded setattr, so a YAML scalar lands where a list is expected and
-        every consumer that iterates it walks the STRING. For `remote_regions` that meant
-        `remote_regions: US` became the character set {'U','S'}, which matches no real
+        every consumer that iterates it walks the STRING. For `allowed_scopes` that meant
+        `allowed_scopes: US` became the character set {'U','S'}, which matches no real
         two-letter scope, so a single missing bracket produced a silent, total,
         unexplained zero-result harvest on a brand-new key. Loud repair beats a quiet
         empty board -- the same reasoning as the parse-error message above.
@@ -544,13 +550,13 @@ def load_config(path: str | os.PathLike | None) -> Config:
             )
             val = [val]
         val = list(val)
-        # A well-formed list can still be silently fatal. `remote_regions: [USA, ANY]` is
+        # A well-formed list can still be silently fatal. `allowed_scopes: [USA, ANY]` is
         # the natural typo -- USA is not an alpha-2 code, matches no boundary this package
         # ever emits, and so filters every remote row away forever with no error. Shape
         # repair alone does not catch it, because the shape is fine and the VALUE is wrong.
         # Same reasoning as the unknown-key warning further down: a loud line beats a quiet
         # empty board.
-        if attr == "remote_regions":
+        if attr == "allowed_scopes":
             # Validate against BOTH vocabularies plus the sentinels. A member is legal if
             # it is an ISO area (format-checked -- a closed list would have to enumerate
             # every subdivision on earth), a closed region token, or UNSTATED. `ANY` is
@@ -601,7 +607,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
         ("exclude_locations", "exclude_locations"),
     ]:
         take(filt, k, a)
-    take_list(filt, "remote_regions", "remote_regions")
+    take_list(filt, "allowed_scopes", "allowed_scopes")
     for k, a in [
         ("ats", "depth_sources"),
         ("boards", "breadth_sources"),

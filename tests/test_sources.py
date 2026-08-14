@@ -2221,12 +2221,12 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
 
 def test_a_list_of_countries_is_not_a_city():
     """`rpartition` leaves an enumeration in the head slot, and writing it as `city` is the
-    permanently-wrong row split_place refuses to create. 74 measured rows.
+    permanently-wrong row split_place refuses to create. 99 measured locations.
 
     The test is 2+ DISTINCT COUNTRY NAMES, not "contains a comma": a comma test would null
     "Austin, Texas" and "New York, New York", ordinary city+state heads that account for
-    most of the 6,644 separator-bearing values in the harvest. Trading 74 wrong values for
-    thousands of right ones is the wrong direction."""
+    7,785 locations with a comma inside the head, against 99 genuine country lists. Trading 99
+    wrong values for thousands of right ones is the wrong direction."""
     from job_radar.vocab import split_place, strip_arrangement
 
     assert (

@@ -256,7 +256,7 @@ def _coerce(p: dict) -> dict:
     # STRIP THE ARRANGEMENT WORDS FIRST, THEN FALL BACK TO THE RAW STRING. This block used
     # to parse the raw location only, while `vocab.remote_scope` strips first -- so
     # "Atlanta, GA - Remote" resolved to nothing here even though the parser reads it fine
-    # once "Remote" is out of the way. Measured: 1,341 rows go empty -> resolved.
+    # once "Remote" is out of the way. Measured: 3,479 rows go empty -> resolved.
     #
     # The fallback is not belt-and-braces, it is required. Stripping INSTEAD OF parsing raw
     # regresses "Remote, TX", "Remote, CO" and "Hybrid, NY": those resolve today because the

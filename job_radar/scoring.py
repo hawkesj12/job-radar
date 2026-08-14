@@ -425,7 +425,7 @@ _US_INCLUSIVE_SCOPES = frozenset({"US", "ANY", "AMERICAS", "NORTH AMERICA"})
 
 
 def _region_allowed(p: dict, cfg) -> bool:
-    """Does this posting's remote BOUNDARY satisfy cfg.remote_regions?
+    """Does this posting's remote BOUNDARY satisfy cfg.allowed_scopes?
 
     Separate from the remote gate above on purpose: "is this remote" and "may I sit where
     it is remote from" are different questions, and collapsing them is why a bare `Remote`
@@ -435,7 +435,7 @@ def _region_allowed(p: dict, cfg) -> bool:
     as before this existed. An UNSTATED boundary is admitted only when the caller lists
     `UNSTATED`, because unknown is not "anywhere".
     """
-    allowed = cfg.remote_regions
+    allowed = cfg.allowed_scopes
     if not allowed:
         return True
     allowed = {str(x).upper() for x in allowed}

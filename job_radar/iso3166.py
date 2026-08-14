@@ -45,6 +45,25 @@ _ALIASES = {
     "uk": "GB",
     "great britain": "GB",
     "england": "GB",
+    "scotland": "GB",
+    "wales": "GB",
+    "northern ireland": "GB",
+    # More colloquial forms a generated table correctly lacks. Found by checking the table
+    # against names a person knows rather than against itself: `russia` resolves only as
+    # "Russian Federation", and 8 corpus rows say Russia. They fail SAFE without this --
+    # `alpha2` returns None, never a wrong country -- so these are recall, not correctness.
+    "russia": "RU",
+    "brunei": "BN",
+    "macau": "MO",
+    "macao": "MO",
+    "cape verde": "CV",
+    "ivory coast": "CI",
+    "cote d'ivoire": "CI",
+    "curacao": "CW",
+    "reunion": "RE",
+    "vatican city": "VA",
+    "east timor": "TL",
+    "swaziland": "SZ",
 }
 
 

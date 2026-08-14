@@ -252,11 +252,11 @@ def test_remote_posting_reads_body():
 
 
 def test_a_us_state_scope_satisfies_a_us_region_filter():
-    """`remote_regions: [US]` is ambiguous between "the US market" and "somewhere I can sit
+    """`allowed_scopes: [US]` is ambiguous between "the US market" and "somewhere I can sit
     from my own address", and the token cannot tell them apart -- so `US` accepts `US-TX`
     and a user who means the strict reading names the subdivision. Making strict the
     mandatory reading would be a bigger behaviour change than this carries."""
-    c = config.Config(remote_only=True, remote_regions=["US"], exclude_locations=[])
+    c = config.Config(remote_only=True, allowed_scopes=["US"], exclude_locations=[])
 
     def row(loc):
         return engine.derive_remote(
@@ -276,7 +276,7 @@ def test_a_us_state_scope_satisfies_a_us_region_filter():
     assert scoring.is_remote(row("Remote - Anywhere"), c) is True
     assert scoring.is_remote(row("Remote"), c) is False
     c2 = config.Config(
-        remote_only=True, remote_regions=["US", "UNSTATED"], exclude_locations=[]
+        remote_only=True, allowed_scopes=["US", "UNSTATED"], exclude_locations=[]
     )
     assert scoring.is_remote(row("Remote"), c2) is True
 
@@ -341,23 +341,23 @@ def test_a_us_town_named_after_a_country_is_not_dropped():
     assert scoring.is_remote(fr, c) is False
 
 
-def test_remote_regions_survives_the_yaml_load_path(tmp_path, capsys):
+def test_allowed_scopes_survives_the_yaml_load_path(tmp_path, capsys):
     """Every other remote_regions test builds a Config in Python, so the YAML path this
     key actually arrives through had no coverage at all. Both failure modes are silent
     board-emptiers: a missing bracket, and a plausible-but-wrong value."""
     p = tmp_path / "c.yaml"
-    p.write_text("filters:\n  remote_regions: US\n", encoding="utf-8")
+    p.write_text("filters:\n  allowed_scopes: US\n", encoding="utf-8")
     c = config.load_config(p)
-    assert c.remote_regions == ["US"], "a bare scalar must be repaired, not iterated"
+    assert c.allowed_scopes == ["US"], "a bare scalar must be repaired, not iterated"
     assert "should be a list" in capsys.readouterr().err
 
     # a well-formed list whose VALUE is wrong -- shape repair cannot catch this
-    p.write_text("filters:\n  remote_regions: [USA, ANY]\n", encoding="utf-8")
+    p.write_text("filters:\n  allowed_scopes: [USA, ANY]\n", encoding="utf-8")
     config.load_config(p)
     assert "unrecognised" in capsys.readouterr().err
 
-    p.write_text("filters:\n  remote_regions: [US, ANY]\n", encoding="utf-8")
-    assert config.load_config(p).remote_regions == ["US", "ANY"]
+    p.write_text("filters:\n  allowed_scopes: [US, ANY]\n", encoding="utf-8")
+    assert config.load_config(p).allowed_scopes == ["US", "ANY"]
     assert capsys.readouterr().err == "", "a correct list must warn about nothing"
 
 
@@ -380,10 +380,10 @@ def test_both_gates_agree_about_a_us_inclusive_posting():
     """The two gates USED TO CONTRADICT each other on the same row, and the counterexample
     was already sitting in this file: `_location_excluded`'s US veto deliberately rescues
     these strings, and then `remote_scope` answered CA for "Remote - US & Canada" because
-    its country pass ran before the US marker -- so `remote_regions=["US","ANY"]` threw the
+    its country pass ran before the US marker -- so `allowed_scopes=["US","ANY"]` threw the
     row away one gate later. 112 rows named the US explicitly and carried a foreign
     boundary. One fixture now pins both gates so they cannot drift apart again."""
-    c = config.Config(remote_only=True, remote_regions=["US", "ANY"])
+    c = config.Config(remote_only=True, allowed_scopes=["US", "ANY"])
     for loc in (
         "Remote (United States | Canada)",
         "Americas (USA or Canada) (Remote)",
@@ -572,11 +572,11 @@ def test_remote_region_filter_separates_boundary_from_arrangement():
         row("Remote"),
     )
     # unset = no region filter at all, exactly as before this existed
-    c = config.Config(remote_only=True, remote_regions=None, exclude_locations=[])
+    c = config.Config(remote_only=True, allowed_scopes=None, exclude_locations=[])
     assert all(scoring.is_remote(p, c) for p in (us, br, anywhere, bare))
     # US-only: Brazil goes, and an UNSTATED boundary is NOT admitted by default
     c = config.Config(
-        remote_only=True, remote_regions=["US", "ANY"], exclude_locations=[]
+        remote_only=True, allowed_scopes=["US", "ANY"], exclude_locations=[]
     )
     assert scoring.is_remote(us, c) is True
     assert scoring.is_remote(anywhere, c) is True
@@ -584,12 +584,12 @@ def test_remote_region_filter_separates_boundary_from_arrangement():
     assert scoring.is_remote(bare, c) is False
     # ...admitted only on an explicit opt-in, because unknown is not "anywhere"
     c = config.Config(
-        remote_only=True, remote_regions=["US", "ANY", "UNSTATED"], exclude_locations=[]
+        remote_only=True, allowed_scopes=["US", "ANY", "UNSTATED"], exclude_locations=[]
     )
     assert scoring.is_remote(bare, c) is True
     assert scoring.is_remote(br, c) is False
     # a US-INCLUSIVE multi-region scope satisfies a US request -- "Americas" contains the US
-    c = config.Config(remote_only=True, remote_regions=["US"], exclude_locations=[])
+    c = config.Config(remote_only=True, allowed_scopes=["US"], exclude_locations=[])
     assert scoring.is_remote(row("Remote (North America)"), c) is True
 
 
