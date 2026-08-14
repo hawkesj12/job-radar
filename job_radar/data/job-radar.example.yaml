@@ -79,7 +79,7 @@ filters:
   #
   # exclude_locations REPLACES the default, it does not extend it -- so setting it here
   # was a DOWNGRADE: this key shipped with 6 names while the built-in default covers
-  # every country the package knows plus the multi-country regions (66 tokens). Left
+  # every country the package knows plus the multi-country regions (71 tokens). Left
   # commented so `init` inherits the full list. Uncomment only to NARROW the filter,
   # e.g. if you can legally work in Canada:
   # exclude_locations: [india, europe, emea, apac, "(eu)"]
