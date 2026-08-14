@@ -2240,6 +2240,20 @@ def test_a_list_of_countries_is_not_a_city():
     assert split_place("Waco, TX")["city"] == "Waco"
 
 
+def test_the_word_worldwide_is_stated_unbounded():
+    """Found by probing a LIVE endpoint, not by a fixture -- 6 of 18 real remotive rows came
+    back unstated with a raw of "Worldwide". himalayas says unbounded with an empty array,
+    which this already honoured; remotive and jobicy say it with the WORD, and the adapter
+    path did not know it. Same bug as the empty array: a vendor declaring no geographic
+    restriction, recorded as "we don't know"."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope("Worldwide")["remote_areas"] == []
+    assert stated_scope("anywhere")["remote_areas"] == []
+    # ...but a list that ALSO names a place is bounded, not unbounded
+    assert stated_scope(["Worldwide", "France"])["remote_areas"] == ["FR"]
+
+
 def test_a_blank_vendor_string_is_not_stated_worldwide():
     """himalayas' EMPTY ARRAY means "open worldwide". A blank STRING from remotive or jobicy
     means the vendor said nothing, and collapsing the two asserts a posting is open to the

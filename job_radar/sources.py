@@ -610,6 +610,21 @@ def stated_scope(values, raw: str | None = None) -> dict:
         values = [values] if whole else [v.strip() for v in values.split(",")]
     names = [v for v in values if isinstance(v, str) and v.strip()]
 
+    # "WORLDWIDE" IS A STATEMENT, NOT A SILENCE. himalayas says it with an empty array and
+    # the branch above already honours that; remotive and jobicy say it with the WORD, and
+    # this function did not know it -- 6 of 18 live remotive rows came back unstated with a
+    # raw of "Worldwide". That is the same bug the empty array had: a vendor declaring no
+    # geographic restriction, recorded as "we don't know", which then gets admitted or
+    # dropped for the wrong reason. `vocab._REMOTE_ANYWHERE` already recognised the word on
+    # the LOCATION path; the adapter path is where it was missing. Found only by probing a
+    # live endpoint -- no fixture had it, because I wrote the fixtures.
+    if names and all(vocab._REMOTE_ANYWHERE.search(n) for n in names):
+        return {
+            "remote_areas": [],
+            "remote_regions": None,
+            "remote_scope_raw": raw if raw is not None else ", ".join(names),
+        }
+
     areas, regions, unmapped = set(), set(), False
     for n in names:
         code = iso3166.alpha2(n)
