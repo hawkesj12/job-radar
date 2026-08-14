@@ -29,8 +29,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **Why none of this was caught before 0.8.0 shipped:** `sources.stated_scope` had never seen
 a live vendor response. Every fixture was hand-written and the development corpus was a
 downstream store with no adapter-supplied structured fields, so the path was unreachable
-even in principle. The live canary proved the adapters *parsed* and asserted nothing about
-what they parsed the boundary *into*.
+even in principle. The live canary proved the adapters _parsed_ and asserted nothing about
+what they parsed the boundary _into_.
+
+### Fixed — found by a four-lens panel review of the fixes above
+
+- **A region containing the United States was being used as a non-US marker.**
+  `northern america` was added to the default location-exclusion list as well as the scope
+  vocabulary, so a role titled "Engineer, Northern America" was dropped as foreign while the
+  synonym "North America" passed — opposite verdicts on the same place, from the shipped
+  default config. The two lists now splice one shared constant, because the copy that caused
+  this was a hand-paste into both.
+
+- **A number in the boundary field killed the whole harvest.** `stated_scope(123)` raised
+  `TypeError: 'int' object is not iterable`. Errors are values in this package, but this
+  function runs inside the adapter, upstream of the coercion that enforces it. Junk now
+  resolves to "boundary unknown" and keeps the vendor's value as evidence.
+
+- **The country and region lookups disagreed about whitespace.** `"North  America"` with a
+  double space resolved to nothing while `" Germany "` resolved fine. Normalized once, and
+  `remote_scope_raw` now keeps the vendor's string exactly as sent rather than a rejoin of
+  the cleaned parts — it exists so a consumer can re-read the original.
+
+- **A continent inside a country name became a phantom region.** Adding `africa` made
+  `"Remote - South Africa"` the only one of 425 countries to also carry a continent tag,
+  while `"Remote - France"` carried no `EUROPE`. Not false, but inferred — and this field is
+  stated-only. Region matches whose span falls inside a matched country name are now masked,
+  which closes the class rather than special-casing the one name.
+
+### Changed
+
+- **`asia`, `africa` and `oceania` are now non-US location markers**, alongside the `europe`,
+  `apac` and `latam` that already were. If you rely on the default `exclude_locations`, a
+  posting whose title or location names one of those three continents is now filtered out
+  where it previously was not. Set `filters.exclude_locations` yourself to opt out.
 
 ### Added
 
@@ -38,12 +70,11 @@ what they parsed the boundary *into*.
   which is the gap that let the three defects above ship. It asserts the field shapes
   (areas are ISO codes; a region is never a country code), that a stated boundary is not
   silently dropped, and — the one the others cannot catch — that **every word** of a
-  boundary is understood, not just the first two. Measured 0 unmapped of 41 / 128 / 660
-  live tokens today, against 15% for the `"Worldwide"` miss and 24% for the continents.
-  One defect is honestly **not** live-catchable: across 820 live values, zero vendors send
-  a bounded "anywhere" string, so `"Anywhere in the US"` is gated by a hermetic test
-  instead.
-
+  boundary is understood, not just the first two. Verified by replaying each defect against
+  the day's real vendor values: both go red (14.6% and 20.0% against a 10% gate, from a 0%
+  baseline on all three sources). One defect is honestly **not** live-catchable: across 820
+  live values, zero vendors send a bounded "anywhere" string, so `"Anywhere in the US"` is
+  gated by a hermetic test instead.
 
 ## [0.8.0] - 2026-08-14
 
@@ -59,11 +90,11 @@ what they parsed the boundary *into*.
   outside the closed vocabulary the field's own docstring claimed** — every adapter wrote raw
   vendor text straight into it.
 
-  | new field | holds |
-  |---|---|
-  | `remote_areas` | `list[str] \| None` — ISO 3166-1 alpha-2, or ISO 3166-2 for a stated US state |
-  | `remote_regions` | `list[str] \| None` — closed tokens (`EMEA`, `LATAM`, …), never a country code |
-  | `remote_scope_raw` | `str \| None` — the vendor's own words, verbatim |
+  | new field          | holds                                                                          |
+  | ------------------ | ------------------------------------------------------------------------------ |
+  | `remote_areas`     | `list[str] \| None` — ISO 3166-1 alpha-2, or ISO 3166-2 for a stated US state  |
+  | `remote_regions`   | `list[str] \| None` — closed tokens (`EMEA`, `LATAM`, …), never a country code |
+  | `remote_scope_raw` | `str \| None` — the vendor's own words, verbatim                               |
 
   **Three states, and the middle one is why it is a list:** `null` = the posting said
   nothing · `[]` = it said **anywhere** · non-empty = these places. Collapsing the first two
@@ -79,7 +110,7 @@ what they parsed the boundary *into*.
   claim.
 
   **Upgrading:** anything reading `remote_region` must move to `remote_areas`. `"US" in
-  row["remote_areas"]` is the replacement for the US question, and it no longer needs the
+row["remote_areas"]` is the replacement for the US question, and it no longer needs the
   caller to know that `US-CA` and `NORTH AMERICA` are US-inclusive.
 
 > **About every number below.** All counts come from **one** harvest of 31,790 rows,
@@ -142,8 +173,8 @@ what they parsed the boundary *into*.
   `rpartition` leaves everything before the last comma in the head slot, and the head became
   the city unconditionally — so `Australia, Canada, Germany, United Kingdom (Remote)` was
   filed as a city of that name. **99 locations** in a 31,790-row harvest. They are now `None`,
-  which is what `split_place`'s own docstring has always promised: *"A None here costs a
-  filter; a wrong city is a permanently wrong row."*
+  which is what `split_place`'s own docstring has always promised: _"A None here costs a
+  filter; a wrong city is a permanently wrong row."_
 
   The test is **two or more distinct country names**, and the precision matters. Refusing any
   head containing a comma — the obvious fix — would also null `Austin, Texas` and
@@ -159,13 +190,13 @@ what they parsed the boundary *into*.
 
 - **Himalayas' country list was joined into a string, which is unrecoverable.** ISO country
   names contain commas — `Congo, The Democratic Republic of the` and `Micronesia, Federated
-  States of` are both real and both appear in this feed — so re-splitting the joined form
+States of` are both real and both appear in this feed — so re-splitting the joined form
   yields fragments like `Federated States of` as if they were countries. The array now
   passes through intact; the join survives only as `remote_scope_raw`, which is display and
   which nothing re-splits.
 
 - **An empty restriction list was recorded as "unknown".** Himalayas documents that an empty
-  `locationRestrictions` array means *open worldwide with no geographic restrictions*, and
+  `locationRestrictions` array means _open worldwide with no geographic restrictions_, and
   `catalog/himalayas.md` had carried that rule since the profile was written — the adapter's
   `or None` overrode it on **29 rows**, discarding the most permissive rows in the feed. The
   inverse of the error this package's contract exists to prevent.
@@ -177,7 +208,7 @@ what they parsed the boundary *into*.
 
 - **`job_radar.iso3166`** — a generated ISO 3166-1 name → alpha-2 table (425 names, from
   pycountry at build time, committed as literal data; **no new runtime dependency**). Kept
-  deliberately separate from `vocab._COUNTRY_CODES`, which is 62 names and feeds *prose*
+  deliberately separate from `vocab._COUNTRY_CODES`, which is 62 names and feeds _prose_
   matching — putting a full ISO table there would match `Georgia` (a US state), `Jordan`,
   `Chad` and `Turkey` against ordinary location strings, and a test pins that no country name
   in that map is also a US state name.

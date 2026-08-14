@@ -385,21 +385,37 @@ NON_US_COUNTRY_NAMES = tuple(
 # names, so they cannot be derived and are enumerated. `european` sits beside `europe`
 # deliberately: matching is word-bounded (scoring._excluded_re), so "European Union" is
 # unreachable from "europe" alone.
+# The continents remotive sends. "Americas, Europe, Asia, Africa, Oceania" is its canonical
+# five-continent value -- the worked example in catalog/remotive.md -- and without these,
+# Asia/Africa/Oceania were silently dropped on 11% of a live feed, making a five-continent
+# role invisible to a searcher on three of them.
+#
+# ONE CONSTANT, SPLICED INTO BOTH TUPLES, because the alternative was tried and failed
+# inside a single release: the same four names and an identical five-line comment were
+# pasted into `_NON_US_REGIONS` and `_REMOTE_REGIONS`, which put `northern america` -- a
+# region containing the US -- into the non-US exclusion list. The next continent someone
+# adds goes in one tuple and not the other, which is the drift this file keeps recording
+# elsewhere (`_NON_PLACE`, `ats_from_url`, the single source registry). `americas` is
+# absent on purpose: it is US-inclusive, and the two tuples would disagree about it.
+_CONTINENTS = ("asia", "africa", "oceania")
+
 _NON_US_REGIONS = (
     "emea",
     "apac",
     "asia-pacific",
     "asia pacific",
     "latam",
-    # The continents remotive sends. "Americas, Europe, Asia, Africa, Oceania" is its
-    # canonical five-continent value -- it is the worked example in catalog/remotive.md --
-    # and without these three, Asia/Africa/Oceania were silently dropped on 11% of a live
-    # feed, making a five-continent role invisible to a searcher on three of them.
-    # `northern america` is a one-word near-miss on the existing `north america`.
-    "asia",
-    "africa",
-    "oceania",
-    "northern america",
+    # Continents, shared with `_REMOTE_REGIONS` -- see `_CONTINENTS`. They sit beside the
+    # `europe` / `apac` / `latam` already in this tuple, so the non-US markers are
+    # consistent rather than arbitrary: "Europe Program Director" was always dropped by the
+    # default exclusion and "Asia Program Director" was not, for no reason anyone chose.
+    #
+    # `northern america` is DELIBERATELY ABSENT, and that is why these come from a shared
+    # constant instead of a hand-copied list: for one release they WERE hand-copied, and it
+    # put that name here. It is the UN M49 region CONTAINING the United States, so it
+    # dropped US-workable roles -- while the synonym `north america`, never in this list,
+    # passed. Opposite verdicts on the same place, from the default config.
+    *_CONTINENTS,
     "europe",
     "european",
     "(eu)",
@@ -634,7 +650,9 @@ def split_place(raw) -> dict:
             # foreign-rows-made-American regression this branch was written to
             # prevent, so the country decided here is final.
             return {
-                "city": None if _placeless_head(city) or _head_is_a_list(city) else city,
+                "city": None
+                if _placeless_head(city) or _head_is_a_list(city)
+                else city,
                 "state": state,
                 "country": country,
             }
@@ -677,14 +695,10 @@ _REMOTE_REGIONS = (
     "latin america",
     "central america",
     "latam",
-    # The continents remotive sends. "Americas, Europe, Asia, Africa, Oceania" is its
-    # canonical five-continent value -- it is the worked example in catalog/remotive.md --
-    # and without these three, Asia/Africa/Oceania were silently dropped on 11% of a live
-    # feed, making a five-continent role invisible to a searcher on three of them.
-    # `northern america` is a one-word near-miss on the existing `north america`.
-    "asia",
-    "africa",
-    "oceania",
+    *_CONTINENTS,
+    # Only the SCOPE vocabulary gets this one. remotive really sends it, and as a stated
+    # eligibility boundary it is real information -- but as a non-US marker it is false,
+    # so it stays out of the shared constant. See `_CONTINENTS`.
     "northern america",
     "emea",
     "apac",
@@ -823,8 +837,27 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
         return (None, None)
     low = " ".join(s.lower().split())
 
+    # A REGION SITTING INSIDE A COUNTRY NAME IS NOT A STATED REGION. "South Africa" contains
+    # "africa", so adding the continents made ZA the one country in 425 that also carried a
+    # continent tag -- while France got no EUROPE. The tag is not FALSE (South Africa is in
+    # Africa) but it is inferred, and this docstring's rule is STATED ONLY: a continent
+    # deduced from a country is the same inference as a country deduced from an office city.
+    # It is also arbitrary in a way that shows downstream, since `_region_allowed` uses
+    # regions to ADMIT: `allowed_scopes: [AFRICA]` would keep South Africa while
+    # `[EUROPE]` dropped France.
+    #
+    # Masked by SPAN rather than guarded by a `(?<!south )` lookbehind, because the
+    # lookbehind fixes this one name and leaves the class open -- the same "harmless by
+    # coincidence" reasoning that `(?<!new )` already rests on. If continent-from-country is
+    # ever wanted, it belongs in `scoring._region_allowed`, where resolving a region is
+    # policy owned by the caller who chose the filter, exactly as it says.
+    country_spans = [m.span() for m in _COUNTRY_NAME_RE.finditer(low)]
     regions = sorted(
-        {m.group(0).upper() for m in _REGION_RE.finditer(low)}
+        {
+            m.group(0).upper()
+            for m in _REGION_RE.finditer(low)
+            if not any(a <= m.start() and m.end() <= b for a, b in country_spans)
+        }
         | ({"TIMEZONE"} if _REMOTE_TZ.search(s) else set())
     )
 

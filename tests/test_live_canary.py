@@ -30,7 +30,7 @@ import re
 
 import pytest
 
-from job_radar import config, sources
+from job_radar import config, iso3166, sources
 from job_radar.util import NET_ERRORS
 
 pytestmark = pytest.mark.live
@@ -261,6 +261,11 @@ def test_a_field_a_source_really_sends_has_not_gone_quiet(name):
 SCOPE_SOURCES = ["remotive", "jobicy", "himalayas"]
 _AREA_RE = re.compile(r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$")
 _TZ_QUALIFIER = re.compile(r"\btime\s?zones?\b", re.I)
+# Built ONCE. This was `frozenset(iso3166.NAME_TO_ALPHA2.values())` written inside the
+# loop that checks it -- 425 entries rebuilt per region per row, in a file where every
+# other constant is module-level. Milliseconds, not a bottleneck; it is here because an
+# invariant collection built inside its own loop reads as an accident.
+_ISO_CODES = frozenset(iso3166.NAME_TO_ALPHA2.values())
 
 
 _SCOPE_CACHE: dict = {}
@@ -305,7 +310,7 @@ def test_the_boundary_fields_hold_their_shape_on_live_rows(name):
     it would grow back -- silently, since nothing downstream type-checks a list of
     strings.
     """
-    from job_radar import iso3166, vocab
+    from job_radar import vocab
 
     rows = _scope_rows(name)
     for r in rows:
@@ -324,7 +329,7 @@ def test_the_boundary_fields_hold_their_shape_on_live_rows(name):
             assert g in vocab.REMOTE_REGION_TOKENS, (
                 f"{name}: remote_regions holds {g!r}, outside the closed token set."
             )
-            assert g not in frozenset(iso3166.NAME_TO_ALPHA2.values()), (
+            assert g not in _ISO_CODES, (
                 f"{name}: remote_regions holds {g!r}, a COUNTRY CODE. Regions and "
                 "countries are separate fields on purpose; this is the mixing bug."
             )
@@ -378,17 +383,27 @@ def test_a_stated_boundary_is_not_silently_dropped(name):
 
 
 def _unmapped_tokens(rows):
-    """Boundary tokens the vocabulary understood nothing of. -> (total, missed set)
+    """Boundary tokens the vocabulary understood nothing of. -> (total, missed, samples)
 
     The ratio test above asks "did we get ANYTHING out of this row"; this asks "did we
     get EVERYTHING". The difference is not academic -- it is exactly defect two of
     0.8.0: `"Americas, Europe, Asia, Africa, Oceania"` parsed to two regions, so the
     row looked understood while three continents fell on the floor. Only counting
     tokens sees that.
+
+    COUNTS OCCURRENCES, NOT DISTINCT NAMES, and the first version of this got it wrong
+    in a way that quietly gutted the gate: it returned a SET of missed names over a
+    COUNT of total tokens -- different units on the two halves of one ratio. A single
+    unmapped word repeated on every row counted once, so the more widespread the
+    failure, the smaller it looked. Counterfactually replaying the defects proves the
+    cost: "Worldwide" unmapped on 6 of 18 rows read as 2.4% (green, gate missed it
+    entirely) instead of 14.6%, and the dropped continents as 11.4% against a 10% gate
+    -- 1.14x margin -- instead of 20.0%. Distinct names are still returned, but only as
+    SAMPLES for the failure message.
     """
     from job_radar import iso3166, vocab
 
-    total, missed = 0, set()
+    total, missed, samples = 0, 0, set()
     for r in rows:
         raw = r.get("remote_scope_raw")
         if not raw:
@@ -415,8 +430,9 @@ def _unmapped_tokens(rows):
                 or _TZ_QUALIFIER.search(tok)
             )
             if not resolved:
-                missed.add(tok)
-    return total, missed
+                missed += 1
+                samples.add(tok)
+    return total, missed, samples
 
 
 @pytest.mark.parametrize("name", SCOPE_SOURCES)
@@ -430,17 +446,36 @@ def test_every_word_of_a_boundary_is_understood_not_just_the_first_two(name):
     A miss here is not a crash. It is a role open to a continent that no one searching
     that continent will ever see.
     """
-    total, missed = _unmapped_tokens(_scope_rows(name))
+    total, missed, samples = _unmapped_tokens(_scope_rows(name))
     # remotive's whole corpus is 41 tokens and it swung 31 -> 18 postings in 11 days,
     # so a ratio over a handful of tokens is noise wearing a percentage sign: ONE new
     # oddly-worded posting would be 1-of-4. Below 30 tokens, say nothing.
     if total < 30:
         pytest.skip(f"{name}: only {total} boundary tokens — too few to rate")
-    assert len(missed) / total <= 0.10, (
-        f"{name}: {len(missed)} of {total} boundary tokens resolved to nothing — "
-        f"{sorted(missed)[:8]}. Each one is a place a searcher will not be shown. "
+    # TWO GATES, because one ratio cannot see both failures. A RATIO answers "how many
+    # rows are affected" and catches a catastrophe -- a vendor renaming "United States"
+    # trips it instantly. But it goes BLIND exactly where the corpus is largest: the
+    # three-continent defect was 20% of remotive's 35 tokens and would be roughly 1-2%
+    # of himalayas' 660, passing a 10% gate silently and forever on the biggest source
+    # in the set. Token repetition is why -- measured mean 8.6 occurrences per distinct
+    # name on a 2,108-token corpus, with a handful of names dominating.
+    #
+    # So DISTINCT unmapped names answers the other question: how far has the vocabulary
+    # drifted, independent of feed size. Baseline is 0 on all three sources today, and
+    # normal churn is a single new country name, so 2 is one token of slack. Defect (b)
+    # was three continents and fails this on every source regardless of size.
+    assert missed / total <= 0.10, (
+        f"{name}: {missed} of {total} boundary tokens resolved to nothing — "
+        f"{sorted(samples)[:8]}. Each one is a place a searcher will not be shown. "
         "Add it to vocab._REMOTE_REGIONS (a multi-country region) or confirm it "
         "belongs in the ISO table (a country); do not widen this threshold."
+    )
+    assert len(samples) <= 2, (
+        f"{name}: {len(samples)} DISTINCT boundary names resolved to nothing — "
+        f"{sorted(samples)[:8]}. Only {missed}/{total} token occurrences, so the ratio "
+        "gate above stays green; that is the point of this second assertion. Several "
+        "different unmapped names means the vocabulary has drifted, not that one odd "
+        "posting appeared."
     )
 
 

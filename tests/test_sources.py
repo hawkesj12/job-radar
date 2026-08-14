@@ -2759,3 +2759,103 @@ def test_usajobs_treats_every_non_place_the_way_adzuna_does(monkeypatch):
     sources.search_usajobs(["engineer"])
     url = calls[0]
     assert "LocationName=Louisville" in url and "RemoteIndicator" not in url
+
+
+def test_a_us_containing_region_is_never_a_non_us_marker():
+    """`northern america` is the UN M49 region CONTAINING the United States.
+
+    For one release it sat in `_NON_US_REGIONS`, the DEFAULT location-exclusion filter
+    applied to every source's output and matched against title text -- so "Engineer,
+    Northern America" was dropped as non-US while the synonym "North America", never in
+    that list, passed. Opposite verdicts on the same place, from the shipped config.
+
+    It reached there because the same four continent names were pasted into two tuples
+    with one copied comment; `_CONTINENTS` is spliced into both so the next addition
+    cannot land in one and not the other."""
+    from job_radar import vocab
+
+    assert "northern america" not in vocab.NON_US_LOCATION_TOKENS
+    assert "north america" not in vocab.NON_US_LOCATION_TOKENS
+    # Still a real STATED boundary though -- remotive sends it, and dropping it from the
+    # scope vocabulary was the other half of the same bug.
+    assert "NORTHERN AMERICA" in vocab.REMOTE_REGION_TOKENS
+    assert not (set(vocab._CONTINENTS) & {"northern america", "americas"})
+
+
+def test_the_continents_are_non_us_markers_like_europe_already_was():
+    """Pinning a deliberate behaviour change, not an accident.
+
+    `europe`, `apac` and `latam` were already non-US markers, so "Europe Program
+    Director" was dropped by the default exclusion while "Asia Program Director" was
+    kept -- an inconsistency nobody chose. These three make it consistent. Recorded as a
+    test because it is a real change to what the default config filters out, and the
+    kind of thing that should fail loudly if someone reverses it by accident."""
+    from job_radar import vocab
+
+    for c in ("asia", "africa", "oceania"):
+        assert c in vocab.NON_US_LOCATION_TOKENS, c
+        assert c in vocab._CONTINENTS, c
+
+
+def test_a_number_in_the_boundary_field_does_not_kill_the_harvest():
+    """`stated_scope(123)` raised `TypeError: 'int' object is not iterable`.
+
+    Errors are values in this package: `engine._coerce` exists because one vendor's JSON
+    null once killed a whole harvest on the first `.lower()`. But stated_scope runs
+    INSIDE the adapter, upstream of that coercion, so this field had no such protection.
+    A number is not a place -- it must resolve to "unknown" while keeping the vendor's
+    value as evidence, not raise."""
+    from job_radar.sources import stated_scope
+
+    for junk in (123, True, 45.5):
+        r = stated_scope(junk)
+        assert r["remote_areas"] is None and r["remote_regions"] is None, junk
+        assert r["remote_scope_raw"] == str(junk), junk
+
+
+def test_the_two_lookups_agree_about_whitespace():
+    """`iso3166.alpha2` collapses internal whitespace; the region lookup did not.
+
+    So `"North  America"` with a double space resolved to nothing while `" Germany "`
+    resolved fine -- two vocabularies disagreeing about spaces inside one function."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope("North  America")["remote_regions"] == ["NORTH AMERICA"]
+    assert stated_scope(["NORTH\tAMERICA"])["remote_regions"] == ["NORTH AMERICA"]
+    assert stated_scope([" Germany ", "France"])["remote_areas"] == ["DE", "FR"]
+
+
+def test_the_raw_boundary_is_the_vendors_string_not_a_rebuild():
+    """`remote_scope_raw` exists so a consumer that disagrees with our parse can re-read
+    the original. Normalizing the parts and rejoining them would quietly rewrite the
+    evidence -- the double space below is the vendor's, and it survives."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope("North  America")["remote_scope_raw"] == "North  America"
+    assert stated_scope("Americas, Europe, Israel")["remote_scope_raw"] == (
+        "Americas, Europe, Israel"
+    )
+
+
+def test_a_continent_inside_a_country_name_is_not_a_stated_region():
+    """"South Africa" contains "africa".
+
+    Adding the continents made ZA the one country in 425 that also carried a continent
+    tag, while France carried no EUROPE. The tag is not false — South Africa is in
+    Africa — but it is INFERRED, and `remote_scope`'s rule is stated-only: a continent
+    deduced from a country is the same inference as a country deduced from an office
+    city. It shows downstream too, because regions ADMIT: `[AFRICA]` would have kept
+    South Africa while `[EUROPE]` dropped France.
+
+    Masked by span rather than a `(?<!south )` lookbehind, so the whole class is closed
+    and not just this one name."""
+    from job_radar.vocab import remote_scope
+
+    assert remote_scope("Remote - South Africa") == (["ZA"], None)
+    assert remote_scope("Remote - France") == (["FR"], None)
+    # The continent itself still resolves when the vendor actually states it, including
+    # beside the country whose name contains it.
+    assert remote_scope("Remote - Africa")[1] == ["AFRICA"]
+    # And a region that merely sits NEXT TO a country is untouched — only a region whose
+    # span falls INSIDE a matched country name is masked.
+    assert remote_scope("Bengaluru, Karnataka, India, APAC") == (["IN"], ["APAC"])

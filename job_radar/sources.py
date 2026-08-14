@@ -595,20 +595,49 @@ def stated_scope(values, raw: str | None = None) -> dict:
     """
     if values is None:
         return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
+    # ANYTHING THE VENDOR ACTUALLY SENT, not just the shapes we hoped for. This ran
+    # `isinstance(values, str)` and then iterated, so a JSON number or boolean in this field
+    # raised `TypeError: 'int' object is not iterable` and killed the whole harvest on the
+    # first row carrying one -- the exact failure `engine._coerce` exists to prevent, except
+    # this function runs INSIDE the adapter, upstream of it. Errors are values in this
+    # package. A number is not a place, so it coerces to text, resolves to nothing, and the
+    # record says the boundary is unknown while keeping the vendor's own value in
+    # `remote_scope_raw`. Wrong-looking data survives as evidence; it does not stop a run.
+    # Wrapped as a ONE-ITEM LIST, not handed to the string branch: that branch runs a
+    # whole-string ISO lookup and a comma split, both meaningless for a number, and `0`
+    # is falsy in a way the emptiness checks below would misread.
+    if not isinstance(values, (str, list, tuple, set)):
+        values = [str(values)]
     if isinstance(values, str):
         # A BLANK string is not an empty array. himalayas' `[]` means "open worldwide";
         # remotive and jobicy send a plain string, and "" from them means the vendor said
         # nothing. Collapsing the two would assert a posting is open to the world because a
         # field happened to be blank.
         if not values.strip():
-            return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
+            return {
+                "remote_areas": None,
+                "remote_regions": None,
+                "remote_scope_raw": raw,
+            }
         # WHOLE-STRING FIRST, then split. 15 ISO names contain a comma, and one of them
         # re-splits into a different real country: "Congo, The Democratic Republic of the"
         # (CD) becomes "Congo" (CG, Republic of the Congo) plus a fragment. That is a
         # well-formed code naming the wrong country, which is worse than no code.
+        # VERBATIM MEANS VERBATIM. `remote_scope_raw` is the vendor's own words, kept so a
+        # consumer that disagrees with our parse can re-read the original -- so it is the
+        # string as sent, not a rejoin of the normalized parts. Without this, whitespace
+        # normalization would quietly rewrite the evidence the field exists to preserve.
+        raw = values if raw is None else raw
         whole = iso3166.alpha2(values)
         values = [values] if whole else [v.strip() for v in values.split(",")]
-    names = [v for v in values if isinstance(v, str) and v.strip()]
+    # NORMALIZED ONCE, HERE, so every use below reads the clean value. Internal whitespace
+    # is collapsed because the country lookup already does it (`iso3166.alpha2` splits and
+    # rejoins) while the region lookup did not, so `"North  America"` with a double space
+    # resolved to nothing while `" Germany "` resolved fine -- two vocabularies disagreeing
+    # about whitespace in one function. Stripping here also stops `remote_scope_raw` from
+    # echoing back `" Germany , France"`, which is a reconstruction artifact, not what any
+    # vendor sent.
+    names = [" ".join(v.split()) for v in values if isinstance(v, str) and v.strip()]
     # A list that HAD members but none usable is malformed input, not a declaration. Only a
     # genuinely empty list carries himalayas' "open worldwide" meaning; `["", None]` is a
     # vendor sending junk, and reading it as unbounded would assert the most permissive
@@ -631,7 +660,7 @@ def stated_scope(values, raw: str | None = None) -> dict:
     # "Anywhere in the US" would have been admitted into a Germany-only filter. That is the
     # one direction this contract exists to never be wrong in, and the fix for one bug
     # introduced it.
-    if names and all(vocab._REMOTE_ANYWHERE.fullmatch(n.strip()) for n in names):
+    if names and all(vocab._REMOTE_ANYWHERE.fullmatch(n) for n in names):
         return {
             "remote_areas": [],
             "remote_regions": None,
@@ -643,8 +672,8 @@ def stated_scope(values, raw: str | None = None) -> dict:
         code = iso3166.alpha2(n)
         if code:
             areas.add(code)
-        elif n.strip().upper() in vocab.REMOTE_REGION_TOKENS:
-            regions.add(n.strip().upper())
+        elif n.upper() in vocab.REMOTE_REGION_TOKENS:
+            regions.add(n.upper())
         else:
             unmapped = True
     # `[]` only when the vendor genuinely sent an empty list. A non-empty list whose members
