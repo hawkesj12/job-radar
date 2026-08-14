@@ -2240,6 +2240,44 @@ def test_a_list_of_countries_is_not_a_city():
     assert split_place("Waco, TX")["city"] == "Waco"
 
 
+def test_a_bounded_anywhere_string_is_not_unbounded():
+    """The regression the Worldwide fix introduced, caught before release. The anywhere
+    pattern is a word-boundary SEARCH, so "Anywhere in the US" and "Worldwide except China"
+    matched it and returned [] -- a BOUNDED posting asserting it is open to the world.
+    `_region_allowed` treats [] as satisfying every policy, so "Anywhere in the US" would
+    have been admitted into a Germany-only filter. The whole trimmed name must BE an
+    anywhere-word."""
+    from job_radar.sources import stated_scope
+
+    for bounded in (
+        "Anywhere in the US", "Anywhere in Europe", "Worldwide except China", "Global South",
+    ):  # fmt: skip
+        assert stated_scope(bounded)["remote_areas"] != [], bounded
+    # the genuine article still reads as unbounded
+    assert stated_scope("Worldwide")["remote_areas"] == []
+
+
+def test_a_list_of_blanks_is_malformed_not_worldwide():
+    """Only a genuinely EMPTY list carries himalayas' "open worldwide" meaning. `["", None]`
+    is a vendor sending junk, and reading it as unbounded asserts the most permissive
+    possible value from the least information."""
+    from job_radar.sources import stated_scope
+
+    assert stated_scope(["", None])["remote_areas"] is None
+    assert stated_scope([])["remote_areas"] == []
+
+
+def test_the_continents_remotive_actually_sends_are_all_kept():
+    """"Americas, Europe, Asia, Africa, Oceania" is remotive's canonical five-continent
+    value -- the worked example in catalog/remotive.md -- on 11% of a live feed. Asia,
+    Africa and Oceania were silently dropped, making a five-continent role invisible to a
+    searcher on three of them."""
+    from job_radar.sources import stated_scope
+
+    got = stated_scope("Americas, Europe, Asia, Africa, Oceania")["remote_regions"]
+    assert got == ["AFRICA", "AMERICAS", "ASIA", "EUROPE", "OCEANIA"]
+
+
 def test_the_word_worldwide_is_stated_unbounded():
     """Found by probing a LIVE endpoint, not by a fixture -- 6 of 18 real remotive rows came
     back unstated with a raw of "Worldwide". himalayas says unbounded with an empty array,

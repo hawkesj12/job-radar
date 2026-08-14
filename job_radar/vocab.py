@@ -391,6 +391,15 @@ _NON_US_REGIONS = (
     "asia-pacific",
     "asia pacific",
     "latam",
+    # The continents remotive sends. "Americas, Europe, Asia, Africa, Oceania" is its
+    # canonical five-continent value -- it is the worked example in catalog/remotive.md --
+    # and without these three, Asia/Africa/Oceania were silently dropped on 11% of a live
+    # feed, making a five-continent role invisible to a searcher on three of them.
+    # `northern america` is a one-word near-miss on the existing `north america`.
+    "asia",
+    "africa",
+    "oceania",
+    "northern america",
     "europe",
     "european",
     "(eu)",
@@ -668,6 +677,15 @@ _REMOTE_REGIONS = (
     "latin america",
     "central america",
     "latam",
+    # The continents remotive sends. "Americas, Europe, Asia, Africa, Oceania" is its
+    # canonical five-continent value -- it is the worked example in catalog/remotive.md --
+    # and without these three, Asia/Africa/Oceania were silently dropped on 11% of a live
+    # feed, making a five-continent role invisible to a searcher on three of them.
+    # `northern america` is a one-word near-miss on the existing `north america`.
+    "asia",
+    "africa",
+    "oceania",
+    "northern america",
     "emea",
     "apac",
     "asia-pacific",

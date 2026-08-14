@@ -609,6 +609,12 @@ def stated_scope(values, raw: str | None = None) -> dict:
         whole = iso3166.alpha2(values)
         values = [values] if whole else [v.strip() for v in values.split(",")]
     names = [v for v in values if isinstance(v, str) and v.strip()]
+    # A list that HAD members but none usable is malformed input, not a declaration. Only a
+    # genuinely empty list carries himalayas' "open worldwide" meaning; `["", None]` is a
+    # vendor sending junk, and reading it as unbounded would assert the most permissive
+    # possible value from the least information.
+    if values and not names:
+        return {"remote_areas": None, "remote_regions": None, "remote_scope_raw": raw}
 
     # "WORLDWIDE" IS A STATEMENT, NOT A SILENCE. himalayas says it with an empty array and
     # the branch above already honours that; remotive and jobicy say it with the WORD, and
@@ -618,7 +624,14 @@ def stated_scope(values, raw: str | None = None) -> dict:
     # dropped for the wrong reason. `vocab._REMOTE_ANYWHERE` already recognised the word on
     # the LOCATION path; the adapter path is where it was missing. Found only by probing a
     # live endpoint -- no fixture had it, because I wrote the fixtures.
-    if names and all(vocab._REMOTE_ANYWHERE.search(n) for n in names):
+    # WHOLE NAME, not a substring. `_REMOTE_ANYWHERE` is a word-boundary SEARCH, so the
+    # first version of this guard read "Anywhere in the US", "Anywhere in Europe" and
+    # "Worldwide except China" as unbounded -- a BOUNDED posting asserting it is open to
+    # the world. Through scoring._region_allowed an empty list satisfies every policy, so
+    # "Anywhere in the US" would have been admitted into a Germany-only filter. That is the
+    # one direction this contract exists to never be wrong in, and the fix for one bug
+    # introduced it.
+    if names and all(vocab._REMOTE_ANYWHERE.fullmatch(n.strip()) for n in names):
         return {
             "remote_areas": [],
             "remote_regions": None,

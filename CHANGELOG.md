@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — found by probing live vendor endpoints
+
+- **`"Worldwide"` was recorded as "we don't know".** himalayas declares an unrestricted
+  posting with an empty array, which 0.8.0 handles; remotive and jobicy declare it with the
+  **word**, and only the location path knew that word. **6 of 18 live remotive rows** — a
+  third of that entire feed — came back unstated when the vendor had said "no restriction".
+  Same defect as the empty array, on the string vendors.
+
+- **All five continents are kept.** `"Americas, Europe, Asia, Africa, Oceania"` is
+  remotive's canonical value and appears on **11% of a live feed**; `ASIA`, `AFRICA` and
+  `OCEANIA` were not in the region vocabulary, so a role open to five continents was
+  invisible to a searcher on three of them. `NORTHERN AMERICA` added as a near-miss alias.
+
+- **A bounded "anywhere" string no longer reads as unbounded.** Caught before release: the
+  Worldwide fix above matched the word as a substring, so `"Anywhere in the US"` and
+  `"Worldwide except China"` returned "open worldwide" — and since an empty list satisfies
+  every scope policy, `"Anywhere in the US"` would have been admitted into a Germany-only
+  filter. The whole name must now BE an anywhere-word. A list of blanks is likewise
+  malformed input rather than a worldwide declaration.
+
+**Why none of this was caught before 0.8.0 shipped:** `sources.stated_scope` had never seen
+a live vendor response. Every fixture was hand-written and the development corpus was a
+downstream store with no adapter-supplied structured fields, so the path was unreachable
+even in principle. `pytest -m live` passes and does **not** assert on the boundary fields —
+that gap is what let these through, and it is the thing to fix next.
+
+
 ## [0.8.0] - 2026-08-14
 
 ### Changed — BREAKING
