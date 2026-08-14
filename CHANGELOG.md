@@ -104,6 +104,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not carry, and inferring `US` from a city name is exactly the plausible-looking
   default the record contract forbids.
 
+### Fixed — `city` no longer holds a list of countries
+
+- **A location that enumerates eligible countries put that enumeration in `city`.**
+  `rpartition` leaves everything before the last comma in the head slot, and the head became
+  the city unconditionally — so `Australia, Canada, Germany, United Kingdom (Remote)` was
+  filed as a city of that name. **74 rows** in a 31,790-row harvest. They are now `None`,
+  which is what `split_place`'s own docstring has always promised: *"A None here costs a
+  filter; a wrong city is a permanently wrong row."*
+
+  The test is **two or more distinct country names**, and the precision matters. Refusing any
+  head containing a comma — the obvious fix — would also null `Austin, Texas` and
+  `New York, New York`, ordinary city+state heads that make up most of the 6,644
+  separator-bearing values in the same harvest. That would trade 74 wrong values for
+  thousands of right ones, and only measuring the two populations separately showed it.
+
+  Heads carrying a city+state pair are untouched and still imperfect: `Austin, Texas` remains
+  in `city` rather than being split across `city` and `state`. That is pre-existing, larger
+  than this release, and now written down rather than assumed.
+
 ### Fixed — two bugs live since 0.6
 
 - **Himalayas' country list was joined into a string, which is unrecoverable.** ISO country
