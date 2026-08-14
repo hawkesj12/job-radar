@@ -2251,6 +2251,7 @@ def test_a_bounded_anywhere_string_is_not_unbounded():
 
     for bounded in (
         "Anywhere in the US", "Anywhere in Europe", "Worldwide except China", "Global South",
+        "Remote (Anywhere in LATAM)", "Anywhere in the EU",
     ):  # fmt: skip
         assert stated_scope(bounded)["remote_areas"] != [], bounded
     # the genuine article still reads as unbounded

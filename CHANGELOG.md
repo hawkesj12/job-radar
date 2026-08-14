@@ -29,8 +29,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **Why none of this was caught before 0.8.0 shipped:** `sources.stated_scope` had never seen
 a live vendor response. Every fixture was hand-written and the development corpus was a
 downstream store with no adapter-supplied structured fields, so the path was unreachable
-even in principle. `pytest -m live` passes and does **not** assert on the boundary fields —
-that gap is what let these through, and it is the thing to fix next.
+even in principle. The live canary proved the adapters *parsed* and asserted nothing about
+what they parsed the boundary *into*.
+
+### Added
+
+- **The live canary now checks the eligibility boundary itself** (`pytest -m live`, not CI),
+  which is the gap that let the three defects above ship. It asserts the field shapes
+  (areas are ISO codes; a region is never a country code), that a stated boundary is not
+  silently dropped, and — the one the others cannot catch — that **every word** of a
+  boundary is understood, not just the first two. Measured 0 unmapped of 41 / 128 / 660
+  live tokens today, against 15% for the `"Worldwide"` miss and 24% for the continents.
+  One defect is honestly **not** live-catchable: across 820 live values, zero vendors send
+  a bounded "anywhere" string, so `"Anywhere in the US"` is gated by a hermetic test
+  instead.
 
 
 ## [0.8.0] - 2026-08-14

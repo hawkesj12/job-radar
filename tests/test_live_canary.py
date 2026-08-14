@@ -260,20 +260,39 @@ def test_a_field_a_source_really_sends_has_not_gone_quiet(name):
 # silence.
 SCOPE_SOURCES = ["remotive", "jobicy", "himalayas"]
 _AREA_RE = re.compile(r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$")
+_TZ_QUALIFIER = re.compile(r"\btime\s?zones?\b", re.I)
+
+
+_SCOPE_CACHE: dict = {}
 
 
 def _scope_rows(name):
-    """Live rows from one boundary-carrying source, or a skip."""
-    _cfg()
-    from job_radar import engine
+    """Live rows from one boundary-carrying source, or a skip.
 
-    try:
-        raw = sources.BREADTH_ALL[name](BROAD_QUERY)
-    except NET_ERRORS as e:
-        pytest.skip(f"{name} unreachable ({type(e).__name__})")
-    if not raw:
-        pytest.skip(f"{name} returned no rows — covered by the shape tests")
-    return [engine._coerce(r) for r in raw]
+    CACHED PER RUN, and that is not an optimization. Four assertions below read the
+    same source, and himalayas is ~35 paged requests -- so the uncached version made
+    five full crawls of one vendor per canary run and got 429'd into a skip, which is
+    both rude and self-defeating: a rate-limited canary reports "unreachable" and
+    tells you nothing. One fetch, four questions asked of it.
+    """
+    if name not in _SCOPE_CACHE:
+        _cfg()
+        from job_radar import engine
+
+        try:
+            raw = sources.BREADTH_ALL[name](BROAD_QUERY)
+        except NET_ERRORS as e:
+            _SCOPE_CACHE[name] = (None, f"{name} unreachable ({type(e).__name__})")
+        else:
+            _SCOPE_CACHE[name] = (
+                ([engine._coerce(r) for r in raw], None)
+                if raw
+                else (None, f"{name} returned no rows — covered by the shape tests")
+            )
+    rows, why = _SCOPE_CACHE[name]
+    if rows is None:
+        pytest.skip(why)
+    return rows
 
 
 @pytest.mark.parametrize("name", SCOPE_SOURCES)
@@ -343,8 +362,13 @@ def test_a_stated_boundary_is_not_silently_dropped(name):
         for r in stated
         if r.get("remote_areas") is None and r.get("remote_regions") is None
     ]
+    # 10%, not 25%. Measured 0 violations across 820 live rows on all three sources,
+    # while defect (a) put remotive at 6 of 18 (33%) -- so the gate has 3x margin over
+    # the failure and still tolerates one odd prose posting in a small feed. A
+    # zero-tolerance gate would be higher signal and was argued for; it reddens on the
+    # first unreadable string a vendor invents, which is how a canary gets muted.
     ratio = len(unparsed) / len(stated)
-    assert ratio <= 0.25, (
+    assert ratio <= 0.10, (
         f"{name}: {len(unparsed)} of {len(stated)} rows carry boundary text we parsed "
         f"nothing out of ({ratio:.0%}). Samples: "
         f"{sorted({r['remote_scope_raw'] for r in unparsed})[:5]}. Either the vendor "
@@ -369,11 +393,9 @@ def _unmapped_tokens(rows):
         raw = r.get("remote_scope_raw")
         if not raw:
             continue
-        areas, regions = r.get("remote_areas"), r.get("remote_regions")
         # `[]` is stated-worldwide: one word covering every token by definition.
-        if areas == []:
+        if r.get("remote_areas") == []:
             continue
-        got = set(areas or ()) | set(regions or ())
         for tok in (t.strip() for t in raw.replace("&", ",").split(",")):
             if not tok:
                 continue
@@ -382,9 +404,15 @@ def _unmapped_tokens(rows):
                 vocab.country_code(tok)
                 or iso3166.alpha2(tok)
                 or tok.upper() in vocab.REMOTE_REGION_TOKENS
-                # A multi-word token whose parse landed in the row's output --
-                # "Remote US" -> US. Substring, because the token carries prose.
-                or any(g.split("-")[0] in tok.upper() for g in got)
+                # A WORK-HOURS qualifier, not a place. remotive sends "European
+                # timezones" and "USA timezones" alongside the real boundary tokens
+                # (16.7% of its rows today), and stated_scope correctly declines to
+                # read an eligibility boundary out of an overlap requirement. Named
+                # explicitly rather than left to fall through: an earlier version of
+                # this check credited them BY ACCIDENT, because "EUROPE" is a
+                # substring of "EUROPEAN TIMEZONES", which would equally have
+                # credited any garbage containing a mapped word.
+                or _TZ_QUALIFIER.search(tok)
             )
             if not resolved:
                 missed.add(tok)
@@ -403,11 +431,53 @@ def test_every_word_of_a_boundary_is_understood_not_just_the_first_two(name):
     that continent will ever see.
     """
     total, missed = _unmapped_tokens(_scope_rows(name))
-    if not total:
-        pytest.skip(f"{name} sent no enumerated boundary tokens")
+    # remotive's whole corpus is 41 tokens and it swung 31 -> 18 postings in 11 days,
+    # so a ratio over a handful of tokens is noise wearing a percentage sign: ONE new
+    # oddly-worded posting would be 1-of-4. Below 30 tokens, say nothing.
+    if total < 30:
+        pytest.skip(f"{name}: only {total} boundary tokens — too few to rate")
     assert len(missed) / total <= 0.10, (
         f"{name}: {len(missed)} of {total} boundary tokens resolved to nothing — "
         f"{sorted(missed)[:8]}. Each one is a place a searcher will not be shown. "
         "Add it to vocab._REMOTE_REGIONS (a multi-country region) or confirm it "
         "belongs in the ISO table (a country); do not widen this threshold."
     )
+
+
+@pytest.mark.parametrize("name", SCOPE_SOURCES)
+def test_an_unbounded_posting_does_not_also_name_a_boundary(name):
+    """A tripwire that should sit silent for a long time, and that is the point.
+
+    `remote_areas == []` asserts the vendor said "anywhere", and `_region_allowed`
+    treats it as satisfying EVERY scope policy -- the most permissive value in the
+    contract. So a row claiming worldwide while its own raw text names a country is a
+    contradiction in the one direction that admits a posting into a filter meant to
+    exclude it. That is defect three of 0.8.0 ("Anywhere in the US" reading as
+    unbounded), and it is the ONLY defect of the three a live canary structurally
+    cannot catch today: across 820 live values, ZERO strings contain an anywhere-word
+    plus anything else. The vendors are not currently sending the shape that breaks
+    it, so the hermetic table in test_sources.py is what actually gates it on a PR.
+
+    This costs one comparison and fires the day a vendor starts sending it.
+    """
+    from job_radar import iso3166, vocab
+
+    for r in _scope_rows(name):
+        if r.get("remote_areas") != []:
+            continue
+        raw = r.get("remote_scope_raw") or ""
+        named = [
+            t.strip()
+            for t in raw.replace("&", ",").split(",")
+            if t.strip()
+            and (
+                vocab.country_code(t.strip())
+                or iso3166.alpha2(t.strip())
+                or t.strip().upper() in vocab.REMOTE_REGION_TOKENS
+            )
+        ]
+        assert not named, (
+            f"{name}: row claims stated-worldwide (remote_areas == []) while its own "
+            f"raw value {raw!r} names {named}. [] satisfies every allowed_scopes "
+            "policy, so this admits a bounded posting into a filter that excludes it."
+        )
