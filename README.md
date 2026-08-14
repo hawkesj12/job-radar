@@ -255,7 +255,7 @@ job-radar --version
 
 ## Configuration
 
-Everything is in one file — `job-radar.yaml`. Set your **target titles**, tune the **fit-weight keywords**, and adjust **filters** (`max_age_days`, `min_score`, remote-only, excluded locations). `job-radar init` writes a fully commented starter config into your folder with every knob on its default; that file is the reference (it ships at [`job_radar/data/job-radar.example.yaml`](job_radar/data/job-radar.example.yaml)).
+Everything is in one file — `job-radar.yaml`. Set your **target titles**, tune the **fit-weight keywords**, and adjust **filters** (`max_age_days`, `min_score`, remote-only, excluded locations, and `allowed_scopes` — *where* a remote worker may sit, which is a different question from whether the role is remote at all). `job-radar init` writes a fully commented starter config into your folder with every knob on its default; that file is the reference (it ships at [`job_radar/data/job-radar.example.yaml`](job_radar/data/job-radar.example.yaml)).
 
 Out of the box the defaults are tuned for **remote software/AI** roles, because the keyless sources are remote-tech boards. Nothing about the engine is tech-specific: change `signal_titles` + `fit_weights` to your field's language, set `remote_only: false` and a real `location`, and turn on the keyed lane (Adzuna, USAJOBS, Google for Jobs) where the whole market lives.
 
