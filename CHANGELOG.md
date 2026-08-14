@@ -4,7 +4,42 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-13
+
+### Changed — BREAKING
+
+- **`remote_region` is removed. Three fields replace it.** The old column held four
+  different kinds of value at once — alpha-2 country codes, ISO 3166-2 subdivisions,
+  multi-country region names, and sentinels — which is a documented data-modelling failure
+  mode and which forced a US-inclusive special case in the scorer. That special case was the
+  tell: it existed only because a **set** was being stored as a **string**.
+
+  Measured on a 31,790-row harvest, **1,162 of the 1,168 adapter-written values (99.5%) fell
+  outside the closed vocabulary the field's own docstring claimed** — every adapter wrote raw
+  vendor text straight into it.
+
+  | new field | holds |
+  |---|---|
+  | `remote_areas` | `list[str] \| None` — ISO 3166-1 alpha-2, or ISO 3166-2 for a stated US state |
+  | `remote_regions` | `list[str] \| None` — closed tokens (`EMEA`, `LATAM`, …), never a country code |
+  | `remote_scope_raw` | `str \| None` — the vendor's own words, verbatim |
+
+  **Three states, and the middle one is why it is a list:** `null` = the posting said
+  nothing · `[]` = it said **anywhere** · non-empty = these places. Collapsing the first two
+  either drops the most permissive rows in a feed or admits the ones nobody classified.
+
+  **Boundaries are STATED only.** A country parsed out of an office address is not an
+  eligibility claim: `Munich, Germany` and `Costa Mesa, California, United States` are where
+  the desk is. 6,779 area-carrying rows are that shape, and on them the old field meant
+  nothing more than `country`. That geography still lives in `city`/`state`/`country`.
+
+  Per schema.org's `applicantLocationRequirements`, which models this concept: it records
+  where applicants may **apply from**, and is explicitly **not** a citizenship or work-visa
+  claim.
+
+  **Upgrading:** anything reading `remote_region` must move to `remote_areas`. `"US" in
+  row["remote_areas"]` is the replacement for the US question, and it no longer needs the
+  caller to know that `US-CA` and `NORTH AMERICA` are US-inclusive.
 
 > **About every number below.** All counts come from **one** harvest of 31,790 rows,
 > composed **78.5% greenhouse · 12.5% ashby · 4.3% lever · 3.5% himalayas**; the other
@@ -68,6 +103,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`New York (Remote)`) also stays unstated: recognising it needs a gazetteer this package
   does not carry, and inferring `US` from a city name is exactly the plausible-looking
   default the record contract forbids.
+
+### Fixed — two bugs live since 0.6
+
+- **Himalayas' country list was joined into a string, which is unrecoverable.** ISO country
+  names contain commas — `Congo, The Democratic Republic of the` and `Micronesia, Federated
+  States of` are both real and both appear in this feed — so re-splitting the joined form
+  yields fragments like `Federated States of` as if they were countries. The array now
+  passes through intact; the join survives only as `remote_scope_raw`, which is display and
+  which nothing re-splits.
+
+- **An empty restriction list was recorded as "unknown".** Himalayas documents that an empty
+  `locationRestrictions` array means *open worldwide with no geographic restrictions*, and
+  `catalog/himalayas.md` had carried that rule since the profile was written — the adapter's
+  `or None` overrode it on **29 rows**, discarding the most permissive rows in the feed. The
+  inverse of the error this package's contract exists to prevent.
+
+  A non-empty list whose members do not resolve is **unstated**, never `[]`. Asserting
+  "worldwide" because a lookup failed is the worst available direction to be wrong.
+
+### Added
+
+- **`job_radar.iso3166`** — a generated ISO 3166-1 name → alpha-2 table (425 names, from
+  pycountry at build time, committed as literal data; **no new runtime dependency**). Kept
+  deliberately separate from `vocab._COUNTRY_CODES`, which is 62 names and feeds *prose*
+  matching — putting a full ISO table there would match `Georgia` (a US state), `Jordan`,
+  `Chad` and `Turkey` against ordinary location strings, and a test pins that no country name
+  in that map is also a US state name.
+
+  Vendors send **common** names and ISO ships **official** ones, so a raw ISO list mapped only
+  210 of 231 real tokens; pycountry's common-name index takes it to 222, and a documented
+  alias layer covers the rest (`usa`, `uk`, `england`, plus `turkey` — ISO renamed it Türkiye
+  in 2022 — `palestine`, and `kosovo`, which has no ISO code at all).
 
 ### Fixed (found by sampling the rows this change moves)
 
