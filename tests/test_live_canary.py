@@ -26,6 +26,8 @@ Only keyless sources are covered. Adzuna, USAJOBS and Google-for-Jobs need
 credentials, and a scheduled public workflow should not carry them.
 """
 
+import re
+
 import pytest
 
 from job_radar import config, sources
@@ -192,7 +194,15 @@ POPULATED = {
     "ashby": ("posted", "text", "remote_type", "city", "country", "salary_min"),
     "lever": ("posted", "text", "country", "remote_type"),
     "themuse": ("posted", "text", "city", "country"),
-    "jobicy": ("posted", "text"),
+    # `remote_scope_raw` on the three sources that carry an eligibility boundary.
+    # Measured live 2026-08-14: jobicy 100/100 rows, remotive 18/18, himalayas
+    # 199/204 -- so a source going quiet here is the vendor dropping the field, not a
+    # sparse day. Deliberately NOT `remote_areas`: himalayas' correct answer is very
+    # often `[]`, which `_populated` counts as empty, and a canary that goes red on
+    # the right answer gets muted.
+    "jobicy": ("posted", "text", "remote_scope_raw"),
+    "remotive": ("posted", "text", "remote_scope_raw"),
+    "himalayas": ("posted", "text", "remote_scope_raw"),
     "remoteok": ("posted", "text"),
     "arbeitnow": ("posted", "text"),
     "braintrust": ("posted", "text"),
@@ -228,3 +238,176 @@ def test_a_field_a_source_really_sends_has_not_gone_quiet(name):
             "measured sending it. Either the vendor renamed/dropped the field or our "
             "mapping broke — both are silent everywhere else."
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The eligibility boundary: remote_areas / remote_regions / remote_scope_raw.
+#
+# THIS BLOCK EXISTS BECAUSE 0.8.0 SHIPPED THREE DEFECTS IN THIS EXACT PATH and every
+# test above was green through all of them. `sources.stated_scope` had never met a
+# live vendor response: its fixtures were hand-written, and the development corpus
+# was a downstream store with no adapter-supplied structured fields, so the code was
+# unreachable even in principle. The canary proved the adapters PARSE; nothing
+# asserted on what they parsed the boundary INTO.
+#
+# What shipped anyway: "Worldwide" recorded as "we don't know" on a third of the
+# remotive feed, and three of five continents dropped from a value that appears on
+# 11% of it. Both are silent -- a wrong list still round-trips, still filters, and
+# still looks like data.
+#
+# Only the three adapters that call stated_scope are covered. Every other source
+# leaves these fields None, and asserting on them there would be asserting on
+# silence.
+SCOPE_SOURCES = ["remotive", "jobicy", "himalayas"]
+_AREA_RE = re.compile(r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$")
+
+
+def _scope_rows(name):
+    """Live rows from one boundary-carrying source, or a skip."""
+    _cfg()
+    from job_radar import engine
+
+    try:
+        raw = sources.BREADTH_ALL[name](BROAD_QUERY)
+    except NET_ERRORS as e:
+        pytest.skip(f"{name} unreachable ({type(e).__name__})")
+    if not raw:
+        pytest.skip(f"{name} returned no rows — covered by the shape tests")
+    return [engine._coerce(r) for r in raw]
+
+
+@pytest.mark.parametrize("name", SCOPE_SOURCES)
+def test_the_boundary_fields_hold_their_shape_on_live_rows(name):
+    """Structural invariants, checked against what the vendor actually sent today.
+
+    The anti-mixing rule is the one that matters: `remote_regions` must never hold a
+    country code. One column holding codes, subdivisions, region names and sentinels
+    at once is precisely what 0.8.0 removed, and a vendor sending a new value is how
+    it would grow back -- silently, since nothing downstream type-checks a list of
+    strings.
+    """
+    from job_radar import iso3166, vocab
+
+    rows = _scope_rows(name)
+    for r in rows:
+        areas, regions = r.get("remote_areas"), r.get("remote_regions")
+        raw = r.get("remote_scope_raw")
+        assert areas is None or isinstance(areas, list), f"{name}: areas {areas!r}"
+        assert regions is None or isinstance(regions, list), (
+            f"{name}: regions {regions!r}"
+        )
+        for a in areas or ():
+            assert _AREA_RE.match(a), (
+                f"{name}: remote_areas holds {a!r}, which is not an ISO alpha-2 or "
+                "3166-2 code. A vendor name reached the column unresolved."
+            )
+        for g in regions or ():
+            assert g in vocab.REMOTE_REGION_TOKENS, (
+                f"{name}: remote_regions holds {g!r}, outside the closed token set."
+            )
+            assert g not in frozenset(iso3166.NAME_TO_ALPHA2.values()), (
+                f"{name}: remote_regions holds {g!r}, a COUNTRY CODE. Regions and "
+                "countries are separate fields on purpose; this is the mixing bug."
+            )
+        # A parsed boundary with no source text means someone invented it -- with ONE
+        # real exception this assertion found on its first live run: himalayas states
+        # "open worldwide" as an EMPTY ARRAY, so there genuinely are no vendor words to
+        # record and `[]`/None is the honest pair. An ENUMERATED boundary out of
+        # nowhere is still fabrication, and so is any region.
+        if raw is None:
+            assert not areas and regions is None, (
+                f"{name}: parsed a boundary ({areas!r}/{regions!r}) from no raw value."
+            )
+
+
+@pytest.mark.parametrize("name", SCOPE_SOURCES)
+def test_a_stated_boundary_is_not_silently_dropped(name):
+    """The vendor said something; did we understand ANY of it?
+
+    This is the assertion whose absence let 0.8.0 ship. Both shipped defects present
+    identically here -- a row with a real `remote_scope_raw` and nothing parsed out of
+    it -- whether the cause is an unknown word ("Oceania") or a known one nobody
+    mapped ("Worldwide"). It deliberately measures a RATIO rather than demanding a
+    parse on every row: some vendor strings are genuinely prose we should not pretend
+    to read, and a canary that goes red on one weird posting gets muted.
+
+    `[]` counts as understood. It is the STATED-worldwide answer, and treating it as a
+    miss would invert the very distinction this field exists to carry.
+    """
+    rows = _scope_rows(name)
+    stated = [r for r in rows if r.get("remote_scope_raw")]
+    if not stated:
+        pytest.skip(f"{name} sent no boundary text on any of {len(rows)} rows")
+    unparsed = [
+        r
+        for r in stated
+        if r.get("remote_areas") is None and r.get("remote_regions") is None
+    ]
+    ratio = len(unparsed) / len(stated)
+    assert ratio <= 0.25, (
+        f"{name}: {len(unparsed)} of {len(stated)} rows carry boundary text we parsed "
+        f"nothing out of ({ratio:.0%}). Samples: "
+        f"{sorted({r['remote_scope_raw'] for r in unparsed})[:5]}. Either the vendor "
+        "changed its vocabulary or ours is missing a token — 0.8.0 shipped with "
+        "'Worldwide' unmapped on a third of one feed and three continents on another."
+    )
+
+
+def _unmapped_tokens(rows):
+    """Boundary tokens the vocabulary understood nothing of. -> (total, missed set)
+
+    The ratio test above asks "did we get ANYTHING out of this row"; this asks "did we
+    get EVERYTHING". The difference is not academic -- it is exactly defect two of
+    0.8.0: `"Americas, Europe, Asia, Africa, Oceania"` parsed to two regions, so the
+    row looked understood while three continents fell on the floor. Only counting
+    tokens sees that.
+    """
+    from job_radar import iso3166, vocab
+
+    total, missed = 0, set()
+    for r in rows:
+        raw = r.get("remote_scope_raw")
+        if not raw:
+            continue
+        areas, regions = r.get("remote_areas"), r.get("remote_regions")
+        # `[]` is stated-worldwide: one word covering every token by definition.
+        if areas == []:
+            continue
+        got = set(areas or ()) | set(regions or ())
+        for tok in (t.strip() for t in raw.replace("&", ",").split(",")):
+            if not tok:
+                continue
+            total += 1
+            resolved = (
+                vocab.country_code(tok)
+                or iso3166.alpha2(tok)
+                or tok.upper() in vocab.REMOTE_REGION_TOKENS
+                # A multi-word token whose parse landed in the row's output --
+                # "Remote US" -> US. Substring, because the token carries prose.
+                or any(g.split("-")[0] in tok.upper() for g in got)
+            )
+            if not resolved:
+                missed.add(tok)
+    return total, missed
+
+
+@pytest.mark.parametrize("name", SCOPE_SOURCES)
+def test_every_word_of_a_boundary_is_understood_not_just_the_first_two(name):
+    """Measured 2026-08-14, AFTER the 0.8.1 fixes: 0 unmapped of 41 (remotive), 128
+    (jobicy), 660 (himalayas) live tokens. The gate sits at 10% because the failures
+    it exists to catch were far above it -- "Worldwide" was 6 of remotive's 41 tokens
+    (15%) and the missing continents were 3 of every 5 on 11% of a feed -- while
+    normal churn is a single new country name in a hundred.
+
+    A miss here is not a crash. It is a role open to a continent that no one searching
+    that continent will ever see.
+    """
+    total, missed = _unmapped_tokens(_scope_rows(name))
+    if not total:
+        pytest.skip(f"{name} sent no enumerated boundary tokens")
+    assert len(missed) / total <= 0.10, (
+        f"{name}: {len(missed)} of {total} boundary tokens resolved to nothing — "
+        f"{sorted(missed)[:8]}. Each one is a place a searcher will not be shown. "
+        "Add it to vocab._REMOTE_REGIONS (a multi-country region) or confirm it "
+        "belongs in the ISO table (a country); do not widen this threshold."
+    )
