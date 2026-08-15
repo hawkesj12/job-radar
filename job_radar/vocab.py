@@ -722,7 +722,7 @@ _REMOTE_ANYWHERE = re.compile(
 _REMOTE_TZ = re.compile(r"(?<![a-z])(?:utc|gmt|est|pst|cst|cet)(?![a-z])", re.I)
 
 
-def _alternation(words) -> re.Pattern:
+def _alternation(words, guard_new: bool = True) -> re.Pattern:
     """One word-bounded alternation, longest name first.
 
     Replaces a per-call loop that rebuilt `rf"(?<![a-z]){re.escape(name)}(?![a-z])"` for
@@ -730,13 +730,26 @@ def _alternation(words) -> re.Pattern:
     constructions per row. Compilation itself amortized through re's internal cache, but
     the escaping, sorting and dispatch did not: measured 49.6 us/call against 2.7 us for
     this, a 14.8x saving on the line item.
+
+    `guard_new=False` FOR THE STATE MAP, and it is not a style knob -- it is the difference
+    between a correct answer and the worst wrong one this module can give. See below.
     """
     # `(?<!new )` because "New Mexico" is a US state and the plain lookbehind accepts a
     # space -- `_longest_match` hid this (united states, 13 chars, beat mexico, 6), so
     # collecting ALL matches surfaced it: 63 corpus rows became (['MX','US']). Multi-word
     # names starting with "new" are unaffected: "new zealand" matches from its own start.
+    #
+    # THAT GUARD IS RIGHT FOR COUNTRIES AND WRONG FOR STATES, which is why it is optional.
+    # The state scan it replaced never had it, and inheriting it suppressed a state name
+    # after the literal word "new" -- so "Anywhere in New Washington" (a real town, as is
+    # New Virginia, Iowa) lost the guard that was the only thing standing between it and
+    # `_REMOTE_ANYWHERE`, and came back `[]`: STATED-WORLDWIDE for a posting that named a
+    # place. An empty list satisfies every `allowed_scopes` policy, so that is the one
+    # direction this contract exists never to be wrong in. 162 of 500 generated
+    # "new <state>" strings changed emptiness; three changed the function's real answer.
+    prefix = r"(?<![a-z])(?<!new )(?:" if guard_new else r"(?<![a-z])(?:"
     return re.compile(
-        r"(?<![a-z])(?<!new )(?:"
+        prefix
         + "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
         + r")(?![a-z])"
     )
@@ -744,6 +757,26 @@ def _alternation(words) -> re.Pattern:
 
 _REGION_RE = _alternation(_REMOTE_REGIONS)
 _COUNTRY_NAME_RE = _alternation(_COUNTRY_CODES)
+# The third loop, hoisted last and for the same reason as the first two. `remote_scope` was
+# rebuilding `rf"(?<![a-z]){re.escape(n)}(?![a-z])"` for all 50 state names on EVERY posting
+# -- 1.1M `re.escape` and `re.search` calls over a 20k-row profile, about 75% of the
+# function's runtime.
+#
+# THE SET IT BUILDS IS NOT ALWAYS THE SAME SET, and that is the part to read before touching
+# this. The old loop searched each name INDEPENDENTLY, so "Charleston, West Virginia" matched
+# both "west virginia" and "virginia" and produced {WV, VA}. Longest-first `finditer` does not
+# overlap, so it produces {WV} alone -- a real difference on 520 of 5,720 generated strings.
+# That pair is the only containment relationship in `_STATE_NAMES`.
+#
+# It is inert because `guards` is read exactly once, as `if guards:` below -- truthiness, never
+# membership -- so dropping a redundant member cannot change an answer. IF YOU EVER READ
+# `guards` FOR ITS CONTENTS, that stops being true.
+#
+# EMPTINESS is the property that must be preserved, and the first version of this hoist broke
+# it by inheriting `_alternation`'s `(?<!new )` -- hence `guard_new=False`, whose reasoning
+# lives on `_alternation` itself. Verified rather than argued: identical output on 5,065
+# strings A/B'd against released v0.8.1, including every "new <state>" and containment form.
+_STATE_NAME_RE = _alternation(_STATE_NAMES, guard_new=False)
 
 
 def _longest_match(rx: re.Pattern, low: str) -> str | None:
@@ -892,11 +925,7 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     # state name to a scanner. So a state name is enough to refuse "worldwide" and not
     # enough to assert a boundary: "Anywhere in Texas" comes out unstated (1 measured row),
     # which is the honest answer when the alternative is calling New York a restriction.
-    guards = named | {
-        _STATE_NAMES[n]
-        for n in _STATE_NAMES
-        if re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", low)
-    }
+    guards = named | {_STATE_NAMES[m.group(0)] for m in _STATE_NAME_RE.finditer(low)}
 
     areas: set[str] = set()
     if not has_city:

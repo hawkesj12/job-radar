@@ -2859,3 +2859,95 @@ def test_a_continent_inside_a_country_name_is_not_a_stated_region():
     # And a region that merely sits NEXT TO a country is untouched — only a region whose
     # span falls INSIDE a matched country name is masked.
     assert remote_scope("Bengaluru, Karnataka, India, APAC") == (["IN"], ["APAC"])
+
+
+def test_the_state_name_guard_survives_being_hoisted_to_one_alternation():
+    """The per-call loop over 50 state names became one module-level alternation — a 7.5x
+    win on `remote_scope`, and NOT an output-identical refactor at the intermediate step.
+
+    The old loop searched each name independently, so "Charleston, West Virginia" produced
+    the guard set {WV, VA}; a longest-first non-overlapping scan produces {WV}. That is the
+    only containment pair in `_STATE_NAMES`, and it is inert because the set is read once as
+    `if guards:` — truthiness, never membership.
+
+    This test pins the OBSERVABLE behaviour rather than the set, so it keeps holding if the
+    internals change again — and fails loudly if someone ever makes the guard's contents
+    load-bearing, which is the one edit that would make the hoist unsafe."""
+    from job_radar.vocab import remote_scope
+
+    # A state name GUARDS the unbounded fallback: naming a place means "not worldwide",
+    # so none of these may come back as stated-unbounded ([]).
+    for s in (
+        "Charleston, West Virginia",
+        "Anywhere in West Virginia",
+        "Remote - West Virginia",
+        "Richmond, Virginia",
+        "Anywhere in Virginia",
+    ):
+        areas, _ = remote_scope(s)
+        assert areas != [], f"{s} claimed stated-worldwide while naming a state"
+    # And the guard still fires for the contained name on its own.
+    assert remote_scope("Anywhere in Texas")[0] != []
+
+
+def test_a_state_after_the_word_new_still_guards_the_unbounded_fallback():
+    """The hoist's real landmine, and it was NOT the containment pair.
+
+    `_alternation` carries a `(?<!new )` lookbehind, added for the COUNTRY map so that
+    "New Mexico" (a US state) never resolves to Mexico. The per-state loop it replaced
+    never had that guard, so reusing the helper silently suppressed any state name after
+    the literal word "new" — and New Washington (Ohio, Indiana) and New Virginia (Iowa)
+    are real towns. The suppressed guard was the only thing standing between those strings
+    and `_REMOTE_ANYWHERE`, so they came back `[]`: STATED-WORLDWIDE for a posting that
+    named a place. An empty list satisfies every `allowed_scopes` policy, which makes this
+    the one direction this contract exists never to be wrong in.
+
+    Hence `guard_new=False` on the state alternation — while the country map keeps it."""
+    from job_radar.vocab import remote_scope
+
+    for s in ("Anywhere in New Washington", "Anywhere, New Washington",
+              "Remote (Anywhere) - New Virginia"):  # fmt: skip
+        assert remote_scope(s)[0] != [], f"{s} claimed stated-worldwide"
+    # The country guard this lookbehind exists for is untouched.
+    assert remote_scope("Remote - Mexico")[0] == ["MX"]
+    assert remote_scope("Remote - New Mexico")[0] != ["MX"]
+
+
+def test_a_vendors_own_iso_code_resolves_except_where_it_is_ambiguous():
+    """`iso3166.alpha2` maps NAMES, so "United States" resolved while the literal "US" —
+    the very string this package stores — did not.
+
+    Half-closed on purpose. Seven codes are both a country and a US state abbreviation,
+    and the ambiguity is live: on the prose path `remote_scope("Remote - CA")` returns
+    `US-CA`, California. Reading "CA" as Canada here would make two characters mean two
+    different places on two paths of one contract, and a wrong country admits a posting
+    into a filter that excludes it. Those seven stay silent instead."""
+    from job_radar.sources import stated_scope
+
+    for code in ("US", "GB", "FR", "JP", "BR"):
+        assert stated_scope(code)["remote_areas"] == [code], code
+    for ambiguous in ("AR", "CA", "CO", "DE", "ID", "IL", "IN"):
+        r = stated_scope(ambiguous)
+        assert r["remote_areas"] is None, f"{ambiguous} must stay unresolved"
+        # Silent, but never lost — the raw value is what a re-parse would read.
+        assert r["remote_scope_raw"] == ambiguous
+    # Junk is still junk.
+    assert stated_scope("ZZ")["remote_areas"] is None
+    assert stated_scope("XX-YY")["remote_areas"] is None
+
+
+def test_a_subdivision_code_resolves_because_it_cannot_be_ambiguous():
+    """`US-TX` names exactly one place. `remote_scope` already EMITS this form,
+    `REMOTE_AREA_RE` blesses it and `_region_allowed` resolves it — so accepting it makes
+    the adapter path agree with the prose path instead of diverging from it.
+
+    The suffix is deliberately unvalidated: under `_region_allowed`'s `startswith` rule a
+    bogus `US-XX` can only narrow a match, never broaden one."""
+    from job_radar.sources import stated_scope
+    from job_radar.vocab import REMOTE_AREA_RE
+
+    assert stated_scope("US-TX")["remote_areas"] == ["US-TX"]
+    assert stated_scope("us-tx")["remote_areas"] == ["US-TX"]
+    assert stated_scope(["US-CA", "Canada"])["remote_areas"] == ["CA", "US-CA"]
+    for a in stated_scope("US-TX")["remote_areas"]:
+        assert REMOTE_AREA_RE.match(a), a

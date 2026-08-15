@@ -569,6 +569,48 @@ def _relative_posted(text: str) -> str:
 _NON_PLACE = ("", "remote", "anywhere", "any")
 
 
+# The seven codes that are BOTH an ISO country and a US state abbreviation. They are the
+# reason a bare code is only half-accepted below, and the reason `_bare_code` exists at all
+# rather than a one-line `in CODES` check.
+_STATE_COLLIDING_CODES = frozenset({"AR", "CA", "CO", "DE", "ID", "IL", "IN"})
+_ALPHA2 = frozenset(iso3166.NAME_TO_ALPHA2.values())
+_SUBDIVISION_RE = re.compile(r"^([A-Z]{2})-([A-Z0-9]{1,3})$")
+
+
+def _bare_code(name: str) -> str | None:
+    """A vendor's own ISO CODE -> that code, where reading it cannot be wrong.
+
+    `iso3166.alpha2` maps NAMES, so "United States" resolved while the literal "US" -- the
+    very string this package stores -- did not. That asymmetry is the gap this closes.
+
+    IT CLOSES ONLY THE HALF THAT IS SAFE. Seven codes are both a country and a US state
+    abbreviation (AR CA CO DE ID IL IN), and the ambiguity is not hypothetical: on the PROSE
+    path `vocab.remote_scope("Remote - CA")` returns `US-CA`, California. Accepting "CA" as
+    Canada here would make two characters mean two different places on two paths of one
+    record contract, and a wrong country in `remote_areas` admits a posting into a filter
+    that excludes it -- the one direction this contract must never be wrong in. So those
+    seven stay unresolved, with the vendor's string preserved in `remote_scope_raw`, and the
+    canary's unmapped-token gate is what would surface them if a vendor ever sent one.
+
+    SUBDIVISIONS ARE DIFFERENT AND DO RESOLVE. "US-TX" is unambiguous, `remote_scope` already
+    EMITS that form, `REMOTE_AREA_RE` already blesses it and `_region_allowed` already
+    resolves it -- so accepting it makes the two paths agree rather than diverge. The suffix
+    is deliberately not validated against a subdivision list: under the `startswith` rule in
+    `_region_allowed` a bogus "US-XX" can only ever narrow a match, never broaden one, which
+    is the safe direction to be wrong in.
+
+    MEASURED, AND WORTH SAYING PLAINLY: across 136 live rows from all three vendors that
+    populate this field, ZERO sent a bare code. This is a contract-consistency fix, not a
+    response to observed data.
+    """
+    v = name.strip().upper()
+    if m := _SUBDIVISION_RE.match(v):
+        return v if m.group(1) in _ALPHA2 else None
+    if v in _ALPHA2 and v not in _STATE_COLLIDING_CODES:
+        return v
+    return None
+
+
 def stated_scope(values, raw: str | None = None) -> dict:
     """A vendor's STATED eligibility list -> the three boundary fields.
 
@@ -669,7 +711,7 @@ def stated_scope(values, raw: str | None = None) -> dict:
 
     areas, regions, unmapped = set(), set(), False
     for n in names:
-        code = iso3166.alpha2(n)
+        code = iso3166.alpha2(n) or _bare_code(n)
         if code:
             areas.add(code)
         elif n.upper() in vocab.REMOTE_REGION_TOKENS:

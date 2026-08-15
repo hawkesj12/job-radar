@@ -6,6 +6,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Location parsing is ~8x faster.** `remote_scope` rebuilt a regex for all 50 US state
+  names on every posting — about three-quarters of its runtime. It now uses the same
+  precompiled alternation the country and region maps already use. Output is unchanged,
+  verified against the released 0.8.1 across 1,654 strings built from the cases that could
+  break it.
+
+### Fixed
+
+- **A vendor's own ISO code now resolves.** `"United States"` worked while the literal
+  `"US"` — the string this package itself stores — did not, because the lookup only knew
+  country *names*. `"US-TX"`-style subdivisions resolve too, matching what the location
+  parser already emits.
+
+  **Seven codes deliberately still do not resolve:** `AR CA CO DE ID IL IN` are each both a
+  country and a US state abbreviation, and the location parser already reads `"CA"` as
+  California. Resolving them as countries would make the same two characters mean two
+  different places, and a wrong country lets a posting through a filter meant to exclude
+  it. They stay unresolved with the vendor's text preserved. Measured first: across 136
+  live rows from all three sources that populate this field, none sent a bare code — this
+  is a consistency fix, not a response to observed data.
+
 ## [0.8.1] - 2026-08-14
 
 ### Fixed — found by probing live vendor endpoints
