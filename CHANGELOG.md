@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-15
+
 ### Changed
 
 - **Location parsing is ~8x faster.** `remote_scope` rebuilt a regex for all 50 US state
