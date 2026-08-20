@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An Adzuna model prediction no longer renders as a posted salary.** `_adzuna_pay`
+  routes a `salary_is_predicted` row into `salary_estimated_min`/`_max` and leaves the
+  commitment columns null, exactly as designed — but `salary`, the human-readable
+  display string and the only pay field most interfaces show, was built one line
+  earlier at the call site from the same raw figures and never entered that split. So
+  a row whose numbers were correctly quarantined still displayed `$109,106`,
+  indistinguishable from a figure an employer committed to.
+
+  **221 of 277 adzuna rows (79.8%)** in a 7,568-row local harvest
+  `[local 94-board harvest, 0.9.0]`. In the downstream consumer's production store,
+  **7,150 of 7,150 adzuna rows carried a salary string while only 369 carried a
+  `salary_min`** `[live prod, engine 0.8.2]` — roughly 6,781 rows showing an estimate
+  as an offer. Verified against the live API after the fix: 253 predicted rows, **0**
+  with a display string; 45 stated rows, **all 45** keeping theirs.
+
+  `util.salary_range` had already stopped rendering the fake range
+  `$109,106–$109,106`, and its comment names this exact failure — but removing the
+  *range* appearance is not the same as removing the *commitment* appearance, and the
+  bare figure kept it. `SALARY_BASES` deliberately has no `estimated` member so that a
+  figure in `salary_min` is always one an employer committed to; `salary` is the
+  display of those columns, so a row with no commitment now has no string. The figures
+  are not lost — a consumer wanting to show an estimate reads `salary_estimated_*` and
+  labels it deliberately. The construction moved **inside** `_adzuna_pay` so the
+  predicted-vs-stated split is decided in one place rather than two.
+
 ### Changed — BREAKING
 
 - **`remote_areas` is populated on far fewer rows, and that is the fix.** Three changes below

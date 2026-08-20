@@ -2291,6 +2291,16 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
     assert real["salary_min"] == 115000.0 and real["salary_basis"] == "stated"
     assert real.get("salary_estimated_min") is None
 
+    # THE DISPLAY STRING IS INSIDE THE SPLIT, NOT BESIDE IT. The commitment columns
+    # were already null on a predicted row while `salary` still rendered "$61,482" --
+    # a string a human reads as an employer's offer, and the only field most UIs show.
+    # 221 of 277 adzuna rows locally, ~6,781 of 7,150 in the live consumer's store.
+    # `None`, not `""`: the adapter emits "" and `_coerce` normalizes every nullable
+    # text field to None. Asserting "" here passes on the adapter and fails on the
+    # record a consumer actually receives.
+    assert predicted["salary"] is None, "a prediction rendered as a display string"
+    assert real["salary"] == "$115,000–$145,000", "a real range lost its display string"
+
 
 def test_usajobs_reads_its_rate_interval(monkeypatch):
     """No currency field exists — these are US federal postings, so USD is structural.

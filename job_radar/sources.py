@@ -2259,7 +2259,25 @@ def _himalayas_rows(jobs, out, seen=None):
 
 
 def _adzuna_pay(j: dict) -> dict:
-    """Adzuna salary -> the commitment columns OR the estimate columns, never both."""
+    """Adzuna salary -> the commitment columns OR the estimate columns, never both.
+
+    OWNS THE DISPLAY STRING TOO, and that is the point of the function. The split was
+    enforced on the numeric columns and the caller built `salary` one line earlier from
+    the same raw figures, so a model's point estimate rendered as `$109,106` -- a
+    string a human reads as an employer's offer. 221 of 277 adzuna rows carried one
+    [local 94-board harvest, 0.9.0, 2026-08-20]; 7,150 of 7,150 adzuna rows in the
+    live consumer's store had a salary string while only 369 had a salary_min
+    [live prod, engine 0.8.2].
+
+    `util.salary_range` already stopped rendering the fake range `$109,106-$109,106`,
+    and its comment names this exact failure -- but removing the RANGE appearance is
+    not the same as removing the COMMITMENT appearance, and the bare figure kept it.
+    `SALARY_BASES` deliberately has no `estimated` member so that "a figure in
+    salary_min is always one an employer committed to"; `salary` is the display of
+    those columns, so a row with no commitment gets no string. The figures are not
+    lost -- they are in salary_estimated_*, where a consumer that wants to show an
+    estimate must reach for them deliberately and label them itself.
+    """
     lo, hi = j.get("salary_min"), j.get("salary_max")
     if str(j.get("salary_is_predicted")) == "1":
 
@@ -2269,8 +2287,15 @@ def _adzuna_pay(j: dict) -> dict:
             except (TypeError, ValueError):
                 return None
 
-        return {"salary_estimated_min": _n(lo), "salary_estimated_max": _n(hi)}
-    return vocab.salary(lo, hi, currency="USD", period=None, basis="stated")
+        return {
+            "salary": "",
+            "salary_estimated_min": _n(lo),
+            "salary_estimated_max": _n(hi),
+        }
+    return {
+        "salary": salary_range(lo, hi),
+        **vocab.salary(lo, hi, currency="USD", period=None, basis="stated"),
+    }
 
 
 def _adzuna_place(area):
@@ -2419,9 +2444,10 @@ def search_adzuna(queries):
                         # signal, flattened to a boolean. area[0] is the country.
                         "remote_areas": [country] if (is_remote and country) else None,
                         "employment_type": j.get("contract_time", ""),
-                        "salary": salary_range(
-                            j.get("salary_min"), j.get("salary_max")
-                        ),
+                        # `salary` is built inside _adzuna_pay, not here. It used to
+                        # be set on this line from the raw figures, which meant the
+                        # predicted/stated split was decided in two places and the
+                        # display string was outside the half that enforced it.
                         # PREDICTED salaries never touch the commitment columns.
                         # Measured 2026-08-05 across three queries: 140 of 150 rows
                         # with a salary were `salary_is_predicted: "1"` -- 93%, and
