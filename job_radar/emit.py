@@ -68,7 +68,12 @@ def _sources(r: dict) -> list[str] | None:
     so rather than by inspection: no registered source token contains a comma or a
     space (19 of 19, `sources.DEPTH_ALL | BREADTH_ALL`), so `", ".join` has exactly
     one inverse. What it does NOT recover is WHICH source won the merge -- the store
-    never wrote that down. See `_nested`'s `source` key for what that costs.
+    never wrote that down, so the singular `source` becomes a REPRESENTATIVE rather
+    than a winner. See `_nested`'s `source` key.
+
+    THREE call sites read this, and all three are exits where the field lost its shape:
+    `_nested`, `manifest`, and `cli`'s attribution credit line. The third was missed
+    when the first two were fixed.
     """
     got = r.get("sources")
     if isinstance(got, (set, frozenset, list, tuple)):
@@ -176,9 +181,13 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
         # as `", ".join(sorted(tokens))`, so a two-source row arrived here as the
         # string "adzuna, greenhouse" -- which is not a source, resolves against no
         # entry in `attribution`, and matches nothing a consumer can key on. The
-        # store never recorded WHICH source won the merge, so the winner is not
-        # recoverable; the first token is the deterministic stand-in, and `sources`
-        # beside it carries the whole truth. A single-source row is unaffected.
+        # store never recorded WHICH source won the merge, so this is a REPRESENTATIVE,
+        # not the winner -- the first of the sorted tokens, chosen because it is
+        # deterministic. That distinction is the whole honesty of the field: on a
+        # merged row both adapters really did produce it, so one real token is
+        # lossy-but-true rather than a fabricated winner. `sources` beside it carries
+        # the whole set, and attribution is discharged off THAT, never off this key.
+        # A single-source row is unaffected.
         "source": srcs[0] if srcs else None,
         "sources": srcs,
         "source_extra": r.get("source_extra"),

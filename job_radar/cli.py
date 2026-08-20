@@ -209,8 +209,21 @@ def cmd_scan(args, cfg):
     # and Remotive both state they will revoke API access if their name is not shown
     # as the source. Only the sources that actually contributed are credited --
     # crediting a source that returned nothing is noise, and noise gets ignored.
+    # `emit._sources`, not an inline `r.get("sources") or [r.get("source")]`. THE THIRD
+    # EXIT of the same defect, missed when the other two were fixed. `merged` holds
+    # STORE rows, whose `source` column is `", ".join(sorted(tokens))` -- so on a
+    # cross-source merge the inline form yielded one token literally named
+    # "adzuna, greenhouse", which resolves against no attribution entry and is dropped
+    # in silence. 12 such fabricated tokens in a 7,568-row local harvest.
+    #
+    # Nobody is under-credited on that corpus, and the reason is luck rather than
+    # design: every source in a merged row also appears in at least one single-source
+    # row, so it gets credited there. A low-volume source whose rows ALL merged would
+    # go uncredited with no error -- and adzuna and himalayas, both present in merged
+    # rows here, are among the sources that require attribution as a condition of API
+    # access. Latent, not harmless.
     credit = attribution.credit_line(
-        {s for r in merged for s in (r.get("sources") or [r.get("source")]) if s}
+        {s for r in merged for s in (emit._sources(r) or ()) if s}
     )
     if credit:
         print(f"\n{credit}")

@@ -71,15 +71,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no adapter has ever been called, in the one output a consumer reads to tell "the
   market was quiet" from "four adapters were down".
 
-  Both exits now read one helper, `emit._sources`, which takes `sources` as a set,
+  **A third exit had the same defect and was missed the first time:** `cli`'s
+  attribution credit line built its token set inline the same way, so a merged row
+  contributed a fabricated name that `attribution.credit_line` drops in silence — 12
+  of them in that harvest. No source was actually under-credited, and by luck rather
+  than design: every source in a merged row also appeared in a single-source row. A
+  low-volume source whose rows all merged would have gone uncredited with no error,
+  and attribution is a **condition of API access** on five of the wired sources.
+
+  All three exits now read one helper, `emit._sources`, which takes `sources` as a set,
   list or tuple, and otherwise falls back to splitting the singular `source` — where a
   store row's joined string always lives, since there is no `sources` column to hold it. Recovering the set from that string is lossless and
   provably so rather than by inspection: **no registered source token contains a comma
   or a space (19 of 19)**, so `", ".join` has exactly one inverse. The singular
   `source` on such a row now emits a real adapter token instead of the joined string —
   it resolved against no `attribution` entry and matched nothing a consumer could key
-  on. What the store never recorded is **which** source won the merge, so that stays
-  unrecoverable and the first token is the deterministic stand-in.
+  on. What the store never recorded is **which** source won the merge, so that key is
+  a **representative** — the first of the sorted tokens, chosen because it is
+  deterministic — not a winner. On a merged row both adapters really did produce it,
+  so one real token is lossy-but-true; `sources` beside it carries the whole set.
 
   **35 rows in a 7,568-row local harvest** `[local 94-board harvest, 0.9.0]` carry more
   than one source. Dedup is where a mistake deletes a job, so these are exactly the

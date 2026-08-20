@@ -253,3 +253,59 @@ def test_omit_empty_prunes_the_nested_record_recursively():
     assert "expires" not in lean and lean["title"]["raw"] == "AI Engineer"
     # Every surviving value is untouched; this drops keys, it does not rewrite them.
     assert lean["remote"]["type"] == full["remote"]["type"] == "remote"
+
+
+def test_a_merged_row_still_credits_every_source_that_produced_it(tmp_path, monkeypatch):
+    """ATTRIBUTION IS A CONDITION OF ACCESS on five of the wired sources, and two say
+    outright they will revoke it. The credit line is the one obligation job-radar can
+    discharge itself rather than hand downstream, so a merged row must credit BOTH
+    adapters, not a string naming neither.
+
+    THE THIRD EXIT of the `sources`-shape defect, missed when `_nested` and `manifest`
+    were fixed. `cli` built its token set inline as
+    `r.get("sources") or [r.get("source")]`, and the rows it reads carry a `source`
+    folded by the store as `", ".join(sorted(tokens))` -- so a cross-source merge
+    produced one token literally named "remoteok, remotive", which resolves against no
+    attribution entry and is dropped in silence. 12 such fabricated tokens in a
+    7,568-row local harvest.
+
+    Nobody was under-credited there, and by luck rather than design: every source in a
+    merged row also appeared in a single-source row. A low-volume source whose rows all
+    merged would have gone uncredited with no error.
+
+    THIS DRIVES `cmd_scan` AND READS ITS PRINTED OUTPUT, deliberately. An earlier
+    version called `emit._sources` directly and passed with the defect restored --
+    testing the helper is not testing the call site, which is the failure this whole
+    release keeps re-learning. The mutation that matters is reverting cli's inline
+    expression, and this goes red for it.
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from job_radar import cli, engine
+
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "remoteok", "sources": {"remoteok", "remotive"},
+        "posted": "2026-08-01", "text": "remote llm work", "location": "Remote",
+    }  # fmt: skip
+    monkeypatch.setattr(engine, "harvest", lambda cfg, wl: ([row], [], []))
+    args = argparse.Namespace(
+        out=str(tmp_path / "s.csv"), watchlist=None, limit=25, verbose=False,
+        format="text", all=False, strict=False, no_text=False, drop_empty=False,
+    )  # fmt: skip
+    cfg = config.Config()
+    cfg.remote_only, cfg.min_score, cfg.max_age_days = False, -999, 100000
+    cfg.llm.enabled = False
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cli.cmd_scan(args, cfg)
+    out = buf.getvalue()
+
+    assert "Remote OK" in out and "Remotive" in out, (
+        "a merged row must credit BOTH sources in the printed credit line; got:\n"
+        + "\n".join(ln for ln in out.splitlines() if "Jobs from" in ln or not ln.strip())
+    )
+    assert "remoteok, remotive" not in out, "a fabricated source name reached the output"
