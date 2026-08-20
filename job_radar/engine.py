@@ -40,7 +40,7 @@ _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Greenhouse board ranked EQUAL to a RemoteOK redirect — the one distinction the
 # product is built on, absent from the table that exists to express it. A DEPTH
 # source IS the employer's applicant-tracking system, so its copy is the canonical
-# record: the real apply URL, the full description, the accurate org unit. Google
+# record: the real apply URL, the full description, the accurate department. Google
 # for Jobs sits in the middle because its apply_options resolve to direct-to-company
 # links. Everything else is an aggregator serving a redirect.
 _DEPTH_PREF, _GOOGLE_PREF, _AGGREGATOR_PREF = 2, 1, 0
@@ -88,10 +88,9 @@ _CONTRACT_FIELDS = (
     "title_level",  # I | II | III | IV
     "title_qualifiers",  # list[str] | None -- domain/geo decoration
     # `category` is the catalog's `function` -- the JOB FAMILY ("Data Science"), free
-    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` is the
-    # catalog's `org_unit` -- the EMPLOYER'S OWN group name ("Field Engineering"). The
-    # deprecated `department`, which held either one depending on the adapter, was
-    # removed in 0.9.0. `catalog/_SCHEMA.md` splits `function` /
+    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` (and its
+    # deprecated alias `department`) is the catalog's `org_unit` -- the EMPLOYER'S OWN
+    # group name ("Field Engineering"). `catalog/_SCHEMA.md` splits `function` /
     # `org_unit` / `employer_org` precisely because five adapters were pouring all
     # three into one column, and it records the cost: 5,050 distinct values including
     # employer names.
@@ -218,9 +217,9 @@ _CONTRACT_FIELDS = (
 # and a posting with no title is not a posting.
 # `text` deliberately keeps its name. `body` reads better, but it is a released,
 # README-documented field with call sites in the only consumer, and renaming it buys
-# a nicer word and nothing else. If it ever moves it moves at 1.0.
+# a nicer word and nothing else. If it ever moves it moves at 1.0 with `department`.
 _NULLABLE_TEXT = (
-    "posted", "salary", "text", "location", "employment_type",
+    "posted", "salary", "text", "location", "department", "employment_type",
 )  # fmt: skip
 
 
@@ -865,7 +864,7 @@ _READING_ORDER = (
     # what the role is
     "title", "title_root", "title_level", "title_qualifiers",
     # who is hiring, and for which group
-    "company", "parent_company", "team", "category", "tags",
+    "company", "parent_company", "team", "department", "category", "tags",
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",

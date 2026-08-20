@@ -120,40 +120,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   record had a working constructed link. Recovery for a consumer is the record's own
   `url`, which is what the entry always held.
 
-- **`department` is gone.** It was deprecated in 0.7.0 because it was four different
-  things depending on the adapter — an org unit (Greenhouse, Ashby), a job family
-  (Adzuna's `IT Jobs`), a seniority (Braintrust), and _the employer_ (USAJOBS'
-  `Department of Veterans Affairs`) — so one column carried a category dimension no
-  consumer could filter on. `team` / `category` / `seniority` / `parent_company`
-  replaced it, and each one says which of the four it is.
-
-  **It carried no information of its own.** Measured `[local 94-board harvest, 0.9.0]`:
-  of 6,711 rows where it was filled, 6,193 were byte-identical to `team` and 518 to
-  `category`, and **zero** held a value that was not already in the record under one of
-  those names. That is not a corpus accident — 18 of the 19 adapters assigned the copy
-  on the line beside its twin, so it is provable by reading the source rather than by
-  counting rows.
-
-  **Migrating:** `team or category` recovers it, except on USAJOBS where it was
-  `parent_company` (`DepartmentName`, the same expression on the adjacent line). The
-  coalesce fills **more** rows than the old field did — 592 more, where a source set
-  `category` while `department` was blank — so a consumer keying on `department is
-None` will see fewer nulls, not more. It is also removed from `shortlist.csv`, whose
-  header loses one column; an existing store rewrites without it and nothing else
-  changes.
-
-  **Rippling was fixed first, and it is the reason this is lossless.** It was the one
-  adapter of nineteen that filled `department` and set neither `team` nor `category`,
-  so removing the field would have silently deleted its org unit from every row. Its
-  `department.label` — the same vendor shape Greenhouse, Ashby, SmartRecruiters and
-  Workable all map to `team` — now maps to `team`. No corpus measurement could have
-  found this: Rippling is keyless but was not among the 14 sources in the harvest above.
-
-  The `department` byte-identity compatibility test is removed with the field. The
-  docstring that justified keeping it — "jobfitr pins a released version and reads it
-  today" — was false: the only known consumer reads `category`, never `department`, and
-  the column is absent from its production schema.
-
 ### Changed — BREAKING
 
 - **`remote_areas` is populated on far fewer rows, and that is the fix.** Three changes below

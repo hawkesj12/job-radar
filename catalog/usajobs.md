@@ -114,7 +114,7 @@ fields:
     {
       path: DepartmentName,
       type: string,
-      note: "THE EMPLOYER — routed to `parent_company` since 0.9.0, when `department` was removed",
+      note: "THE EMPLOYER — currently misrouted into `department` and thence jobfitr `category`",
     }
   tags: null
   seniority:
@@ -129,7 +129,7 @@ fields:
 
 traps:
   - "SILENTLY IGNORES unknown params — a typo'd parameter name is a permanent no-op with no error. Verify every param against a control."
-  - "`DepartmentName` is an EMPLOYER ('Department of Veterans Affairs'), not a category. It reached jobfitr's `category` through the deprecated `department` field — 957 rows of employer-as-category in the frozen corpus. FIXED in 0.9.0: `department` was removed and this maps to `parent_company` alone."
+  - "`DepartmentName` is an EMPLOYER ('Department of Veterans Affairs'), not a category. The adapter routes it to `department`, which jobfitr merges into `category` — 957 rows of employer-as-category in the frozen corpus."
   - "`JobCategory[].Name` is the real job function (OPM occupational series, with codes) and is currently unused."
   - "Public-domain federal data does NOT mean the API terms permit commercial use. Two separate questions."
 ---
@@ -195,7 +195,7 @@ discarded:
 | `state`        | `PositionLocation[].CountrySubDivisionCode` = `"California"`       | the free-text `PositionLocationDisplay`     |
 | `city`         | `PositionLocation[].CityName`                                      | —                                           |
 | `function`     | `JobCategory[]` = `{Name: "Occupational Therapist", Code: "0631"}` | —                                           |
-| `employer_org` | `DepartmentName`                                                   | → `parent_company` (0.9.0)                  |
+| `employer_org` | `DepartmentName`                                                   | routed to `department` → jobfitr `category` |
 
 `0631` is the **OPM occupational series** — a federal standard code for the occupation, which is a
 better controlled vocabulary than anything any other source provides, and it is thrown away while an
@@ -203,17 +203,15 @@ employer name is used as the category.
 
 Also note `OrganizationName` (`"Veterans Health Administration"`) is the truer employer than
 `DepartmentName`, and `SubAgency` (`"VA Palo Alto Healthcare System"`) is the org unit — three
-distinct nouns the single `department` field used to flatten into one. `SubAgency` already reaches
-`team`; `OrganizationName` is still unused.
+distinct nouns the current single `department` field flattens into one.
 
 **Consequence:** structured location for this source is a mapping change, not a parsing project.
 The data is already in the payload.
 
 ## Two fidelity fixes it is owed
 
-1. ~~**`DepartmentName` → `employer_org`**, never `department`.~~ **Done in 0.9.0** — `department`
-   was removed from the record and `DepartmentName` now maps only to `parent_company`. It had been
-   the single largest contributor to the employer-as-category bug.
+1. **`DepartmentName` → `employer_org`**, never `department`. It is the single largest contributor
+   to jobfitr's employer-as-category bug.
 2. **`JobCategory[]` → `function`.** OPM occupational series is a genuine controlled vocabulary with
    codes — better than anything else any source provides, and currently thrown away.
 

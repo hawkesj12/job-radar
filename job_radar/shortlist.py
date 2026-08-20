@@ -7,7 +7,7 @@ the market, so your application history is never lost. Written atomically
 (temp -> os.replace), so an interrupted write leaves the previous file intact.
 
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
-salary, company, industry, title, employment_type, location,
+salary, company, industry, title, department, employment_type, location,
 source, url, signals, dedup_key
 
 THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 19 columns
@@ -147,6 +147,7 @@ COLUMNS = [
     "company",
     "industry",
     "title",
+    "department",
     "employment_type",
     "location",
     "source",
@@ -263,6 +264,7 @@ def _build_row(p: dict, today: str) -> dict:
         "company": p.get("company", ""),
         "industry": p.get("industry", ""),
         "title": (p.get("title", "") or "").strip(),
+        "department": p.get("department", ""),
         "employment_type": p.get("employment_type", ""),
         "location": (p.get("location", "") or "").strip(),
         "source": src,
