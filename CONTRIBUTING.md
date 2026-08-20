@@ -77,15 +77,26 @@ cd /tmp/gate && ruff check . && mypy && python -m pytest -q
 
 Every commit, not every PR.
 
-**This gate has one known hole, and it is a big one.** The export has no `.git`, so the
-`department` byte-identity compatibility test — which reconstructs the 0.6.0 blob from
-git history — **skips there instead of running**. That is the repo's single most
-important backward-compatibility check, and in the export it reports as a skip, not a
-failure. Always confirm the count:
+**This gate has one known hole, and there is a one-line fix.** The export has no
+`.git`, so the `department` byte-identity compatibility test — which reconstructs the
+0.6.0 blob with `git show` — takes its own skip branch instead of running. That is the
+repo's most important backward-compatibility check, and its own docstring names the
+danger: *"a compatibility gate that quietly does not run reads as assurance, which is
+worse than not having it."* Its guard only fires when `.git` **exists**, so deleting
+`.git` makes the guard's condition False and the test skips silently. Copy the history
+in, and always pass `-rs` so a skip prints its reason instead of a bare `s`:
 
 ```bash
-python -m pytest -q          # working tree: expect "N passed", ZERO skipped
-cd /tmp/gate && python -m pytest -q   # export: expect "N-1 passed, 1 skipped"
+rm -rf /tmp/gate && git checkout-index -a -f --prefix=/tmp/gate/
+cp -R .git /tmp/gate/.git     # or the compatibility gate cannot run
+cd /tmp/gate && ruff check . && mypy && python -m pytest -q -rs
+```
+
+Verified at the same commit, in the same minute:
+
+```
+export as-is        536 passed, 1 skipped, 36 deselected
+export + .git       537 passed, 0 skipped, 36 deselected
 ```
 
 **A skip is not a pass.** If the export shows more than that one skip, or the working
