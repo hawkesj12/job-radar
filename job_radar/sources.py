@@ -113,7 +113,6 @@ def fetch_greenhouse(slug: str):
                 # not. Mapped anyway: it costs nothing, other boards may fill it, and
                 # to_date returns "" for a null so an absent deadline stays absent.
                 "expires": to_date(j.get("application_deadline")),
-                "department": depts[0].get("name", "") if depts else "",
                 "team": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
                 "salary": salary_from_text(text),
@@ -218,7 +217,6 @@ def fetch_lever(slug: str):
                 "country": country_code(j.get("country")),
                 "url": j.get("hostedUrl", ""),
                 **posted_from(j.get("createdAt")),
-                "department": cats.get("team") or cats.get("department", ""),
                 "team": cats.get("team") or cats.get("department") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
                 # that this adapter never read -- remoteness was being re-derived from
@@ -403,7 +401,6 @@ def fetch_ashby(slug: str):
                 **posted_from(
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
-                "department": j.get("department", "") or j.get("team", ""),
                 "team": j.get("department") or j.get("team") or None,
                 # `workplaceType`, NOT `isRemote`. Measured on openai (n=733):
                 #
@@ -500,7 +497,6 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 "location": loctext,
                 "url": f"https://jobs.smartrecruiters.com/{slug}/{j.get('id', '')}",
                 **posted_from(j.get("releasedDate") or j.get("createdOn")),
-                "department": (j.get("department") or {}).get("label", ""),
                 # The most structured source in the set, and the adapter used almost
                 # none of it: a real job family, a real org unit, a real seniority
                 # string, fully structured geography, and an actual remote BOOLEAN --
@@ -573,7 +569,6 @@ def fetch_workable(slug: str):
                 or j.get("url")
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
                 **posted_from(j.get("created_at") or j.get("published_on")),
-                "department": j.get("department", ""),
                 "team": j.get("department") or None,
                 "city": city,
                 "state": state,
@@ -1250,7 +1245,6 @@ def search_google_jobs(queries):
                         # and says so.
                         "posted": (_gp := _google_posted(ext.get("posted_at", ""))),
                         "posted_basis": "relative" if _gp else None,
-                        "department": "",
                         # `work_from_home` is a real boolean on the extension, and it
                         # is the ONLY structured remote signal Google gives. Verified
                         # 2026-08-05: with &ltype=1 it is true on 10 of 10 results,
@@ -1396,7 +1390,6 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
                     "url": f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{path}",
                     "posted": posted,
                     "posted_basis": posted_basis,
-                    "department": "",
                     "employment_type": "",
                     "salary": "",
                     "text": "",
@@ -1648,7 +1641,17 @@ def fetch_rippling(slug: str, keep=None):
                 "location": loc.get("label", "") if isinstance(loc, dict) else "",
                 "url": j.get("url", ""),
                 "posted": "",
-                "department": dept.get("label", "") if isinstance(dept, dict) else "",
+                # THE ONLY ADAPTER OF NINETEEN WITH NO `team` OR `category`. Every
+                # other one assigns its org unit to `team` (greenhouse, lever, ashby,
+                # smartrecruiters, workable) or its job family to `category` on the
+                # line beside the deprecated `department` it also filled; this one
+                # filled `department` alone, so removing that field at 0.9.0 would
+                # have silently dropped Rippling's org unit from every row it
+                # produces. Invisible to any corpus measurement -- Rippling is keyless
+                # but was not among the 14 sources in the harvest this was measured
+                # on. `department.label` is an org unit ({"id": "Eng", "label":
+                # "Engineering"}), the same vendor shape the other four map to `team`.
+                "team": dept.get("label") if isinstance(dept, dict) else None,
                 "employment_type": "",
                 "salary": "",
                 "text": "",
@@ -1709,7 +1712,6 @@ def fetch_teamtailor(slug: str):
                 "location": loc,
                 "url": j.get("url", ""),
                 **posted_from(j.get("date_published")),
-                "department": "",
                 "city": first.get("addressLocality") or None,
                 "state": first.get("addressRegion") or None,
                 "country": first.get("addressCountry") or None,
@@ -1927,7 +1929,6 @@ def search_remotive(queries, strict: bool = False):
                 **stated_scope(j.get("candidate_required_location")),
                 "url": j.get("url", ""),
                 **posted_from(j.get("publication_date")),
-                "department": j.get("category", ""),
                 "category": j.get("category") or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -1969,7 +1970,6 @@ def search_jobicy(queries):
                 "location": (j.get("jobGeo") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 **posted_from(j.get("pubDate")),
-                "department": _joined(j.get("jobIndustry")),
                 "category": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
                 "remote_type": "remote",  # a remote-only board by definition
@@ -2015,7 +2015,6 @@ def search_arbeitnow(queries):
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 **posted_from(j.get("created_at")),
-                "department": "",
                 "remote_type": "remote",  # the adapter already filtered on j["remote"] above
                 "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
@@ -2045,7 +2044,6 @@ def search_remoteok(queries):
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url") or j.get("apply_url", ""),
                 **posted_from(j.get("date") or j.get("epoch")),
-                "department": "",
                 "employment_type": "",
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -2204,7 +2202,6 @@ def _himalayas_rows(jobs, out, seen=None):
                 "location": loc.strip(),
                 "url": url,
                 **posted_from(j.get("pubDate")),
-                "department": "",
                 "category": ", ".join(
                     x
                     for x in (j.get("parentCategories") or j.get("categories") or [])
@@ -2430,7 +2427,6 @@ def search_adzuna(queries):
                         "text_basis": "excerpt",
                         **posted_from(j.get("created")),
                         "expires": to_date(j.get("deadline")),  # 1 of 20 populated
-                        "department": (j.get("category") or {}).get("label", ""),
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
                         # -- one of the four different things `department` carried.
                         "category": (j.get("category") or {}).get("label") or None,
@@ -2714,7 +2710,6 @@ def _hn_rows(tree, out: list) -> None:
                 # engine._consume alongside _blk/_nt.
                 "_url_recovered": hn_recovered,
                 **posted_from(c.get("created_at")),
-                "department": "",
                 "remote_type": rtype,
                 "remote_basis": rbasis,
                 "source_extra": {"hn_author": c.get("author"), "hn_id": c.get("id")}
@@ -2832,7 +2827,6 @@ def search_braintrust(queries):
                     # `level` was going into `department` -- a seniority filed as a
                     # category, one of the four meanings that made that column
                     # unusable downstream. It now says what it is.
-                    "department": "",
                     # `level` DOES NOT EXIST in this payload -- 0 of 20 rows carry
                     # the key, so this mapping has been dead since it was written and
                     # the 20% seniority fill came from the title decomposition, not
@@ -3078,7 +3072,6 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # EMPLOYER, and pouring it into a category column is how a
                 # downstream store ended up with employer names among its most
                 # common "categories". The three keys below say what each thing is.
-                "department": d.get("DepartmentName", ""),
                 "parent_company": d.get("DepartmentName") or None,
                 "team": d.get("SubAgency") or None,
                 # OPM occupational series -- a real, coded job family.
@@ -3309,7 +3302,6 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 **posted_from(j.get("publication_date")),
                 # A job FAMILY ("Data Science"), not an org unit -- see
                 # catalog/_SCHEMA.md on why that distinction is load-bearing.
-                "department": "; ".join(x for x in cats if x),
                 "category": "; ".join(x for x in cats if x) or None,
                 # `levels` is a real seniority string ("Senior Level"). It was held
                 # back while `seniority` was a strand-B key not yet on any adapter;

@@ -955,7 +955,6 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
     p.update(
         {
             "location": hostile,
-            "department": hostile,
             "employment_type": hostile,
             "salary": hostile,
             "industry": hostile,
@@ -1605,7 +1604,7 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     assert j["location"] == "Remote - US"
     assert j["url"].endswith("/acme/jobs/1")
     assert j["posted"] == "2026-07-10"
-    assert j["department"] == "Engineering"
+    assert j["team"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
 
 
