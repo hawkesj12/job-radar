@@ -1343,7 +1343,14 @@ def test_coerce_does_not_stringify_the_typed_fields():
 
 def test_adzuna_area_depth_maps_state_and_remote():
     """`area` is a hierarchy of varying depth. `area == ['US']` EXACTLY means
-    nationwide/remote; depth 5 shifts city one slot but never the state."""
+    nationwide/remote; depth 5 shifts city one slot but never the state.
+
+    THIS DOCSTRING AND ITS OWN ASSERTION USED TO DISAGREE. It said "depth 5 shifts city
+    one slot" and then asserted `city5 == "Prince"` -- the UNSHIFTED last element, a
+    neighbourhood. `_adzuna_place` matched the assertion rather than the sentence, so
+    the test was green and the described behaviour had never been implemented. The
+    docstring was right; the assertion was the defect, and it is corrected here.
+    """
     assert sources._adzuna_place(["US"]) == (None, None, "US", True)
     city, state, country, remote = sources._adzuna_place(
         ["US", "Texas", "Howard County", "Big Spring"]
@@ -1353,7 +1360,13 @@ def test_adzuna_area_depth_maps_state_and_remote():
         ["US", "New York", "New York City", "Manhattan", "Prince"]
     )
     assert state5 == "New York", "state must stay at area[1] at depth 5"
-    assert city5 == "Prince"
+    assert city5 == "Manhattan", "depth 5: the city tier is area[3], not the last slot"
+    # DEPTH 3 -- the city is the last slot, and the old `>= 4` test discarded it
+    # outright: 'San Francisco, California' (15 rows) and 'New York City, New York' (8)
+    # came back with no city at all while the vendor had supplied a clean one.
+    assert sources._adzuna_place(["US", "California", "San Francisco"])[0] == (
+        "San Francisco"
+    )
     assert sources._adzuna_place(None) == (None, None, None, None)
 
 

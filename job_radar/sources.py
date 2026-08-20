@@ -2182,6 +2182,30 @@ def _adzuna_place(area):
     no text rule can read as remote -- so the signal existed and was invisible.
 
     Depth 5 shifts city one slot, so branch on length rather than indexing blindly.
+    THIS SAID SO AND THEN DID NOT DO IT: the line read
+    `city = area[-1] if len(area) >= 4 else None`, which takes whatever is last. Two
+    defects fell out of that, and the docstring above was already right about both.
+
+    At DEPTH 5 the last slot is a neighbourhood, not the city -- 'Prince',
+    'Grand Central', 'Hayes Valley', 'SoMa'. At DEPTH 3 the city is sitting in
+    `area[2]` and the `>= 4` test threw it away entirely: 'San Francisco, California'
+    (15 rows) and 'New York City, New York' (8) returned `city=None` while the vendor
+    had supplied a clean name. That second one is 23 of 276 rows -- larger than the
+    neighbourhood problem it was filed alongside.
+
+    PIN THE CITY TO ITS SLOT rather than reading a suffix list. The alternative
+    considered was 'take the second display_name token unless it ends in County /
+    Parish / Borough', which is a US-ENGLISH word list: Adzuna's UK, Australian and
+    German hierarchies put a district, an LGA and a Kreis in that tier and it would
+    read every one of them as a city. Position is a property of the vendor's data
+    structure; 'ends in County' is a property of American English.
+
+    WHAT THIS DOES NOT FIX, so nobody claims it does: Adzuna's hierarchy is itself
+    unreliable. 'Times Square, King County' resolves to state='WA' on 3 rows, and
+    Times Square is not in King County, Washington. Reading the hierarchy correctly is
+    the most this can promise; producing correct geography is not available from this
+    source, and a spot-check of a small sample will not surface it.
+
     Returns None (not "") for anything the array does not contain: unknown is not
     empty.
     """
@@ -2191,7 +2215,15 @@ def _adzuna_place(area):
     if len(area) == 1:
         return None, None, country, True  # nationwide == remote
     state = area[1] or None
-    city = area[-1] if len(area) >= 4 else None
+    # The BRANCH the docstring has always described. depth>=4: the city tier is
+    # area[3] (identical to area[-1] at depth 4, and the neighbourhood is what
+    # area[-1] returns at depth 5). depth==3: the city is the last slot.
+    if len(area) >= 4:
+        city = area[3] or None
+    elif len(area) == 3:
+        city = area[2] or None
+    else:
+        city = None
     return city, state, country, None
 
 

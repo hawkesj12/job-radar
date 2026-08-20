@@ -44,6 +44,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Adzuna: the city was taken from the wrong tier of the vendor's hierarchy — or
+  thrown away.** `_adzuna_place`'s docstring said "depth 5 shifts city one slot, so
+  branch on length rather than indexing blindly"; the code read
+  `city = area[-1] if len(area) >= 4 else None`, which does not branch. At depth 5 that
+  is a neighbourhood (`Grand Central`, `Hayes Valley`, `SoMa`), and at depth 3 the `>= 4`
+  test **discarded the city entirely** — `'San Francisco, California'` (15 rows) and
+  `'New York City, New York'` (8) returned no city while the vendor had supplied a clean
+  one. The city is now pinned to its slot: `area[3]`, falling back to `area[2]` at depth
+  3. **Not a `County`/`Parish`/`Borough` suffix rule** — that is a US-English word list
+  and Adzuna's UK, Australian and German hierarchies put a district, an LGA and a Kreis
+  in that tier. The test that covered this asserted the unshifted value while its own
+  docstring described the shift, so it was green and the documented behaviour had never
+  existed.
+
+  **This reads the hierarchy correctly; it does not make Adzuna's geography correct.**
+  `'Times Square, King County'` resolves to `state='WA'` on 3 rows, and Times Square is
+  not in King County, Washington. *Inferred from source and harvest output — there are no
+  Adzuna API keys in this environment, so unlike the Ashby and Greenhouse findings this
+  one was never confirmed against a live response.*
+
 - **Ashby: a `state` that was just the country repeated, and the vendor's own trailing
   whitespace.** 36 of 1,730 live postings put the country in `addressRegion`
   (`("UK","UK")` 16, `("Australia","Australia")` 7, `("Singapore","Singapore")` 5), and
