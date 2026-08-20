@@ -200,12 +200,30 @@ Every one of these produced a confident, wrong number in this repo:
 | 3 | rows rebuilt outside the pipeline | produced 16,150 impossible rows |
 | 4 | adapter output ≠ record output | skipped `engine._coerce`; saw `state='California'` where the record says `CA` |
 | 5 | stale tree claim | "clean at X, 503 tests" when HEAD was Y at 514 |
-| 6 | a name-grep as a symbol check | reported a rewritten function as "0 changed lines" |
+| 6 | **a grep count read as a membership test** | `grep -c '"department",' engine.py` returned 2 and was reported as "present in `_CONTRACT_FIELDS`". The two hits were two *other* tuples; the field was never in that one. Also: a name-grep reported a rewritten function as "0 changed lines", and a search for `emit` matched the English word in prose |
+| 11 | **a true measurement read against the wrong baseline** | a field measured absent from a tuple, read as damage — it had never been in that tuple. The number was right; "absent means something broke" was the error |
 | 7 | a threshold that passed for the wrong reason | 10-under-12 passed while 9 of the 10 were wrong |
 | 8 | **a zero accepted because it came with an explanation** | an explained zero reads as *more* rigorous than a bare number. It is not. |
 | 9 | **a correct explanation applied outside the scope it was derived in** | true of every row measured, false for a class that was not |
 
-Forms 8 and 9 are the dangerous ones, because both look like good work.
+Forms 8, 9 and 11 are the dangerous ones, because all three look like good work — a
+real measurement is involved in each.
+
+**Two rules that fall out, narrow enough to actually follow:**
+
+- **A grep count is never a membership test.** For "is X in collection Y", the only
+  valid checks are runtime membership (`X in module.Y`) or reading the literal. Grep
+  answers "does this string appear in this file" — a different question that happens to
+  return a number, and the number is what makes it feel like an answer.
+- **Before reading a number as damage, ask what it would look like if nothing were
+  wrong — then measure *that*.** Compare against the prior commit (`git show <rev>^:path`),
+  never against your expectation. This is the general form of the wrong-denominator
+  trap one level up: there the population was wrong, here the comparison point is.
+
+**What actually catches these:** in every instance above that was caught in time, the
+catch came from **executing something** — running the disarm, checking runtime
+membership, diffing against the parent commit. Not one was caught by re-reading the
+output. Staring harder at a grep result has never once worked here.
 
 ## Measurements
 
