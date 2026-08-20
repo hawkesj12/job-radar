@@ -256,7 +256,7 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
         joined["text"] = harvested.get("text") or joined.get("text")
         joined["sources"] = harvested.get("sources") or joined.get("sources")
         rows.append(joined)
-    text = emit.records(rows)
+    text = emit.records(rows, include_text=not getattr(args, "no_text", False))
     if text:
         print(text)
     print(emit.manifest(rows, errors, discovered, cfg), file=sys.stderr)
@@ -354,6 +354,21 @@ def main(argv=None):
         "--all",
         action="store_true",
         help="with --format ndjson: emit every tracked role, not just the shortlist",
+    )
+    # THE BODY IS 72% OF THE RECORD, and until now there was no way to ask for the
+    # record without it. Measured on a 7,568-row local harvest `[0.9.0]`: the median
+    # record is 8,717 bytes and 2,403 of them without `text` -- so anyone opening the
+    # output to LOOK at it (rather than to score against it) is reading a job
+    # description with a record buried in it.
+    #
+    # Opt-OUT, not opt-in: `text` is the entire input to the fit score, so a consumer
+    # that re-scores our rows needs it and the default must keep it. This flag is for
+    # reading, diffing, and eyeballing a harvest -- the case that had no answer.
+    # `text_basis` goes with it, because it describes a field that is no longer there.
+    common.add_argument(
+        "--no-text",
+        action="store_true",
+        help="with --format ndjson: omit the description body (72%% of the record)",
     )
     common.add_argument(
         "--strict",

@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`--no-text` on `--format ndjson`.** There was no way to ask for the record without
+  the description body, and the body is **72% of the median record's bytes** — 8,717
+  bytes per record, 2,403 without it `[local 94-board harvest, 0.9.0]`. Anyone opening
+  the output to _look_ at it was reading a job description with a record buried inside.
+  It **removes** `text` and `text_basis` rather than nulling them: `text: null` already
+  means "the source sent no body" (smartrecruiters, 250 of 250 rows), and an absent key
+  is the only value JSON has left for "you asked us not to send it". The default keeps
+  the body, because it is the entire input to the fit score.
+
+### Changed
+
+- **A record's keys are now ordered for a person to read.** Key order previously
+  carried no decision at all — it was whatever each adapter's dict literal listed, then
+  whatever `_coerce` and `_consume` appended. Measured on the harvest output
+  `[local 94-board harvest, 0.9.0]`: `company` arrived 21 fields in, **below** the
+  6,870-character `text` body and its `sections` list; `title_root` sat 15 fields from
+  the `title` it decomposes; `city`/`state`/`country` came after the `locations` list
+  they summarize; the salary group was split in two.
+
+  The order is now role → employer → place → time → money → terms → apply → provenance
+  → **body last**, applied once at the end of `harvest`. **No value, type, or key
+  changes** — JSON object order is not semantically meaningful and no consumer can
+  break on it. A key the order does not name is kept, sorted, at the end rather than
+  dropped, so adding a contract field can never silently delete it from every record.
+
 ### Fixed
 
 - **The cross-source merge record no longer disappears at the wire.** `sources` — the

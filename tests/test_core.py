@@ -4182,3 +4182,90 @@ def test_two_names_for_one_arrangement_are_not_a_contradiction():
         )["employment_type"]
         is None
     )
+
+
+def test_a_record_is_ordered_for_a_person_to_read():
+    """The owner opened the harvest output and could not read it. `company` came 21
+    fields in, BELOW the 6,870-character `text` body; `title_root` sat 15 fields from
+    the `title` it decomposes. Key order carried no decision at all -- it was whatever
+    each adapter's dict literal listed, then whatever `_coerce` appended.
+
+    `text` is 72% of the median record, so wherever the body sits, everything after it
+    is past a wall of prose. It goes last.
+    """
+    p = engine._coerce(
+        {
+            "title": "Senior AI Engineer",
+            "company": "Acme",
+            "url": "https://x/1",
+            "source": "greenhouse",
+            "location": "Austin, TX",
+            "text": "a body",
+        }
+    )
+    p["score"], p["signals"], p["dedup_key"] = 10, "remote", "acme|ai engineer|us"
+    engine._reorder(p)
+    keys = list(p)
+
+    assert keys[0] == "title", "the role comes first"
+    assert keys.index("company") < keys.index("text"), (
+        "company must not sit below the body -- that is the defect this fixes"
+    )
+    assert keys.index("title_root") == keys.index("title") + 1
+    assert keys[-1] == "sections" and keys[-3] == "text", "the body goes LAST"
+    for group in (("salary", "salary_min", "salary_max"), ("city", "state", "country")):
+        spans = [keys.index(k) for k in group if k in keys]
+        assert spans == sorted(spans) and spans[-1] - spans[0] == len(spans) - 1, (
+            f"{group[0]}'s group is split across the record"
+        )
+
+
+def test_reordering_can_never_drop_a_key():
+    """An allowlist here would mean adding a contract field and silently deleting it
+    from every record until someone remembered `_READING_ORDER` -- the same class of
+    failure as emit._nested's hand-written field list. Unknown keys are KEPT."""
+    p = {"title": "T", "text": "b", "a_brand_new_field": 1, "zzz": None}
+    before = dict(p)
+    engine._reorder(p)
+    assert p == before, "reordering changed a value"
+    assert set(p) == set(before), "reordering lost a key"
+    assert list(p)[0] == "title" and "a_brand_new_field" in p
+
+
+def test_harvest_actually_orders_the_rows_it_returns(monkeypatch):
+    """THE WIRING, not the helper. `test_a_record_is_ordered_for_a_person_to_read`
+    calls `_reorder` directly, so deleting the call site in `harvest` leaves it green
+    while every row a consumer receives goes back to adapter-literal order. This is
+    the test that goes red for that, and it is the shape the record is actually
+    delivered in.
+    """
+
+    def fake_breadth(_queries):
+        # Adapter-literal order: `text` early, `company` late -- the defect verbatim.
+        return [
+            {
+                "title": "AI Engineer",
+                "text": "Build things with LLMs. Remote.",
+                "location": "Remote",
+                "url": "https://x/1",
+                "posted": "2026-08-01",
+                "company": "Acme",
+                "source": "fake",
+            }
+        ]
+
+    cfg = config.Config()
+    cfg.remote_only = False
+    cfg.min_score = -999
+    cfg.max_age_days = 100000
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+    rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+
+    assert rows, "the fixture produced no row to judge"
+    keys = list(rows[0])
+    assert keys[0] == "title"
+    assert keys.index("company") < keys.index("text"), (
+        "harvest returned a row in adapter order -- the _reorder call site is missing"
+    )
+    assert keys[-1] == "sections", "the body must be last in a delivered row"

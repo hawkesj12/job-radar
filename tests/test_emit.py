@@ -199,3 +199,35 @@ def test_a_single_source_row_is_untouched_by_the_merge_recovery():
     got = emit._nested(row)
     assert got["source"] == "google_jobs" and got["sources"] == ["google_jobs"]
     assert emit._nested({**row, "source": ""})["source"] is None
+
+
+def test_no_text_drops_the_body_keys_rather_than_nulling_them():
+    """`text` is 72% of the median record's bytes and there was no way to ask for the
+    record without it, which is why the harvest output was unreadable by hand.
+
+    DROPPED, not nulled: `text: null` already means "the source sent no body"
+    (smartrecruiters, 250 of 250 rows), so nulling it here would make a caller's
+    display choice indistinguishable from a fact about the posting.
+    """
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "greenhouse", "text": "a long body", "text_basis": "excerpt",
+    }  # fmt: skip
+    full = json.loads(emit.records([row]))
+    assert full["text"] == "a long body" and full["text_basis"] == "excerpt"
+
+    lean = json.loads(emit.records([row], include_text=False))
+    assert "text" not in lean and "text_basis" not in lean, (
+        "the body keys must be ABSENT, not null -- null already means something else"
+    )
+    # Nothing else moves. The flag is a display choice, not a contract change.
+    assert set(full) - set(lean) == {"text", "text_basis"}
+    assert all(lean[k] == full[k] for k in lean)
+
+
+def test_a_source_that_sent_no_body_still_says_so_with_null():
+    """The other side of the same distinction: with the body INCLUDED, a source that
+    sent nothing must still be able to say `null`, or the two states collapse."""
+    row = {"title": "T", "company": "C", "url": "https://x/1", "source": "smartrecruiters"}
+    got = json.loads(emit.records([row]))
+    assert "text" in got and got["text"] is None

@@ -835,6 +835,73 @@ def derive_remote(p: dict) -> dict:
     return p
 
 
+# The order a PERSON reads a record in, applied once at the end of `harvest`.
+#
+# A record's key order carried no decision at all before this: it was whatever the
+# adapter's dict literal happened to list, then whatever `_coerce` and `_consume`
+# appended. JSON does not care, and neither does any consumer -- but the owner of
+# this repo opened the harvest output, could not read it, and asked for the shape to
+# be simplified. Measured on that file `[local 94-board harvest, 0.9.0]`: `company`
+# came 21 fields in, BELOW the 6,870-character `text` body and its `sections` list;
+# `title_root` sat 15 fields from the `title` it decomposes; `city`/`state`/`country`
+# came after the `locations` list they summarize; the salary group was split in two.
+#
+# THE BODY GOES LAST, and that is the whole point rather than a tidy-up. `text` is
+# 72% of the median record's bytes, so wherever it sits, everything after it is past
+# a wall of prose -- which is why `company` was unfindable. Nothing here changes a
+# value, a type, or which keys exist; it is presentation, and it is the one change in
+# this pass that addresses what was actually asked for.
+_READING_ORDER = (
+    # what the role is
+    "title", "title_root", "title_level", "title_qualifiers",
+    # who is hiring, and for which group
+    "company", "parent_company", "team", "department", "category", "tags",
+    "seniority", "seniority_raw", "seniority_basis",
+    # where the work is, then where a remote worker may sit
+    "location", "city", "state", "country", "locations",
+    "remote", "remote_type", "remote_basis",
+    "remote_areas", "remote_regions", "remote_scope_raw",
+    # when
+    "posted", "posted_basis", "expires", "harvested_at",
+    # money -- the commitment, then the model's guess, never interleaved
+    "salary", "salary_min", "salary_max", "salary_currency", "salary_period",
+    "salary_basis", "salary_estimated_min", "salary_estimated_max",
+    # terms
+    "employment_type", "employment_type_raw",
+    # how to apply
+    "url", "direct_apply",
+    # what we made of it
+    "score", "signals",
+    # where it came from
+    "source", "sources", "source_extra", "industry", "dedup_key",
+    # the body LAST: 72% of the record, and everything after it is unreadable
+    "text", "text_basis", "sections",
+)  # fmt: skip
+
+
+def _reorder(p: dict) -> None:
+    """Rewrite one record's keys into `_READING_ORDER`, in place.
+
+    IN PLACE because `hits` holds these same objects; rebinding would leave the
+    de-dup index pointing at the unordered originals.
+
+    A KEY THIS TUPLE DOES NOT NAME IS KEPT, sorted, at the end -- never dropped.
+    An allowlist here would mean adding a contract field and silently deleting it
+    from every record until someone remembered this tuple, which is the same class
+    of failure as `emit._nested`'s hand-written field list (see its docstring: a
+    0.7.0 rename reached the contract and all nineteen adapters but not that
+    function, and nothing failed). Ordering must never be able to lose data.
+    """
+    rest = sorted(k for k in p if k not in _ORDER_INDEX)
+    ordered = [(k, p[k]) for k in _READING_ORDER if k in p]
+    ordered += [(k, p[k]) for k in rest]
+    p.clear()
+    p.update(ordered)
+
+
+_ORDER_INDEX = frozenset(_READING_ORDER)
+
+
 def _consume(postings, hits, blocks, cfg, meta):
     for p in postings:
         _coerce(p)
@@ -1096,4 +1163,5 @@ def _harvest(cfg, watchlist_path, companies):
         r.pop("_nt", None)
         r.pop("_ref", None)  # the stashed job_ref — same reasoning as the two above
         r.pop("_url_recovered", None)  # adapter-internal; read once by _coerce
+        _reorder(r)
     return rows, discovered, errors

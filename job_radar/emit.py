@@ -79,7 +79,7 @@ def _sources(r: dict) -> list[str] | None:
     return sorted(t for t in str(one).split(", ") if t)
 
 
-def _nested(r: dict) -> dict:
+def _nested(r: dict, include_text: bool = True) -> dict:
     """One harvested posting -> the emitted record.
 
     Nests `location`, and keeps each derived `*_basis` next to the value it explains
@@ -98,7 +98,7 @@ def _nested(r: dict) -> dict:
     at a minor version. It goes at 1.0.
     """
     srcs = _sources(r)
-    return {
+    out = {
         "id": r.get("id") or None,
         "dedup_key": r.get("dedup_key") or None,
         "title": {
@@ -184,11 +184,29 @@ def _nested(r: dict) -> dict:
         # DEPRECATED -- see the docstring. Preserved byte-identical.
         "department": r.get("department") or None,
     }
+    if not include_text:
+        # DROPPED, not nulled. `text: null` is already taken: it means the source sent
+        # no body (smartrecruiters, 250 of 250 rows), and collapsing "you asked us not
+        # to send it" into that is the same two-states-in-one-value lie the contract
+        # exists to remove. An absent key is the only value JSON has left.
+        del out["text"], out["text_basis"]
+    return out
 
 
-def records(rows) -> str:
-    """Rows -> NDJSON text. One JSON object per line, no trailing blank line."""
-    return "\n".join(json.dumps(_nested(r), ensure_ascii=False) for r in rows)
+def records(rows, include_text: bool = True) -> str:
+    """Rows -> NDJSON text. One JSON object per line, no trailing blank line.
+
+    `include_text=False` DROPS the `text`/`text_basis` keys rather than nulling them,
+    because `text: null` already means something else here -- the source sent no body
+    at all (smartrecruiters, 250 of 250) -- and a reader cannot tell that from "the
+    caller asked us not to send it". An absent key is the only honest way to say the
+    second thing. `text_basis` leaves with it: it characterizes a body that is no
+    longer in the record.
+    """
+    return "\n".join(
+        json.dumps(_nested(r, include_text=include_text), ensure_ascii=False)
+        for r in rows
+    )
 
 
 def manifest(rows, errors, discovered, cfg, started_at=None) -> str:
