@@ -14,18 +14,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   move **665 rows** from a populated `remote_areas` to `null` in a 7,545-row local harvest,
   and **~2,502 rows** in a 67,481-row production store — roughly a **30% drop in fill rate**.
 
-  It is filed here rather than only under Fixed because it **changes which rows reach a
-  user**, not just what a column says. A consumer filtering on `remote_areas` — jobfitr's
-  US-only intake reads exactly this field — will see rows it used to admit become correctly
-  unstated, and any dashboard measuring "how many rows carry a boundary" will read the
-  correction as a regression. **The old values were not conservative, they were wrong in the
-  permissive direction:** through `scoring._region_allowed` an empty list satisfies every
-  policy unconditionally, so a posting reading "Candidates must live in the United States"
-  was admitted into a Germany-only filter.
+  It is filed here rather than only under Fixed because a consumer can **filter** on this
+  field, not merely display it, and a dashboard measuring "how many rows carry a boundary"
+  will read the correction as a regression. **The old values were not conservative, they
+  were wrong in the permissive direction:** through `scoring._region_allowed` an empty list
+  satisfies every policy unconditionally, so a posting reading "Candidates must live in the
+  United States" was admitted into a Germany-only filter.
+
+  **MEASURED AGAINST THE REAL CONSUMER, and the answer is zero.** `remote_areas` is
+  load-bearing in jobfitr's US-only intake — `store.py`'s own comment puts it at **18x the
+  reach of the currency test** — so the obvious fear is that emptying it lets foreign rows
+  through. Replaying jobfitr's actual `servable_in_us` over the **67,481-row production
+  store**, before and after:
+
+  ```
+  rows with a populated remote_areas                 10,723
+    ...this change empties (prose path only)          2,492
+      short-circuited before `areas` is read              0
+      actually reach the remote_areas branch          2,492
+        intake decision UNCHANGED                     2,492
+        kept today -> dropped after                       0
+        dropped today -> kept after (a leak)              0
+  ```
+
+  **Zero rows change what a user sees, and the reason is structural rather than lucky:**
+  every value this removes was _derived from the location text_, and jobfitr's fallback
+  branch re-reads that same text (`place_evidence(job["location"])`). The evidence is not
+  lost — it stops being laundered through a field whose contract says the posting **stated**
+  it. The areas verdict and the text verdict agree on all 2,492.
 
   **Nothing reaches a downstream consumer without a deliberate act.** jobfitr pins
   `job-radar>=0.8,<0.9`, so this cannot arrive through a `git pull` on its box — someone has
   to edit the pin. That quarantine is why a contract change can ship at all.
+
+- **Deriving a country where the engine previously had none removes 2 rows from a US-only
+  consumer's store** — both foreign jobs that were passing as unknown-country. jobfitr's
+  intake lets a **blank** country through (`if country not in ("", "US")`), so a row that
+  gains a real foreign code newly fails it: a Databricks role in `Madrid; Milan, Italy;
+Paris, France` (now `IT`) and a MongoDB role in `Dublin; Ireland` (now `IE`).
+  `[local 94-board harvest]`, reproduced independently. The two changes are **independent** —
+  measured together against jobfitr's real filter, the country derivation neither cancels
+  nor creates any of the boundary change's decisions.
 
 ### Added
 
@@ -204,8 +233,9 @@ Telework` (2), `part-time telework per our global telework policy` (2) all came 
   no value is partially rewritten.
 
   **This LOWERS the fill rate of `remote_areas` by roughly 30%, and that is the fix, not a
-  regression** — filed under **Changed — BREAKING** above, because it changes which rows
-  reach a user and not merely what a column says.
+  regression** — filed under **Changed — BREAKING** above, where it is measured against
+  jobfitr's real intake filter at production scale: 2,492 rows lose the field and **zero**
+  change what a user sees.
 
   The narrow predicate that WAS safe on `split_place` itself — a parsed city that is a
   country name is not a city — shipped separately as `_country_is_not_a_city`. Nulling any
