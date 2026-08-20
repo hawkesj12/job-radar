@@ -78,7 +78,16 @@ sponsor visas!`, 487 of 487 postings at one employer) and took `eeo_legal` cover
   it compares by **overlap rather than difference**, so a title naming a second axis
   (`Customer Operations Intern - Part-time` against `Intern` metadata) corroborates
   instead of contradicting. Net: **8,526 → 8,432 filled `[live prod]`**, 94 withdrawn
-  (1.10%), zero domain false positives remaining.
+  (1.10%). An independent hand-classification of all 163 pre-guard vetoes put the
+  false-positive rate at **34.4%**; the guards release 54 of those, and every released
+  row is domain usage — no genuine contradiction is given up. **One known residual
+  remains and is deliberately unfixed:** `Production Director – Seasonal Content` is a
+  domain noun the guard does not catch. It costs one unfilled row rather than a wrong
+  assertion, and a single-row entry is exactly the exception-table growth this lens
+  refused everywhere else. The rest of the 94 are `Per Diem` vs `Part-time` (31),
+  a `(Contract)` term against `Full-time` metadata (23), and explicit `Part Time` /
+  `Temp` titles (34). `Contract to Perm` (2) is genuinely ambiguous and vetoing it is
+  the safe reading, not a clean win.
 
   **How this was found is the more useful half.** The n=150 hand read found the defect
   KIND — 2 rows — and could never have found its RATE: at 0.46% prevalence the sample
