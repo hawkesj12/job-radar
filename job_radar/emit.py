@@ -79,7 +79,7 @@ def _sources(r: dict) -> list[str] | None:
     return sorted(t for t in str(one).split(", ") if t)
 
 
-def _nested(r: dict, include_text: bool = True) -> dict:
+def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dict:
     """One harvested posting -> the emitted record.
 
     Nests `location`, and keeps each derived `*_basis` next to the value it explains
@@ -193,10 +193,33 @@ def _nested(r: dict, include_text: bool = True) -> dict:
         # to send it" into that is the same two-states-in-one-value lie the contract
         # exists to remove. An absent key is the only value JSON has left.
         del out["text"], out["text_basis"]
+    if omit_empty:
+        out = _prune(out)
     return out
 
 
-def records(rows, include_text: bool = True) -> str:
+def _prune(o):
+    """Drop None and "" keys, recursively, from the nested record.
+
+    RECURSIVE because this shape nests: `location`, `remote`, `salary` and `title` are
+    objects, and pruning only the top level would leave `salary: {raw: null, min: null,
+    …}` -- eight nulls in a wrapper, which is most of what makes an empty record long.
+
+    `[]` AND `{}` SURVIVE, same rule as `engine._shape`. `remote.areas: []` means the
+    posting STATED it is open anywhere and `sections: []` means we read the body and
+    found no headers; both are facts that took work to establish and neither is `null`,
+    which means nobody said. Only None and "" go -- they already mean "nothing here".
+    An object that prunes to empty is KEPT as `{}` rather than dropped, so a consumer
+    reading `record["salary"]["min"]` gets None instead of a KeyError on the wrapper.
+    """
+    if isinstance(o, dict):
+        return {k: _prune(v) for k, v in o.items() if v is not None and v != ""}
+    if isinstance(o, list):
+        return [_prune(v) for v in o]
+    return o
+
+
+def records(rows, include_text: bool = True, omit_empty: bool = False) -> str:
     """Rows -> NDJSON text. One JSON object per line, no trailing blank line.
 
     `include_text=False` DROPS the `text`/`text_basis` keys rather than nulling them,
@@ -207,7 +230,10 @@ def records(rows, include_text: bool = True) -> str:
     longer in the record.
     """
     return "\n".join(
-        json.dumps(_nested(r, include_text=include_text), ensure_ascii=False)
+        json.dumps(
+            _nested(r, include_text=include_text, omit_empty=omit_empty),
+            ensure_ascii=False,
+        )
         for r in rows
     )
 

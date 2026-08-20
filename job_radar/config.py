@@ -432,6 +432,27 @@ class Config:
     # http
     timeout: int = 25
     user_agent: str = "job-radar/1.0 (https://github.com/hawkesj12/job-radar)"
+    # output shape -- PRESENTATION ONLY. Neither of these changes a value, and
+    # neither is a filter: no row is added or removed by either. They exist because
+    # the record was unreadable by hand and there was no way to ask for less of it.
+    #
+    # THEY LIVE ON `Config`, NOT ON THE CLI, and that placement is the whole point.
+    # `harvest` installs the caller's cfg process-wide via `config.activated()`, so a
+    # LIBRARY consumer calling `engine.harvest(cfg)` gets these for free. The first
+    # attempt put the text lever on `emit.records` alone -- and `emit` is the one
+    # module the only known consumer imports nowhere, so the single largest lever on
+    # the record was reachable from argparse and from nothing else. That is the same
+    # CLI-answer-to-a-library-problem this release exists to correct.
+    #
+    # `text` is ~72% of the median record's bytes; `omit_empty` removes the 19 of 50
+    # keys that are null on a median row. Ordering makes what survives scannable and
+    # removes nothing -- these two are what remove the wall, and neither works alone.
+    include_text: bool = True
+    # DEFAULT OFF, deliberately. `_CONTRACT_FIELDS` are ensured-present-and-None on
+    # purpose so a consumer can write `WHERE remote_type IS NOT NULL` and mean it;
+    # dropping a key changes `k in record` and `.keys()`, which is a contract change
+    # rather than a display choice. Opt in when a human is going to read it.
+    omit_empty: bool = False
     # ai
     llm: LLMConfig = field(default_factory=LLMConfig)
     # harvest depth — see HarvestDepth. YAML: `sources.harvest_depth.*`
@@ -524,6 +545,7 @@ def load_config(path: str | os.PathLike | None) -> Config:
     # `or {}` guards a present-but-empty section (`profile:` with no body -> None)
     prof, scor = doc.get("profile") or {}, doc.get("scoring") or {}
     filt, srcs = doc.get("filters") or {}, doc.get("sources") or {}
+    outp = doc.get("output") or {}
     llm = doc.get("llm") or {}
 
     def take(section: dict, key: str, attr: str):
@@ -608,6 +630,10 @@ def load_config(path: str | os.PathLike | None) -> Config:
     ]:
         take(filt, k, a)
     take_list(filt, "allowed_scopes", "allowed_scopes")
+    # `output` is presentation, so it is its own YAML block rather than a `filters`
+    # key -- nothing here admits or drops a ROW, only keys within one.
+    for k, a in [("include_text", "include_text"), ("omit_empty", "omit_empty")]:
+        take(outp, k, a)
     for k, a in [
         ("ats", "depth_sources"),
         ("boards", "breadth_sources"),

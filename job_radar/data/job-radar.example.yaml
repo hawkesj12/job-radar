@@ -152,3 +152,20 @@ sources:
 #   api_key_env: ANTHROPIC_API_KEY      # the tool reads the key from this env var
 #   rerank_top_n: 25
 #   # base_url: https://api.openai.com/v1   # for an OpenAI-compatible endpoint
+
+# ── output: what a RECORD looks like, not which records you get ─────────────
+# Neither key filters anything -- no posting is added or dropped by either. They
+# change the shape of each record, for the case of reading a harvest by hand.
+#
+# The body is ~72% of a record's bytes and 19 of its 50 keys are null on a median
+# row, so the raw output is a job description with a record buried in it. These are
+# the two levers that fix that; the CLI flags --no-text and --drop-empty set them.
+# output:
+#   include_text: false   # drop `text` + `text_basis` (the description body)
+#   omit_empty: true      # drop keys that are null or "" -- see the caveat below
+#
+# omit_empty is OFF by default on purpose. `null` is a real value here: it means the
+# source did not say, as distinct from `false` and from `""`. Dropping the key
+# changes `"x" in record` and `record.keys()`, so a consumer written against the
+# full key set can break on it. `[]` and `{}` always SURVIVE -- `remote_areas: []`
+# means the posting stated it is open anywhere, which is a fact, not an absence.

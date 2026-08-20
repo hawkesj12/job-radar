@@ -8,14 +8,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`--no-text` on `--format ndjson`.** There was no way to ask for the record without
-  the description body, and the body is **72% of the median record's bytes** — 8,717
-  bytes per record, 2,403 without it `[local 94-board harvest, 0.9.0]`. Anyone opening
-  the output to _look_ at it was reading a job description with a record buried inside.
-  It **removes** `text` and `text_basis` rather than nulling them: `text: null` already
-  means "the source sent no body" (smartrecruiters, 250 of 250 rows), and an absent key
-  is the only value JSON has left for "you asked us not to send it". The default keeps
-  the body, because it is the entire input to the fit score.
+- **Two output-shape levers: `output.include_text` and `output.omit_empty`** (CLI:
+  `--no-text`, `--drop-empty`). The record was unreadable by hand and there was no way
+  to ask for less of it. Measured per median record on a 7,568-row local harvest
+  `[local 94-board harvest, 0.9.0]`:
+
+  | | keys | bytes |
+  | --- | --- | --- |
+  | as emitted | 50 | 8,717 |
+  | `omit_empty` | 31 | 8,313 |
+  | both | 30 | 2,021 |
+
+  The body is **~72% of a record's bytes** and **19 of its 50 keys are null** on a
+  median row. Both levers **remove keys** rather than nulling them, because `null`
+  already means something specific here — the source did not say — and collapsing a
+  caller's display choice into that is the two-states-in-one-value lie the contract
+  exists to remove.
+
+  **They are `Config` fields, not CLI flags, and that placement is the feature.**
+  `harvest` installs the caller's config process-wide, so `engine.harvest(cfg)` returns
+  records already in that shape and a **library** consumer never touches argparse. The
+  first cut of this put the text lever on `emit.records` alone — and `emit` is the one
+  module the only known consumer imports nowhere, which would have made the largest
+  lever on the record reachable from the CLI and from nothing else.
+
+  **`omit_empty` defaults OFF** and is the one to think about before enabling: removing
+  a key changes `"x" in record` and `record.keys()`, so a consumer written against the
+  full key set can break on it, and `_CONTRACT_FIELDS` are ensured-present-and-`None`
+  precisely so `WHERE remote_type IS NOT NULL` means something. **`[]` and `{}` always
+  survive** — `remote_areas: []` means the posting *stated* it is open anywhere and
+  `sections: []` means the body carried no headers. Those are facts, not absences.
 
 ### Changed
 
@@ -28,7 +50,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they summarize; the salary group was split in two.
 
   The order is now role → employer → place → time → money → terms → apply → provenance
-  → **body last**, applied once at the end of `harvest`. **No value, type, or key
+  → **body last**, applied once at the end of `harvest`. **Ordering removes nothing** —
+  50 keys before and after — so it is half the answer: it makes the record scannable,
+  and `omit_empty` above is what removes the wall. Neither does the job alone. **No value, type, or key
   changes** — JSON object order is not semantically meaningful and no consumer can
   break on it. A key the order does not name is kept, sorted, at the end rather than
   dropped, so adding a contract field can never silently delete it from every record.
@@ -47,8 +71,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no adapter has ever been called, in the one output a consumer reads to tell "the
   market was quiet" from "four adapters were down".
 
-  Both exits now read one helper, `emit._sources`, which takes set, list, tuple, or a
-  store row's joined string. Recovering the set from that string is lossless and
+  Both exits now read one helper, `emit._sources`, which takes `sources` as a set,
+  list or tuple, and otherwise falls back to splitting the singular `source` — where a
+  store row's joined string always lives, since there is no `sources` column to hold it. Recovering the set from that string is lossless and
   provably so rather than by inspection: **no registered source token contains a comma
   or a space (19 of 19)**, so `", ".join` has exactly one inverse. The singular
   `source` on such a row now emits a real adapter token instead of the joined string —

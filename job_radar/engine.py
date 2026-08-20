@@ -888,6 +888,35 @@ _READING_ORDER = (
 )  # fmt: skip
 
 
+def _shape(p: dict, cfg) -> None:
+    """Apply the two OUTPUT-SHAPE levers to one record, in place.
+
+    Runs in `harvest`, not in `emit`, and that is the point: `emit` is the one module
+    the only known consumer imports nowhere, so a lever that lives only there is
+    reachable from argparse and from nothing else. A library caller doing
+    `engine.harvest(cfg)` gets both of these because `harvest` installs the cfg
+    process-wide. `emit.records` applies the same two for the CLI's own reasons -- it
+    also emits STORE rows, which never passed through this function.
+
+    Neither lever changes a value and neither drops a row. `include_text=False`
+    removes `text` and `text_basis`; `text_basis` goes because it characterizes a body
+    that is no longer present. `omit_empty` removes keys whose value is None or "".
+
+    `[]` AND `{}` SURVIVE `omit_empty`, and that is not an oversight. `remote_areas:
+    []` means the posting STATED it is open anywhere, which is a fact it took work to
+    establish and is NOT the same as `null` (it said nothing); `sections: []` means we
+    read the body and found no headers. Dropping those would destroy exactly the
+    two-state distinctions the contract exists to carry. Only None and "" -- which
+    already mean "nothing here" -- are removed.
+    """
+    if not getattr(cfg, "include_text", True):
+        p.pop("text", None)
+        p.pop("text_basis", None)
+    if getattr(cfg, "omit_empty", False):
+        for k in [k for k, v in p.items() if v is None or v == ""]:
+            del p[k]
+
+
 def _reorder(p: dict) -> None:
     """Rewrite one record's keys into `_READING_ORDER`, in place.
 
@@ -1172,5 +1201,6 @@ def _harvest(cfg, watchlist_path, companies):
         r.pop("_nt", None)
         r.pop("_ref", None)  # the stashed job_ref — same reasoning as the two above
         r.pop("_url_recovered", None)  # adapter-internal; read once by _coerce
+        _shape(r, cfg)  # BEFORE _reorder, so a dropped key cannot be reordered back
         _reorder(r)
     return rows, discovered, errors

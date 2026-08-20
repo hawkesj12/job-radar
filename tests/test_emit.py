@@ -231,3 +231,25 @@ def test_a_source_that_sent_no_body_still_says_so_with_null():
     row = {"title": "T", "company": "C", "url": "https://x/1", "source": "smartrecruiters"}
     got = json.loads(emit.records([row]))
     assert "text" in got and got["text"] is None
+
+
+def test_omit_empty_prunes_the_nested_record_recursively():
+    """The wire shape NESTS, so pruning only the top level leaves `salary: {raw: null,
+    min: null, …}` -- eight nulls in a wrapper, which is most of what makes an empty
+    record long. `[]` and `{}` survive for the same reason as in `engine._shape`."""
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "greenhouse", "remote_areas": [], "sections": [],
+        "remote_type": "remote",
+    }  # fmt: skip
+    full = json.loads(emit.records([row]))
+    lean = json.loads(emit.records([row], omit_empty=True))
+
+    assert full["salary"]["min"] is None, "the baseline should carry the null wrapper"
+    assert lean["salary"] == {}, "a wrapper that prunes empty is kept, not dropped"
+    assert lean["remote"]["areas"] == [] and lean["sections"] == [], (
+        "[] means the posting SAID anywhere / the body had no headers -- not null"
+    )
+    assert "expires" not in lean and lean["title"]["raw"] == "AI Engineer"
+    # Every surviving value is untouched; this drops keys, it does not rewrite them.
+    assert lean["remote"]["type"] == full["remote"]["type"] == "remote"

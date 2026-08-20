@@ -256,7 +256,10 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
         joined["text"] = harvested.get("text") or joined.get("text")
         joined["sources"] = harvested.get("sources") or joined.get("sources")
         rows.append(joined)
-    text = emit.records(rows, include_text=not getattr(args, "no_text", False))
+    # cfg, not args. The flags SET the config above; reading it back here means the
+    # wire format and the library return are driven by one source of truth, and a
+    # caller that set `cfg.include_text` in YAML gets the same shape without a flag.
+    text = emit.records(rows, include_text=cfg.include_text, omit_empty=cfg.omit_empty)
     if text:
         print(text)
     print(emit.manifest(rows, errors, discovered, cfg), file=sys.stderr)
@@ -368,7 +371,15 @@ def main(argv=None):
     common.add_argument(
         "--no-text",
         action="store_true",
-        help="with --format ndjson: omit the description body (72%% of the record)",
+        help="omit the description body (~72%% of the record)",
+    )
+    # THE PAIR. Ordering made the record scannable and removed nothing -- 19 of its 50
+    # keys are null on a median row, so ordering alone delivers a tidier wall. These
+    # two are what remove it, and neither does the job alone.
+    common.add_argument(
+        "--drop-empty",
+        action="store_true",
+        help="omit keys that are null or empty (a median record loses 19 of 50)",
     )
     common.add_argument(
         "--strict",
@@ -434,6 +445,17 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     cfg = _resolve_config(args.config)
+    # THE FLAGS SET THE CONFIG, and the config is what everything downstream reads.
+    # These are output SHAPE, and `engine.harvest` applies them to the flat rows it
+    # RETURNS -- so a library caller gets them from YAML without going near argparse.
+    # The first version of `--no-text` passed straight to `emit.records`, which made
+    # the biggest lever on the record reachable from the CLI and from nowhere else;
+    # `emit` is the one module the only known consumer imports nowhere.
+    # Only override on an explicit flag, so a YAML setting is not silently reset.
+    if getattr(args, "no_text", False):
+        cfg.include_text = False
+    if getattr(args, "drop_empty", False):
+        cfg.omit_empty = True
     config.set_active(cfg)
 
     # An unreadable store is the one error that hits EVERY command -- list, apply,

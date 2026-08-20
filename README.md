@@ -256,24 +256,43 @@ vendor value beside the parsed parts, so a consumer who disagrees with our parse
 re-read the original rather than losing it. Everything the contract knows is on the
 wire — including `text`, the full description, which is the entire input to the score.
 
-**If you are reading the output rather than storing it, drop the body:**
+**If you are reading the output rather than storing it, ask for less of it:**
 
 ```
-job-radar --format ndjson --all --no-text > jobs.ndjson
+job-radar --format ndjson --all --no-text --drop-empty > jobs.ndjson
 ```
 
-`text` is **72% of the median record's bytes** (8,717 bytes, or 2,403 without it), so
-a record with the body in it is a job description with a record buried inside. The
-flag omits `text` and `text_basis` — it **removes the keys** rather than nulling them,
-because `text: null` already means something specific and different: the source sent
-no body at all. The default keeps the body, because a consumer that re-scores our rows
-needs it.
+Measured on a 7,568-row local harvest, per median record:
+
+| | keys | bytes |
+| --- | --- | --- |
+| as emitted | 50 | 8,717 |
+| `--drop-empty` | 31 | 8,313 |
+| `--no-text --drop-empty` | 30 | 2,021 |
+
+`text` is **~72% of a record's bytes** and **19 of its 50 keys are null** on a median
+row, so the raw output is a job description with a record buried inside it. Both flags
+**remove keys** rather than nulling them, because `null` already means something
+specific and different here — the source did not say.
+
+**`--drop-empty` is opt-in, and worth understanding before you turn it on.** Removing
+a key changes `"x" in record` and `record.keys()`, so a consumer written against the
+full key set can break on it — which is why the default keeps every key present and
+`null`. **`[]` and `{}` always survive:** `remote_areas: []` means the posting *stated*
+it is open anywhere and `sections: []` means the body carried no headers. Those are
+facts, not absences, and collapsing them into "missing" destroys the distinction.
+
+Both are also plain config, so a **library** consumer gets them without touching the
+CLI — set `output.include_text` / `output.omit_empty` in `job-radar.yaml`, or the
+fields of the same name on `Config`, and `engine.harvest()` returns records already in
+that shape.
 
 The **flat** record that `job-radar` returns as a library (`engine.harvest()`) carries
 the same values in a flat namespace, ordered for reading: the role, then the employer,
 then place, time, money, terms, the apply link, provenance — and the description body
 **last**, so nothing you are looking for sits below several thousand characters of
-prose.
+prose. Ordering makes the record scannable; it removes nothing. The two flags above
+are what remove the wall, and neither does the job alone.
 
 Each run also emits **one manifest object to stderr** describing the run itself —
 row counts per source, which adapters failed, how many companies were discovered, and

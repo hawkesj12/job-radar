@@ -4272,3 +4272,87 @@ def test_harvest_actually_orders_the_rows_it_returns(monkeypatch):
         "harvest returned a row in adapter order -- the _reorder call site is missing"
     )
     assert keys[-1] == "sections", "the body must be last in a delivered row"
+
+
+def test_the_output_shape_levers_reach_a_library_caller(monkeypatch):
+    """THE WIRING TEST, and it exists because the first version of this failed it.
+
+    `--no-text` originally passed straight from argparse into `emit.records`. That put
+    the single largest lever on the record (the body is ~72% of its bytes) behind the
+    CLI *and* inside `emit` -- the one module the only known consumer imports nowhere.
+    A CLI answer to a library problem, which is the same mistake this release exists
+    to correct one layer up.
+
+    So the levers live on `Config`, which `harvest` installs process-wide, and this
+    asserts what a LIBRARY caller sees from `engine.harvest()` -- never the CLI.
+    """
+
+    def fake_breadth(_queries):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "url": "https://x/1",
+                "location": "Remote",
+                "posted": "2026-08-01",
+                "text": "Build things with LLMs. Remote.",
+                "source": "fake",
+            }
+        ]
+
+    def harvest_with(**kw):
+        cfg = config.Config()
+        cfg.remote_only, cfg.min_score, cfg.max_age_days = False, -999, 100000
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+        monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+        rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+        assert rows, "the fixture produced no row to judge"
+        return rows[0]
+
+    base = harvest_with()
+    assert "text" in base and any(v is None for v in base.values()), (
+        "defaults must keep the body and keep unknown keys present as None"
+    )
+
+    lean = harvest_with(include_text=False)
+    assert "text" not in lean and "text_basis" not in lean
+    assert lean["title"] == base["title"], "a display lever must not change a value"
+
+    dense = harvest_with(omit_empty=True)
+    assert not any(v is None or v == "" for v in dense.values())
+    assert len(dense) < len(base), "omit_empty removed nothing"
+    # Same values for every key that survived -- this drops keys, never rewrites them.
+    assert all(dense[k] == base[k] for k in dense)
+
+
+def test_omit_empty_keeps_the_lists_that_mean_something():
+    """`[]` is not `None` and the contract turns on the difference. `remote_areas: []`
+    means the posting STATED it is open anywhere; `sections: []` means we read the body
+    and it carried no headers. Both took work to establish. Only None and "" go."""
+    cfg = config.Config()
+    cfg.omit_empty = True
+    p = {
+        "title": "E",
+        "remote_areas": [],
+        "sections": [],
+        "source_extra": {},
+        "tags": None,
+        "salary": "",
+    }
+    engine._shape(p, cfg)
+    assert p["remote_areas"] == [] and p["sections"] == [] and p["source_extra"] == {}
+    assert "tags" not in p and "salary" not in p
+
+
+def test_output_levers_default_to_the_shape_that_was_always_emitted():
+    """Both default OFF. `_CONTRACT_FIELDS` are ensured-present-and-None on purpose so
+    a consumer can write `WHERE remote_type IS NOT NULL` and mean it; dropping a key
+    changes `k in record` and `.keys()`, which is a contract change, not a display
+    choice. Nobody opts into that by upgrading."""
+    c = config.Config()
+    assert c.include_text is True and c.omit_empty is False
+    p = {"title": "E", "text": "body", "tags": None}
+    engine._shape(p, c)
+    assert p == {"title": "E", "text": "body", "tags": None}
