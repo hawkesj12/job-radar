@@ -2486,7 +2486,23 @@ def search_hn_whoishiring(queries):
 # A MITIGATION, NOT A CURE. A body that begins inside the first 64 characters still
 # contaminates: "Utrecht, The Netherlands HYBRID We are a non-profit..." keeps ['NL'] from
 # an office address. 2 rows, unchanged by this and not made worse.
+# THE CAP IS PER SEGMENT, SO THE FIELD'S REAL BOUND IS TWICE IT. `location` joins
+# `parts[2]` and `parts[3]`, each truncated independently, so a two-segment header can reach
+# 129 characters and the measured maximum is 119 -- not 64. Spelled out because the constant
+# name reads like a bound on the field and is not one.
+#
+# IT ALSO CANNOT SEE A BLOCK-TAG BOUNDARY, which is the residual `id-pro` measured: on the
+# Portless row the header ends at a `<p>`, not a newline, so this leaves 83 characters with
+# 49 of them body prose. That is fixed upstream, by splitting the DECODED markup before the
+# strip -- and NOT by lowering this cap, because split-only reaches a WORSE maximum (548) on
+# comments carrying no block tag before a long header. Split first, this second.
 _HN_LOCATION_CAP = 64
+
+# The header/body boundary in an HN comment is a BLOCK TAG -- not a pipe, and not a
+# newline. `clean` flattens the tag into the same text run, so the segment that should
+# hold a location swallows the whole posting body instead. Splitting the DECODED markup
+# here, BEFORE the strip, is the cure the cap above calls itself a mitigation for.
+_HN_BLOCK = re.compile(r"<(?:p|br|div|ul|ol|li|blockquote)\b[^>]*>", re.I)
 
 
 def _hn_location(segment: str) -> str:
