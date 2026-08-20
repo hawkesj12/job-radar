@@ -99,6 +99,26 @@ export as-is        536 passed, 1 skipped, 36 deselected
 export + .git       537 passed, 0 skipped, 36 deselected
 ```
 
+**An UNMERGED path is silently omitted from the export, and the gate still reports
+green.** This is the most dangerous of the three, because its output is
+indistinguishable from success. Mid-conflict — or after resolving a conflict's content
+but before `git add` marks it resolved — `git checkout-index -a -f` **skips the file,
+writes nothing, and exits 0**. Measured on a deliberately conflicted `tests/test_core.py`:
+
+```
+exit code                0
+file present in export   no, silently omitted, no warning
+export gate reports      314 passed        <- against a real 564
+```
+
+250 tests vanished and the run looked clean. Nothing in `pytest -q` says "I collected
+fewer files than last time."
+
+**So before trusting any export count, read `git status --short` for `U` (unmerged) and
+for unstaged `M`.** Resolving a conflict's text is not resolving the conflict — `git add`
+is. An alternative that sidesteps all of this: `git archive <rev> | tar -x -C /tmp/gate`
+refuses to invent a tree and always exports exactly one commit.
+
 **`git checkout-index` exports the INDEX, not HEAD — and always print the rev you
 measured.** Staged-but-uncommitted content is what you get, which is usually right
 before a commit (you are testing what you are about to commit) and wrong afterwards. To
