@@ -2521,6 +2521,29 @@ def _hn_rows(tree, out: list) -> None:
         parts = [p.strip() for p in text.split("|")]
         if len(parts) < 2 or not parts[0]:
             continue
+        # STRUCTURE BEFORE THE STRIP, or not at all -- the same invariant `sections`
+        # ships for headers. An HN comment ends its header at a BLOCK TAG, not a pipe
+        # and not a newline ("$180k-$230k<p>AI usage today is basic..."), and `clean`
+        # flattens that tag into the same text run. So `parts[3]` above holds the whole
+        # posting body, and no amount of trimming it afterwards recovers the boundary.
+        # Splitting the DECODED markup here returns the header outright:
+        # ['Portless', 'AI Engineer (Founding seat)', 'Remote (North America)', '$180k-$230k'].
+        #
+        # ONLY `location` reads this. `parts[0]`/`parts[1]` reproduce company and title
+        # on 196 of 196 measured comments and are deliberately left alone, as is the
+        # segment SCAN below -- narrowing the input to remote_type/employment_type is a
+        # different change with a different blast radius.
+        head_parts = [
+            p.strip()
+            for p in clean_with_sections(_HN_BLOCK.split(c.get("text") or "", 1)[0])[
+                0
+            ].split("|")
+        ]
+        # Fall back when the split leaves no location segment: a comment whose block tag
+        # precedes its pipes would otherwise EMPTY a location that is currently
+        # populated. 4 of 196 comments split short; 0 lose a location today, and this
+        # keeps that true for a thread that formats differently next month.
+        loc_parts = head_parts if len(head_parts) > 2 else parts
         m = re.search(r"https?://[^\s)\]]+", text)
         # SCAN the segments, do not index them. The convention is loose: measured
         # across 174 comments in one thread, the remote token lands in slot 2 (62x),
@@ -2545,7 +2568,7 @@ def _hn_rows(tree, out: list) -> None:
                 "title": parts[1][:120],
                 "company": parts[0][:80],
                 "location": " ".join(
-                    t for t in (_hn_location(p) for p in parts[2:4]) if t
+                    t for t in (_hn_location(p) for p in loc_parts[2:4]) if t
                 ),
                 "url": m.group(0)
                 if m

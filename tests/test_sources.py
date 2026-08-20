@@ -1828,6 +1828,59 @@ def test_hn_does_not_ship_the_whole_comment_as_the_location():
     assert _hn_location("Remote (Italy)") == "Remote (Italy)"
 
 
+def test_hn_header_ends_at_a_block_tag_not_a_newline():
+    """The cap above is a MITIGATION; this is the cure, and they compose.
+
+    An HN comment ends its header at a BLOCK TAG. `clean` flattens that tag into the
+    same text run, so the location segment swallows the body and the cap can then only
+    make the result SHORTER, never correct -- measured on the live Portless comment
+    (hn_id 48889875), the cap alone leaves 83 characters of which 49 are pitch copy.
+    Splitting the DECODED markup first returns the header outright.
+
+    Both are load-bearing. Over 196 live comments, maximum location length: cap alone
+    119, split alone 548, split-then-cap 97. The split fixes the common case; the cap
+    catches the tail where a comment carries no block tag before a long header. Removing
+    either one regresses the other's weak side -- do not "simplify" one away.
+
+    The markup below is VERBATIM from the live Firebase item, elided only in the body.
+    `flat.ndjson` CANNOT substitute for it: its `text` is post-strip and contains zero
+    markup tags on all 196 rows, so the boundary this pins is structurally invisible
+    there. That is why this fixture is inline rather than reconstructed from the corpus.
+    """
+    from job_radar.sources import _hn_rows
+
+    portless = (
+        "Portless | AI Engineer (Founding seat) | Remote (North America) | $180k-$230k"
+        "<p>AI usage today is basic &#x2F; decks, spreadsheets, a few people vibe-coding "
+        "dashboards. No real agentic workflows yet. This is a founding seat to build "
+        "them end to end."
+    )
+    out: list = []
+    _hn_rows({"children": [{"text": portless, "id": 48889875, "author": "x"}]}, out)
+    assert out[0]["location"] == "Remote (North America) $180k-$230k", (
+        "the header ends at the <p>, and nothing after it is a location"
+    )
+    # The mutation this pins: drop the split and the body arrives, capped at 64 per
+    # segment rather than removed. Asserting the ABSENCE of body prose is what makes
+    # this test fail when the split is deleted -- a length bound alone would not,
+    # because the cap already bounds the length.
+    assert "vibe-coding" not in out[0]["location"]
+    assert "AI usage" not in out[0]["location"]
+
+    # THE FALLBACK. A comment whose block tag precedes its pipes has no header to split,
+    # and must keep the old behaviour rather than emptying a populated location. 4 of 196
+    # comments split short today and 0 of them lose a location; this keeps that true when
+    # a thread formats differently next month.
+    leading_block = (
+        "<p>Acme Corp | Staff Engineer | Remote (US) | Full-time<p>We build things."
+    )
+    out2: list = []
+    _hn_rows({"children": [{"text": leading_block, "id": 1, "author": "y"}]}, out2)
+    assert out2[0]["location"].startswith("Remote (US)"), (
+        "an unsplittable header must fall back, never empty"
+    )
+
+
 def test_hn_reads_two_threads_not_one(monkeypatch):
     """One thread is the start-of-month cliff: on the 1st the newest thread is nearly
     empty and the prior month's rows vanish. Measured 2026-08-04: 138 vs 245."""

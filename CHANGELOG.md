@@ -146,6 +146,46 @@ states) or Onsite (NYC, NC, MA)` truncates inside the list, `split_place` reads 
   release keeps finding. This is a **mitigation, not a cure**: a body beginning inside the
   first 64 characters still contaminates, on 2 measured rows.
 
+- **…and the cure it names: an HN header ends at a BLOCK TAG, so the boundary is read
+  before the strip.** The cap above bounds the damage without removing it. The real
+  separator between an HN comment's header and its body is a `<p>`, not a pipe and not a
+  newline — `Portless | AI Engineer | Remote (North America) | $180k-$230k<p>AI usage today
+is basic…` — and `util.clean` flattens that tag into the same text run. By the time
+  `_hn_rows` splits on pipes the boundary is gone, so trimming afterwards can only make the
+  value **shorter, never correct**: on that row the 64-char cap still leaves 83 characters,
+  49 of them pitch copy. `_hn_rows` now splits the **decoded markup** at the first block tag
+  and reads the location out of the header, which returns it outright:
+  `['Portless', 'AI Engineer (Founding seat)', 'Remote (North America)', '$180k-$230k']`.
+
+  This is the invariant 0.9.0 already ships for `sections` — _structure is read BEFORE the
+  strip, or not at all_ — applied to the one adapter that was still reading a structured
+  signal out of stripped prose.
+
+  **The split and the cap COMPOSE, and neither is redundant.** Measured over 196 live
+  comments, maximum `location` length:
+
+  |                           | max     | mean     | over 64 |
+  | ------------------------- | ------- | -------- | ------- |
+  | cap only (previous entry) | 119     | 49.6     | 68      |
+  | split only                | **548** | 40.2     | 19      |
+  | split then cap            | **97**  | **33.3** | **15**  |
+
+  Split-only reaches a _worse_ maximum than the cap alone, because some comments carry no
+  block tag before a long header — the cap is the backstop for exactly that tail. Removing
+  either regresses the other's weak side; do not simplify one away.
+
+  **Only `location` reads the split.** `parts[0]` and `parts[1]` reproduce company and
+  title on 196 of 196 measured comments and are untouched, as is the segment scan feeding
+  `remote_type`/`employment_type`. A comment whose block tag precedes its pipes falls back
+  to the old segments rather than emptying a populated location — 4 of 196 split short, 0
+  lose a location today, and the fallback keeps that true for a thread that formats
+  differently next month.
+
+  **`_reports/flat.ndjson` cannot verify this and its test fixture is inline for that
+  reason:** the stored `text` is post-strip and contains zero markup tags on all 196 rows,
+  so a pre-strip boundary is structurally invisible in it. The measurement was taken against
+  HN's Firebase item API. A corpus that cannot contain the defect cannot clear the fix.
+
 - **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
   that describes the query rather than the posting.** Google's `location` is `Anywhere` on
   every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city
