@@ -155,6 +155,21 @@ Paris, France` (now `IT`) and a MongoDB role in `Dublin; Ireland` (now `IE`).
   (`https://grnh.se/bhfswi9e5us`). Max location length is now **119**; 82 locations change
   and **22 boundaries are corrected**, every one toward the posting's own words.
 
+  **Attribution, decomposed against the raw comments** so the two HN entries in this release
+  do not have to be summed by guesswork. Re-fetched 196/196 originals from HN's Firebase
+  endpoint, because `flat.ndjson`'s `text` is post-strip and structurally cannot show a
+  pre-strip change:
+
+  ```
+  cap alone (this entry)          22 boundaries corrected
+  block-tag split adds (below)     2
+  the release                     24
+  ```
+
+  Cleanly additive, no overlap. The split's two are both the pronoun again — `Join Us in
+  Building` and `to help us` — sitting past the block tag where the cap could not reach
+  them.
+
   **Truncated, not dropped.** Filtering over-long segments out instead emptied the location
   entirely on 9 rows whose header and body share one segment (`REMOTE (US) Origamics is
 building…`) — discarding a genuinely stated boundary to remove the noise attached to it.
