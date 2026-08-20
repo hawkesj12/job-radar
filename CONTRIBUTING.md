@@ -99,6 +99,19 @@ export as-is        536 passed, 1 skipped, 36 deselected
 export + .git       537 passed, 0 skipped, 36 deselected
 ```
 
+**`git checkout-index` exports the INDEX, not HEAD — and always print the rev you
+measured.** Staged-but-uncommitted content is what you get, which is usually right
+before a commit (you are testing what you are about to commit) and wrong afterwards. To
+gate a *landed* commit, name it: `git archive <rev> | tar -x -C /tmp/gate`.
+
+The trap is not the index, though. It is that **HEAD moves under you.** A count of 564
+was once read as an index-vs-HEAD gap here when it was nothing of the kind — HEAD had
+advanced two commits mid-measurement, and the tidy explanation fit well enough that it
+was nearly written into this file as fact. Capture the rev in the same breath as the
+number (`git rev-parse --short HEAD`) and quote them together, or a number from one
+tree gets compared against a number from another and the difference gets a story
+attached.
+
 **A skip is not a pass.** If the export shows more than that one skip, or the working
 tree shows any, find out which test stopped running before you trust the green.
 
