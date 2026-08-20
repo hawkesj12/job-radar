@@ -59,6 +59,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Hacker News shipped the entire job posting in the `location` field.** An HN comment's
+  pipe segments are `Company | Title | Location | …`, the convention is loose, and a comment
+  that runs out of pipes put the whole body in the segment `_hn_rows` reads the location
+  from. hn `location` averaged 461 characters and **reached 2,158**, against a maximum of
+  331 for greenhouse, 121 for themuse and 34 for ashby — 82 of 196 rows over 100. Every
+  prose rule in `vocab.remote_scope` is written for a short location string, so this
+  produced wrong values rather than merely noisy ones:
+
+  | the posting's own words                                 | recorded boundary                      |
+  | ------------------------------------------------------- | -------------------------------------- |
+  | `REMOTE (EU, Switzerland, Norway) … A lot of us have …` | `["CH","NO","US"]`                     |
+  | `Toronto, Canada REMOTE (Canada only) …`                | `["CA","US"]`                          |
+  | `ONSITE, NYC … backends are global scale built on AWS`  | `[]` — stated worldwide                |
+  | `Remote LATAM $3.5k–$4.9k/mo …`                         | six countries invented from body prose |
+
+  `US_LOCATION_RE` carries a bare `us` deliberately — vocab says so in as many words,
+  because "Remote - US" is 227 rows — and against 2 KB of prose it matches the English
+  pronoun. **Three of the twelve affected rows matched inside a URL**
+  (`https://grnh.se/bhfswi9e5us`). Max location length is now **119**; 82 locations change
+  and **22 boundaries are corrected**, every one toward the posting's own words.
+
+  **Truncated, not dropped.** Filtering over-long segments out instead emptied the location
+  entirely on 9 rows whose header and body share one segment (`REMOTE (US) Origamics is
+building…`) — discarding a genuinely stated boundary to remove the noise attached to it.
+  **The cap is 64** because a mid-token cut invents places: at 48, `Remote (USA, most
+states) or Onsite (NYC, NC, MA)` truncates inside the list, `split_place` reads the
+  fragment as a city with state `NC`, and a correct `["US"]` is suppressed. 64 is the
+  shortest cap that keeps every measured multi-place header intact.
+
+  **Stated because a green suite would otherwise imply otherwise:** the word-boundary rewind
+  is **not exercised by any real row at this cap** — all 196 segments were truncated with
+  and without it and zero changed. It is kept because the mid-token failure is real at a
+  smaller cap, and the test pins it with a _constructed_ string. The first version of that
+  assertion passed with the rewind deleted, which is the same green-but-blind shape this
+  release keeps finding. This is a **mitigation, not a cure**: a body beginning inside the
+  first 64 characters still contaminates, on 2 measured rows.
+
 - **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
   that describes the query rather than the posting.** Google's `location` is `Anywhere` on
   every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city

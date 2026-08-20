@@ -2449,6 +2449,56 @@ def search_hn_whoishiring(queries):
     return out
 
 
+# An HN comment's pipe segments are `Company | Title | Location | ...`, but the convention
+# is loose and a comment that runs out of pipes puts the ENTIRE BODY in the segment the
+# location is read from. Measured: hn `location` averaged 461 characters and reached 2,158,
+# against a maximum of 331 for greenhouse, 121 for themuse and 34 for ashby -- 82 of 196
+# rows over 100 characters. Every prose rule in `vocab.remote_scope` is written for a short
+# location string, so feeding it a job description is a category error, and it produced
+# wrong values rather than merely noisy ones:
+#   'REMOTE (EU, Switzerland, Norway) ... A lot of us have ...' -> ['CH','NO','US']
+#   'Toronto, Canada REMOTE (Canada only) ...'                  -> ['CA','US']
+#   'ONSITE, NYC ... backends are global scale built on AWS'    -> []  (stated worldwide)
+# `US_LOCATION_RE` carries a bare `us` on purpose -- vocab says so in as many words, because
+# "Remote - US" is 227 rows -- and against 2 KB of prose that matches the English pronoun.
+# Three of the 12 affected rows matched inside a URL: `https://grnh.se/bhfswi9e5us`.
+#
+# TRUNCATED, NOT DROPPED, and that distinction is the fix. Filtering out over-long segments
+# instead emptied the location entirely on 9 rows whose header and body share one segment
+# ("REMOTE (US) Origamics is building...") -- discarding a genuinely stated boundary to
+# remove noise attached to it.
+#
+# 64 IS NOT ARBITRARY. A mid-token cut invents places: at 48, "Remote (USA, most states) or
+# Onsite (NYC, NC, MA)" truncates inside the list and `split_place` reads the fragment as a
+# city with state NC, which flips `has_city` and suppresses a correct ['US']. 64 is the
+# shortest cap tested that keeps every measured multi-place header intact -- "London / NYC /
+# SF / Seattle / Remote (US + Europe)" needs it, and resolves to (['US'], ['EUROPE']) only
+# there.
+#
+# THE WORD-BOUNDARY REWIND IS UNEXERCISED BY REAL DATA AT THIS CAP, and that is worth
+# writing down rather than letting a green suite imply otherwise. All 196 hn segments were
+# truncated with and without it: ZERO changed `remote_scope`. It is kept because the
+# mid-token failure is real and demonstrated at 48, so the rewind is what makes the cap safe
+# to lower later. The test pins it with a CONSTRUCTED string, not an observed one -- the
+# first version of that assertion passed with the rewind deleted, which is the same
+# green-but-blind shape this file keeps finding.
+#
+# A MITIGATION, NOT A CURE. A body that begins inside the first 64 characters still
+# contaminates: "Utrecht, The Netherlands HYBRID We are a non-profit..." keeps ['NL'] from
+# an office address. 2 rows, unchanged by this and not made worse.
+_HN_LOCATION_CAP = 64
+
+
+def _hn_location(segment: str) -> str:
+    """One pipe segment -> at most a location-shaped head of it."""
+    head = segment.split("\n", 1)[0].strip()  # a newline ends the header line outright
+    if len(head) <= _HN_LOCATION_CAP:
+        return head
+    cut = head[:_HN_LOCATION_CAP]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > 0 else cut).strip()
+
+
 def _hn_rows(tree, out: list) -> None:
     for c in tree.get("children", []):
         text, secs = clean_with_sections(c.get("text"))
@@ -2478,7 +2528,9 @@ def _hn_rows(tree, out: list) -> None:
             {
                 "title": parts[1][:120],
                 "company": parts[0][:80],
-                "location": " ".join(parts[2:4]),
+                "location": " ".join(
+                    t for t in (_hn_location(p) for p in parts[2:4]) if t
+                ),
                 "url": m.group(0)
                 if m
                 else f"https://news.ycombinator.com/item?id={c.get('id')}",

@@ -1748,6 +1748,86 @@ def test_usajobs_pages_with_the_page_parameter(monkeypatch):
     assert len(out) == 5
 
 
+def test_hn_does_not_ship_the_whole_comment_as_the_location():
+    """`" ".join(parts[2:4])` put the ENTIRE BODY in the location when a comment ran out of
+    pipes. hn `location` averaged 461 characters and reached 2,158, against greenhouse's
+    maximum of 331 and ashby's 34 -- 82 of 196 rows over 100. Every prose rule in
+    `vocab.remote_scope` is written for a short string, so it produced wrong values, not
+    merely noisy ones.
+
+    The strings below are VERBATIM from a 7,545-row harvest, elided only in the body."""
+    from job_radar.sources import _hn_location
+    from job_radar.vocab import remote_scope
+
+    # The pronoun "us", and a URL slug ending in the same two letters. `US_LOCATION_RE`
+    # carries a bare `us` on purpose -- "Remote - US" is 227 rows -- but against 2 KB of
+    # prose it matches English. 12 rows, 3 of them inside a link.
+    contaminated = (
+        "REMOTE (EU, Switzerland, Norway) Full-time or Contract Multiple roles open. "
+        "We are a small boutique consultancy and are quite experienced. A lot of us have "
+        "extensive consultancy backgrounds. Apply: https://grnh.se/bhfswi9e5us"
+    )
+    assert remote_scope(contaminated)[0] == ["CH", "NO", "US"], "the defect"
+    assert remote_scope(_hn_location(contaminated))[0] == ["CH", "NO"], (
+        "US was a pronoun"
+    )
+
+    canada = (
+        "Toronto, Canada REMOTE (Canada only) Makeship empowers influencers, creators, "
+        "and brands of all sizes to bring their ideas to life. If you apply, please note "
+        "that you found us through Hacker News."
+    )
+    assert remote_scope(canada)[0] == ["CA", "US"], "the defect"
+    assert remote_scope(_hn_location(canada))[0] == ["CA"], (
+        "Canada only means Canada only"
+    )
+
+    # TRUNCATED, NOT DROPPED. Filtering over-long segments emptied the location on 9 rows
+    # whose header and body share one segment, discarding a real boundary to remove the
+    # noise stuck to it.
+    shared = (
+        "REMOTE (US) Origamics is building AI models that reason about hardware and "
+        "electronics systems."
+    )
+    assert remote_scope(_hn_location(shared))[0] == ["US"], (
+        "a stated bound must survive"
+    )
+
+    # A mid-token cut INVENTS a place, which is why the cap is not tuned tighter: at 48
+    # this truncates inside "(NYC, NC, MA)", `split_place` reads the fragment as a city
+    # with state NC, `has_city` flips and the correct ['US'] is suppressed. THIS ASSERTION
+    # PINS THE CAP, not the word-boundary rewind -- see the note below.
+    listy = (
+        "Python / SQL / Node.js / Terraform Remote (USA, most states) or Onsite "
+        "(NYC, NC, MA) We're building the data platform."
+    )
+    assert remote_scope(_hn_location(listy))[0] == ["US"]
+
+    # THE WORD-BOUNDARY REWIND IS NOT EXERCISED BY ANY CORPUS ROW AT CAP 64, and saying so
+    # is the point. Every one of the 196 hn segments was truncated both ways and ZERO
+    # produced a different `remote_scope`. It is kept because the failure mode is real and
+    # demonstrated at a smaller cap, not because anything here proves it -- so a mutation
+    # that removes it will NOT fail this test, and a reader must not take these greens as
+    # coverage of it. Only the shape below pins the mechanism at all, and it is
+    # constructed, not observed.
+    # One long token straddling the cap: with the rewind the whole partial token is
+    # dropped, without it a 57-character fragment of it survives into the location.
+    made_up = "Remote " + "x" * 80
+    assert _hn_location(made_up) == "Remote", (
+        "a partial token must not reach the location"
+    )
+
+    # 64 is the shortest cap that keeps a measured multi-place header intact.
+    wide = (
+        "London / NYC / SF / Seattle / Remote (US + Europe) Full-time We're hiring a "
+        "Trust and Safety engineer."
+    )
+    assert remote_scope(_hn_location(wide)) == (["US"], ["EUROPE"])
+
+    # A short segment is returned untouched -- this only ever removes.
+    assert _hn_location("Remote (Italy)") == "Remote (Italy)"
+
+
 def test_hn_reads_two_threads_not_one(monkeypatch):
     """One thread is the start-of-month cliff: on the 1st the newest thread is nearly
     empty and the prior month's rows vanish. Measured 2026-08-04: 138 vs 245."""
