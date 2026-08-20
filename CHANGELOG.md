@@ -8,6 +8,79 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.0] - 2026-08-20
 
+### Fixed
+
+- **A pay range in `salary` now becomes numbers — 3,489 rows that had a fully formed
+  range and five null columns.** Eleven of twelve adapters call `salary_from_text`,
+  which returns a DISPLAY STRING and nothing else, and the only text→number parser in
+  the codebase (`vocab.google_salary`) was wired to one adapter and could not read a
+  period-less range: its pattern ends in a mandatory `an?|per <unit>`, which
+  `$200,000 – $250,000` does not have. Measured `[local 94-board harvest, 0.9.0,
+2026-08-20]`: `salary_basis` was `stated` on 981 rows, **`parsed` on 12**, null on
+  6,567 — while **3,500 rows carried a range in `salary` with every structured column
+  null**, 74.3% of every row with a salary at all. `README.md:41` promised `parsed`
+  meant "read out of free text"; the promise was kept on twelve rows.
+
+  New `vocab.salary_from_display` + `engine.derive_salary`. **One parser at the
+  boundary, not twelve in the adapters** — per-adapter parsing is how three geography
+  vocabularies reached one column. Recovers **3,489 of 3,720** target rows (93.8%);
+  the 231 refusals are deliberate.
+  - **The multiplier distributes leftward.** `$200-260K` means 200,000–260,000, but
+    `_G_NUM` binds the multiplier per-number, so the obvious generalization reads
+    lo=**200**. A `salary_min` of 200 on a $200K job — wrong by 1,300×, in the column
+    this README calls what an employer COMMITTED to, carrying `basis="parsed"`. **26
+    rows.** Latent in `google_salary` today and harmless only because its mandatory
+    period phrase gates these strings out; making the period optional is exactly what
+    arms it.
+  - **Refusals, all measured:** a range wider than 5× (catches `$150,000 - 250,000k`
+    → \$250 MILLION, and `$306 - $390,000`); a figure under 1,000 with no recoverable
+    period (`$30-120` is an hourly rate or a thousands-shorthand and the string cannot
+    say which); a lone figure, because `up to $200,000` has no floor to read.
+  - **Currency and period are READ, not inferred** — from a sole code or unit within
+    90 characters of where the display string sits in `text`. Coverage: currency
+    **82.1%**, period **24.5%**; two candidates in the window is a refusal, not a coin
+    flip. `country` was rejected as evidence on measurement: `country='CA'` rows whose
+    body names one code say **CAD on 107 and USD on 18**, so a country rule is wrong in
+    both directions, and 823 rows have no country at all.
+  - **A stated period is vetoed on magnitude.** A real Greenhouse posting labels a
+    \$140,000–\$220,000 band an "Estimated Hourly Pay Range". Refusing a stated period
+    is disbelieving a witness; inventing one from magnitude stays forbidden
+    (`vocab.salary()`: _"A period is never guessed"_).
+  - **A model prediction never reaches the commitment columns.** Caught by measuring
+    the fix, not by reviewing it: a predicted row has NULL `salary_min` by design, so
+    a fill-only test waves it through — and `derive_salary` wrote `109106.0` into
+    `salary_min` with `basis="parsed"` on a row whose `109106.69` was Adzuna's model
+    output. Guarded explicitly on `salary_estimated_*`.
+
+- **A point value is no longer rendered as a range.** `util.salary_range` printed
+  `$188,569–$188,569` for every one of Adzuna's **220** point-estimate rows; a reader
+  sees a range and reads a precise employer offer, and the only tell was the cents in
+  the underlying value, which the formatting rounds away. `_adzuna_pay` kept the
+  prediction out of the commitment columns and the display string handed back the
+  appearance of one.
+
+- **`engine.py`'s `salary_basis` comment named a token that never existed** (`text`);
+  `vocab.SALARY_BASES` is `frozenset({"stated", "parsed"})`.
+
+- **Ashby reads `descriptionHtml`, not `descriptionPlain` — `sections` was empty on every
+  Ashby row.** Headers live in markup and nowhere else, so an adapter reading a plain-text
+  body cannot produce one. Ashby serves BOTH fields; this one read the plain half, which
+  made the feature above dead on the second-largest source: `[]` on **1,198 of 1,198 rows**,
+  15.8% of a harvest, 12,661 rows in the downstream consumer's production store. Measured
+  `[live probe api.ashbyhq.com, 5 boards, 457 postings, 2026-08-20]`: both fields present on
+  457/457, `descriptionHtml` yields **3,981** sections and `descriptionPlain` yields **0**.
+
+  Caught by reading harvest OUTPUT, not code — the adapter, `clean_with_sections`, and the
+  `sections` coverage figure were each correct in isolation, and the defect existed only at
+  the intersection of one source and one field.
+
+  **`text` changes on Ashby rows as a result, and it is a small loss.** Ashby renders a link
+  as `text https://url` in the plain field and as an `<a href>` in the HTML one; `clean`
+  drops attributes, so the body loses its inline URLs and bullet markers — mean 4,822 → 4,663
+  characters (−3.3%) over 75 postings. Every other HTML source already behaves this way
+  (Greenhouse loses its hrefs identically), so this makes Ashby consistent rather than
+  uniquely lossy, but a consumer reading URLs out of `text` will no longer find them there.
+
 ### Added
 
 - **`sections` — the posting's own structure, read before the markup is stripped.**
@@ -16,7 +89,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   corpus has. So it is captured first: `[{type, header, start, end}]`, where the span indexes
   the record's own `text`. Both halves ship together for that reason; the fix alone would have
   been a net loss of information.
-
   - **Ten types.** Measured across **478 distinct employers**: `requirements` on 93.5% of them,
     `responsibilities` 92.3%, `about_company` 61.1%, `benefits` 42.5%, `compensation` 37.0%,
     `location_travel` 31.2%, `eeo_legal` 23.6%, `metadata` 5.9%, `apply_cta` 5.4%,
@@ -35,8 +107,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     points differently on the marginal types (`location_travel` 47.0% there against 31.2% here),
     so the decimal place implies a stability the data does not have. The two smallest figures
     rest on 7 and 26 employers.
+
   - **`type` PRECISION is not measured — only coverage.** Nothing here reports how often a
-    classification is *wrong*, and two buckets are known to be loose: `eeo_legal` matches a bare
+    classification is _wrong_, and two buckets are known to be loose: `eeo_legal` matches a bare
     `commitment to` / `privacy` / `sponsorship` (36% of its entries match only those), and
     `location_travel` matches a bare `remote` (23% of its entries), which files "Lead Remote
     Teams:" as a location section. Treat `type` as a strong hint rather than an assertion, and
@@ -86,7 +159,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one shared helper rather than in the Greenhouse adapter.
 
   Two consequences worth planning around:
-
   - **Greenhouse salaries parse for the first time.** `salary_from_text` matched **0 of 809**
     postings on one board before and **424 of 809** after — the pay figures sat inside tags.
     Expect `salary` and `salary_basis: "parsed"` fill to jump on Greenhouse rows.
@@ -110,7 +182,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Not verified:** Adzuna, Google-for-Jobs and USAJOBS need credentials and were not probed,
   so their bodies are unmeasured either way.
 
-
 ## [0.8.2] - 2026-08-15
 
 ### Changed
@@ -125,7 +196,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A vendor's own ISO code now resolves.** `"United States"` worked while the literal
   `"US"` — the string this package itself stores — did not, because the lookup only knew
-  country *names*. `"US-TX"`-style subdivisions resolve too, matching what the location
+  country _names_. `"US-TX"`-style subdivisions resolve too, matching what the location
   parser already emits.
 
   **Seven codes deliberately still do not resolve:** `AR CA CO DE ID IL IN` are each both a

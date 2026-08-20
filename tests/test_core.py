@@ -3286,3 +3286,293 @@ def test_no_file_is_read_without_an_explicit_encoding():
     assert not offenders, (
         "read_text() with no encoding (cp1252 on Windows):\n" + "\n".join(offenders)
     )
+
+
+# ── salary_from_display: the parser that made README:41's promise true ──────────
+# Before this, `salary_basis="parsed"` was true on 12 rows corpus-wide while 3,500
+# carried a fully formed pay range in `salary` with every structured column null.
+
+
+def test_multiplier_distributes_leftward_or_salary_min_is_wrong_by_1300x():
+    """`$200-260K` is 200,000-260,000. The K is written once and distributes left.
+
+    THE REGRESSION THIS PINS: `_G_NUM` binds the multiplier per-number, so the
+    unguarded pattern reads lo=200, hi=260,000 -- a `salary_min` of 200 on a $200K
+    job, in the column README:39 calls what the employer COMMITTED to. 26 rows of
+    the 2026-08-20 harvest. Asserted on the VALUE, not on "it parsed": a test that
+    only checked salary_min is not None passes against the bug.
+    """
+    got = vocab.salary_from_display("$200-260K", period="year")
+    assert got["salary_min"] == 200_000.0, got
+    assert got["salary_max"] == 260_000.0, got
+    # The guard must not touch a range that needs no help.
+    plain = vocab.salary_from_display("$150,000 - $250,000", period="year")
+    assert plain["salary_min"] == 150_000.0 and plain["salary_max"] == 250_000.0
+
+
+def test_absurd_ratio_is_refused_rather_than_parsed():
+    """`$150,000 - 250,000k` is a quarter of a BILLION. A wrong number carrying
+    basis='parsed' is worse than the null it replaced, so the parse is refused."""
+    assert vocab.salary_from_display("$150,000 - 250,000k")["salary_min"] is None
+    assert vocab.salary_from_display("$306 - $390,000")["salary_min"] is None
+
+
+def test_small_figures_need_a_stated_period_or_are_refused():
+    """`$30-120` is an hourly rate or a thousands-shorthand and nothing in the string
+    can tell. Emitting it period-less manufactures exactly the unusable rows this
+    change exists to remove."""
+    assert vocab.salary_from_display("$30-120")["salary_min"] is None
+    with_period = vocab.salary_from_display("$30-120", period="hour")
+    assert with_period["salary_min"] == 30.0 and with_period["salary_period"] == "hour"
+
+
+def test_magnitude_vetoes_a_stated_period_it_cannot_believe():
+    """A real Greenhouse posting labels a $140,000-$220,000 band an 'Estimated Hourly
+    Pay Range'. Believing it writes `hour` on a six-figure salary and every aggregate
+    downstream is silently wrong -- the exact harm vocab.salary()'s docstring names.
+
+    Refusing a STATED period on magnitude is disbelieving a witness; INVENTING one
+    from magnitude is guessing, and that stays forbidden."""
+    got = vocab.salary_from_display("$140,000 — $220,000", period="hour")
+    assert got["salary_min"] == 140_000.0
+    assert got["salary_period"] is None, "an hourly six-figure band was believed"
+
+
+def test_a_period_is_still_never_invented():
+    """The rule that survives all of the above: no period in the text, no period in
+    the record. vocab.salary() -- 'A period is never guessed.'"""
+    assert vocab.salary_from_display("$200,000 - $250,000")["salary_period"] is None
+
+
+def test_a_lone_figure_is_not_a_range():
+    """`up to $200,000` and `$120,000` cannot be split into a floor and a ceiling,
+    and writing a ceiling into salary_min is the failure this refuses outright."""
+    assert vocab.salary_from_display("$120,000")["salary_min"] is None
+    assert vocab.salary_from_display("up to $200,000")["salary_min"] is None
+
+
+def test_currency_and_period_come_from_the_text_beside_the_figure():
+    """The employer states the currency next to the number; reading it is not
+    inference. `country` is the obvious alternative and is measurably wrong: on the
+    3,500 target rows, country='CA' rows whose body names one code say CAD on 107 and
+    USD on 18 -- a Canadian-located job paying USD is real, so a country rule is
+    wrong in BOTH directions. 823 rows have no country at all."""
+    p = {
+        "salary": "$168,000 — $231,000",
+        "text": "The range for candidates located in Canada is between: "
+        "$168,000 — $231,000 CAD The Okta Experience is...",
+    }
+    engine.derive_salary(p)
+    assert p["salary_currency"] == "CAD", p
+    assert p["salary_min"] == 168_000.0
+
+    q = {
+        "salary": "$135,575 — $175,450",
+        "text": "Learn more about our total rewards below. Annual Base Salary "
+        "$135,575 — $175,450 USD Total Rewards...",
+    }
+    engine.derive_salary(q)
+    assert q["salary_currency"] == "USD" and q["salary_period"] == "year"
+
+
+def test_two_currencies_in_the_window_is_a_refusal_not_a_coin_flip():
+    """A posting quoting a US band and a Canada band contains both codes. A
+    document-wide scan takes whichever comes first and calls it evidence."""
+    p = {
+        "salary": "$100,000 — $150,000",
+        "text": "US $100,000 — $150,000 USD or in Canada the equivalent in CAD.",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 100_000.0
+    assert p["salary_currency"] is None, "picked one of two candidates"
+
+
+def test_a_model_prediction_is_never_written_into_the_commitment_columns():
+    """CAUGHT BY MEASURING, NOT BY REVIEW. A predicted row has NULL commitment
+    columns by design (`_adzuna_pay` splits them precisely so a guess never sits
+    beside a real figure), so a fill-only test waves it through -- and the display
+    string is right there to parse. This wrote 109106.0 into salary_min with
+    basis='parsed' on a row whose 109106.69 was a model output."""
+    p = {
+        "salary": "$109,106–$109,106",
+        "text": "$109,106–$109,106 a year",
+        "salary_estimated_min": 109106.69,
+        "salary_estimated_max": 109106.69,
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_min") is None, "a prediction reached the commitment column"
+    assert p.get("salary_basis") is None
+
+
+def test_derive_salary_fills_but_never_overwrites_a_vendors_own_figures():
+    """A vendor's structured object is better evidence than our parse of its prose,
+    and basis='stated' must keep meaning what it says."""
+    p = {
+        "salary": "$1 - $2",
+        "text": "$1 - $2",
+        "salary_min": 200_000.0,
+        "salary_max": 250_000.0,
+        "salary_basis": "stated",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 200_000.0 and p["salary_basis"] == "stated"
+
+
+def test_a_point_value_is_not_rendered_as_a_range():
+    """220 of 220 Adzuna predictions rendered as `$188,569–$188,569`; a reader sees a
+    range and reads a precise employer offer."""
+    from job_radar.util import salary_range
+
+    assert salary_range(109106, 109106) == "$109,106"
+    assert salary_range(165000, 225000) == "$165,000–$225,000"
+
+
+def test_a_hyphenated_quantity_is_not_a_pay_period():
+    """FOUND BY HAND-READING OUTPUT, not by review: a real Greenhouse body reads
+    '$186,400 — $233,000 USD PLEASE NOTE: our policy requires a 90-day waiting
+    period', and `day` was harvested out of '90-day' -- $186,400 PER DAY. 66 of 872
+    period assignments (7.6%) were absurd this way: 55 day, 9 week, 2 month.
+
+    Asserted on `_adjacent_evidence` DIRECTLY, and on a magnitude the implied-annual
+    veto cannot rescue. The obvious version of this test -- a six-figure band next to
+    "90-day" -- passes with the hyphen guard REMOVED, because the veto catches it
+    downstream for an unrelated reason. It would have pinned nothing.
+    """
+    # $45/hr is ~$11,700/yr if read as daily: plausible enough to survive the veto,
+    # so only the hyphen guard can stop `day` here.
+    _, period = engine._adjacent_evidence(
+        "the rate is $45 - $65 USD. Our policy requires a 90-day waiting period.",
+        "$45 - $65",
+    )
+    assert period is None, "harvested `day` out of `90-day`"
+
+    # And end to end on the row that exposed it.
+    p = {
+        "salary": "$186,400 — $233,000",
+        "text": "the range for this position is: $186,400 — $233,000 USD PLEASE NOTE: "
+        "Our policy requires a 90-day waiting period before reconsideration.",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 186_400.0
+    assert p["salary_period"] is None
+
+
+def test_an_absurd_implied_annual_vetoes_the_period_whatever_the_unit():
+    """The first version of this veto covered `hour` and `year` and missed day, week
+    and month entirely. Implied-annual is the general form; per-unit thresholds only
+    cover the units someone thought of."""
+    for unit in ("day", "week", "month"):
+        got = vocab.salary_from_display("$216,000 — $270,000", period=unit)
+        assert got["salary_min"] == 216_000.0
+        assert got["salary_period"] is None, f"believed {unit} on a six-figure band"
+    # A genuinely large ANNUAL package is not vetoed for being large.
+    big = vocab.salary_from_display("$1,400,000 - $1,900,000", period="year")
+    assert big["salary_period"] == "year"
+
+
+def test_the_period_is_read_from_slash_notation_too():
+    """`/hr` is 30 of 4,703 display strings. 28 were rescued only because the body
+    happened to spell the unit out nearby; reading the string does not need luck."""
+    assert vocab.salary_from_display("$63-84/hr")["salary_period"] == "hour"
+    assert vocab.salary_from_display("$120 - $170 /hour")["salary_period"] == "hour"
+
+
+# ── title decomposition ────────────────────────────────────────────────────────
+# `decompose_title` READS dedup._TITLE_NOISE / _QUAL_RE and must never edit them:
+# `_TITLE_NOISE` is used by `different_openings` (dedup.py:244), so a change there
+# moves MERGES, and a wrong merge deletes a job. Every table below is local to vocab.
+
+
+def test_the_delimiter_no_longer_decides_whether_decoration_is_captured():
+    """Comma-delimited titles had decoration captured on 99.9% (3,262 rows); dash-,
+    pipe- and colon-delimited titles on 17.2% (1,388). Same decoration, opposite
+    handling, decided by which key the employer pressed. The dash was not merely
+    uncaptured -- it was DELETED and the tail welded into the root, producing a role
+    name no employer wrote."""
+    dash = vocab.decompose_title("Staff Software Engineer- Foundation Model Inference")
+    comma = vocab.decompose_title("Staff Software Engineer, Foundation Model Inference")
+    assert dash["title_root"] == comma["title_root"] == "Software Engineer"
+    assert "foundation model inference" in (dash["title_qualifiers"] or [])
+
+    tokyo = vocab.decompose_title("Forward Deployed Engineer - Tokyo")
+    assert tokyo["title_root"] == "Forward Deployed Engineer"
+    assert tokyo["title_qualifiers"] == ["tokyo"]
+    assert vocab.decompose_title("AI Engineer | Platform")["title_root"] == "AI Engineer"
+
+
+def test_an_intra_word_hyphen_is_not_a_delimiter():
+    """222 corpus titles carry one. Splitting on a bare hyphen shatters `Full-Stack`
+    and `Go-to-Market`; requiring whitespace on BOTH sides misses the 122 titles
+    written `Engineer- Backend` or `Engineer -Backend`. Whitespace on at least one
+    side is the measured test."""
+    assert vocab.decompose_title("Full-Stack Engineer")["title_root"] == (
+        "Full Stack Engineer"
+    )
+    assert vocab.decompose_title("Go-to-Market Engineer")["title_root"] == (
+        "Go to Market Engineer"
+    )
+    # one-sided space still splits
+    assert vocab.decompose_title("Sr Software Engineer -Public Sector")[
+        "title_root"
+    ] == "Software Engineer"
+
+
+def test_a_leading_segment_that_names_no_role_is_not_the_root():
+    """Employers put a requisition number, a company or a product in front of the
+    role. Segment 0 is the DOMAIN there and the role is further right -- 28 rows,
+    every one rooted at a req number or a product before this."""
+    for title, want in (
+        ("Airbag - Senior Developer", "Developer"),
+        ("G71 - Full Stack Engineer", "Full Stack Engineer"),
+        ("Dynamo AI — Forward Deployed Engineer", "Forward Deployed Engineer"),
+        ("RQ11391 - Solutions Designer - CRM - Senior", "Solutions Designer"),
+    ):
+        assert vocab.decompose_title(title)["title_root"] == want, title
+
+
+def test_a_generic_role_noun_is_still_the_root_and_is_never_swapped_for_its_domain():
+    """THE LINE THIS FIX MUST NOT CROSS, and it was measured before being drawn.
+    Falling through on a GENERIC root swaps the role for the domain -- `Engineering
+    Manager, Payments` would root at `Payments`, which is a worse claim than
+    `Manager`. The fall-through fires only when segment 0 contains NO role noun at
+    all. 395 corpus titles have the `<role>, <domain>` shape and must be untouched."""
+    assert vocab.decompose_title("Manager, Forward Deployed Engineering")[
+        "title_root"
+    ] == "Manager"
+    assert vocab.decompose_title("Engineering Manager, Payments")["title_root"] == (
+        "Engineering Manager"
+    )
+    assert vocab.decompose_title("Staff Product Manager, Agentic AI")["title_root"] == (
+        "Product Manager"
+    )
+
+
+def test_a_level_mark_follows_the_role_and_a_leading_numeral_is_a_count():
+    """`2 Full Stack AI Engineer, 1 GTM` is a HEADCOUNT and was read as level II;
+    `Tier III Service Desk Engineer` is a support tier read as level III, with the
+    root mangled to `Tier Service Desk Engineer`."""
+    headcount = vocab.decompose_title("2 Full Stack AI Engineer, 1 GTM")
+    assert headcount["title_level"] is None
+    tier = vocab.decompose_title("Tier III Service Desk Engineer")
+    assert tier["title_level"] is None
+    assert tier["title_root"] == "Service Desk Engineer"
+    # a real level mark still reads
+    assert vocab.decompose_title("Software Engineer II")["title_level"] == "II"
+
+
+def test_decomposition_invents_nothing_and_destroys_nothing():
+    """The conservation gate, as a regression guard rather than a discovery tool: it
+    passes 100% today and would have caught none of the eight filed findings. What it
+    DOES catch is a future change that fabricates a token or drops a discriminative
+    one -- the `NO REMOTE` -> `NO` class."""
+    for title in (
+        "Senior Software Engineer, AI",
+        "Forward Deployed Engineer - Tokyo",
+        "Staff Backend Engineer - Databases Tempo | US | Remote",
+        "Manager, Forward Deployed Engineering",
+    ):
+        d = vocab.decompose_title(title)
+        title_toks = {w.lower() for w in vocab._WORD_RE.findall(title)}
+        root_toks = {w.lower() for w in vocab._WORD_RE.findall(d["title_root"])}
+        assert root_toks <= title_toks, f"fabricated a token: {title}"
+        assert d["title_root"].strip(), f"empty root: {title}"

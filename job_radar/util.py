@@ -188,7 +188,9 @@ _TAG = re.compile(r"</?[A-Za-z][^>]*>")
 # Verified free either way -- against 809 postings the fit score, the salary parse and
 # the remote verdict are identical whether these become spaces or newlines, and there is
 # no CSV round-trip to worry about because the store has no body column.
-_BLOCK_END = re.compile(r"</(li|p|h[1-6]|div|tr|ul|ol|table|section)\s*>|<br\s*/?>", re.I)
+_BLOCK_END = re.compile(
+    r"</(li|p|h[1-6]|div|tr|ul|ol|table|section)\s*>|<br\s*/?>", re.I
+)
 
 
 def clean(raw: str) -> str:
@@ -397,7 +399,15 @@ def salary_range(lo, hi) -> str:
     except Exception:
         return ""
     if lo and hi:
-        return f"${lo:,}–${hi:,}"
+        # A POINT VALUE IS NOT A RANGE. Adzuna's model predictions are point
+        # estimates (min == max to two decimals) and this rendered every one of them
+        # as `$188,569–$188,569` -- 220 of 220 predicted rows in `_reports/flat.ndjson`
+        # [local 94-board harvest, 0.9.0, 2026-08-20]. A reader sees a range and reads
+        # a precise employer offer; the only tell was the cents in the underlying
+        # value, which this formatting rounds away. `_adzuna_pay` is careful to keep
+        # the prediction out of the commitment columns, and then the display string
+        # gave it back the appearance of one.
+        return f"${lo:,}" if lo == hi else f"${lo:,}–${hi:,}"
     if lo or hi:
         return f"${(lo or hi):,}"
     return ""

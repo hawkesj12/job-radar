@@ -114,7 +114,11 @@ _CONTRACT_FIELDS = (
     "salary_max",
     "salary_currency",
     "salary_period",  # year | month | week | day | hour | fixed | None
-    "salary_basis",  # stated | text | None -- vocab.SALARY_BASES
+    # `stated` = a vendor's own structured field · `parsed` = read out of free text
+    # (vocab.google_salary, vocab.salary_from_display). There has never been a `text`
+    # token -- vocab.SALARY_BASES is frozenset({"stated", "parsed"}) and this comment
+    # named a third for as long as it existed.
+    "salary_basis",  # stated | parsed | None -- vocab.SALARY_BASES
     "salary_estimated_min",  # a MODEL's guess. Never the same column as a commitment.
     "salary_estimated_max",
     # terms
@@ -353,6 +357,108 @@ def _coerce(p: dict) -> dict:
     return p
 
 
+_CURRENCY_CODE = re.compile(
+    r"\b(USD|CAD|EUR|GBP|AUD|NZD|SGD|HKD|INR|JPY|CHF|SEK|NOK|DKK|PLN|BRL|MXN|ZAR|AED|ILS)\b"
+)
+_PERIOD_WORD = re.compile(
+    r"\b(hour|hourly|hr|week|weekly|month|monthly|year|annual|annually|yearly|day|daily)\b",
+    re.I,
+)
+# 90 characters each side of the figure. Wide enough to catch `Annual Base Salary
+# $135,575 - $175,450 USD` (the code trails the range) and narrow enough that the
+# NEXT pay band in a multi-city posting does not bleed in -- measured ambiguity at
+# this width is 8 rows in 3,500, all of them genuinely two-currency postings.
+_HYPHEN_QTY = re.compile(r"\d+\s*-\s*(?:hour|hr|week|wk|month|mo|year|yr|day)s?\b", re.I)
+_ADJ_WINDOW = 90
+
+
+def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
+    """The currency and period the employer STATED next to this figure, or None.
+
+    WHY A WINDOW AND NOT THE WHOLE BODY: a posting that quotes a US band and a Canada
+    band contains both `USD` and `CAD`, so a document-wide scan picks whichever comes
+    first and calls it evidence. Anchored to where the display string actually sits,
+    a sole code in the window is the employer labelling THIS figure.
+
+    WHY NOT `country`, which is the obvious move and is measurably wrong: on the 3,500
+    target rows, `country='CA'` rows whose body names one code say CAD on 107 and USD
+    on 18 -- a Canadian-located job paying in USD is real. A country rule is wrong in
+    both directions; the code beside the number is wrong in neither. And 823 of the
+    3,500 have no country at all, where this still reads the answer off the page.
+    [local 94-board harvest, 0.9.0, 2026-08-20]
+
+    TWO of anything is a refusal, not a coin flip. Returns (currency, period), each
+    None unless exactly one candidate appears in the window.
+    """
+    if not text or not needle:
+        return None, None
+    i = text.find(needle)
+    if i < 0:
+        return None, None
+    w = text[max(0, i - _ADJ_WINDOW) : i + len(needle) + _ADJ_WINDOW]
+    codes = set(_CURRENCY_CODE.findall(w.upper()))
+    currency = codes.pop() if len(codes) == 1 else None
+    # "90-day waiting period" / "4-day work week" / "12-month vesting" are not
+    # pay periods. Dropping a digit-hyphen prefix removes the actual source of
+    # the 55 bogus `day` assignments rather than only catching them downstream.
+    periods = {vocab.salary_period(x) for x in _PERIOD_WORD.findall(_HYPHEN_QTY.sub(" ", w))}
+    periods.discard(None)
+    return currency, (periods.pop() if len(periods) == 1 else None)
+
+
+def derive_salary(p: dict) -> dict:
+    """Fill the structured salary from the display string the adapter already has.
+
+    WHY THIS EXISTS: eleven of twelve adapters call `salary_from_text`, which returns
+    a DISPLAY STRING and nothing else, and the only text->number parser in the
+    codebase (`vocab.google_salary`) is wired to one adapter. Measured on
+    `_reports/flat.ndjson`: `salary_basis` was `stated` on 981 rows, `parsed` on 12,
+    and null on 6,567 -- while 3,500 rows carried a fully formed pay range in
+    `salary` with every structured column null. 74.3% of every row that had a salary
+    at all. `README.md:41` promised basis="parsed" meant "read out of free text";
+    that promise was kept on twelve rows.
+
+    FILL-ONLY, NEVER OVERWRITE. A vendor's own structured object is better evidence
+    than our parse of its prose, and `salary_basis='stated'` must keep meaning what
+    it says. Verified before building: 0 rows carry a `salary_max`, `salary_currency`,
+    `salary_period` or `salary_basis` while `salary_min` is null, so the guard below
+    has no partial-fill case to straddle in this corpus -- but it is written as
+    fill-only anyway, because that is a property of the contract and not of one run.
+
+    SEPARATE FROM `_coerce`, and called AFTER the relevance gate, for the reason
+    `derive_remote` gives: this reads the full body to find the figure's neighbourhood,
+    and 69% of postings are discarded by a title-only test microseconds later. Parsing
+    the ~20-character display string alone would belong in `_coerce`; reading the body
+    around it does not.
+    """
+    if p.get("salary_min") is not None or p.get("salary_max") is not None:
+        return p
+    # AN ESTIMATE IS NOT A COMMITMENT, and this guard is the whole reason
+    # `_adzuna_pay` splits the columns in the first place. A predicted row has NULL
+    # commitment columns by design, so the fill-only test above waves it straight
+    # through -- and the display string is right there to parse. Caught by measuring,
+    # not by review: this function wrote 109106.0 into `salary_min` with
+    # basis="parsed" on a row whose 109106.69 was a model output. One forgotten
+    # WHERE clause downstream and every average built on the corpus is poisoned,
+    # which is the failure `_adzuna_pay`'s own comment records.
+    if (
+        p.get("salary_estimated_min") is not None
+        or p.get("salary_estimated_max") is not None
+    ):
+        return p
+    display = p.get("salary")
+    if not display:
+        return p
+    currency, period = _adjacent_evidence(p.get("text") or "", display)
+    got = vocab.salary_from_display(display, period=period, currency=currency)
+    if got.get("salary_min") is None:
+        return p  # the parser refused; leave the honest nulls alone
+    for k, v in got.items():
+        if p.get(k) is None:
+            p[k] = v
+    return p
+
+
 def derive_remote(p: dict) -> dict:
     """Fill the remote arrangement AND its boundary from the posting's own text.
 
@@ -412,6 +518,7 @@ def _consume(postings, hits, blocks, cfg, meta):
         derive_remote(
             p
         )  # after the relevance gate: it scans the body, see its docstring
+        derive_salary(p)  # same reason, same body scan -- see its docstring
         if not is_remote(p, cfg):
             continue
         age = age_int(p.get("posted", ""))

@@ -214,6 +214,128 @@ _G_SALARY = re.compile(
     re.I,
 )
 _MULT = {"k": 1_000, "m": 1_000_000}
+# Periods per year, for the implied-annual sanity check in salary_from_display.
+_ANNUALIZE = {"hour": 2080, "day": 260, "week": 52, "month": 12, "year": 1}
+
+
+def _distribute_multiplier(lo_n, lo_mul, hi_n, hi_mul):
+    """`$200-260K` means 200,000-260,000. The K is written ONCE and distributes left.
+
+    THE BUG THIS EXISTS TO STOP, because it is one character from shipping: `_G_NUM`
+    binds the multiplier per-number, so the pattern reads `$200-260K` as lo=200 and
+    hi=260,000 -- `salary_min` of 200 on a $200K job, wrong by 1,300x, in the column
+    README:39 defines as what the employer COMMITTED to. Measured on 26 rows of
+    `_reports/flat.ndjson` [local 94-board harvest, 0.9.0, 2026-08-20].
+
+    It is latent in `google_salary` today and harmless ONLY because that pattern
+    requires a trailing period phrase, which gates these strings out. Making the
+    period optional -- which is the whole point of `salary_from_display` -- is
+    precisely what arms it. Same class as the `US$6,117-US$8,342` failure recorded
+    above, which wrote the MAXIMUM into `salary_min`.
+
+    Guarded on `lo < 1000`: a bare `200` beside `260K` cannot be a real floor, while
+    `150,000 - 250,000` needs no help and must not be touched.
+    """
+    if lo_n is None or hi_n is None:
+        return lo_n, hi_n
+    if not lo_mul and hi_mul and lo_n < 1000:
+        return lo_n * _MULT[hi_mul.lower()], hi_n
+    return lo_n, hi_n
+
+
+# Same shape as _G_SALARY but the trailing period phrase is OPTIONAL, because an
+# employer writes `$200,000 - $250,000` and Google writes `165K-195K a year`. That
+# one difference is why 3,500 rows carried a fully formed pay range in `salary` with
+# every structured column null: the only text parser in the codebase could not read
+# a period-less range, so `README.md:41`'s promise that basis="parsed" means "read
+# out of free text" was kept on exactly 12 rows corpus-wide.
+_D_SALARY = re.compile(
+    _G_NUM % ("lo", "lomul")
+    + r"\s*(?:[-–—]|to)\s*(?:"
+    + (_G_NUM % ("hi", "himul"))
+    + r")\s*"
+    # `a year` / `per hour` AND `/hr` — employers write both, and the slash form is
+    # 30 of 4,703 display strings. 28 of those 30 were rescued by the adjacency
+    # window because the body happened to spell it out nearby; reading it off the
+    # string itself does not depend on that luck.
+    r"(?:\s*(?:(?:an?|per)\s+|/\s*)(?P<per>hours?|hrs?|weeks?|wks?|months?|mos?|years?|yrs?|days?))?",
+    re.I,
+)
+# A range wider than this is not a pay band, it is a parse that went wrong -- it
+# catches `$150,000 - 250,000k` ($250 MILLION) and the malformed `$306 - $390,000`.
+# 5x is deliberately loose: real bands top out near 2x, so this only fires on nonsense.
+_D_MAX_RATIO = 5
+
+
+def salary_from_display(raw, period=None, currency=None) -> dict:
+    """A display string like `$200,000 - $250,000` -> the structured fields.
+
+    The sibling of `google_salary`, for the eleven adapters that produce a display
+    string and nothing else. RANGES ONLY -- both endpoints required. A lone figure is
+    refused because `$120,000` and `$60` and `up to $200,000` are indistinguishable
+    here without a period, and a floor written into `salary_min` from a ceiling is
+    the failure mode this whole function is built to avoid.
+
+    `period` and `currency` are passed IN by the caller, which read them from text
+    ADJACENT to the figure. They are never inferred from the number's magnitude --
+    see `salary()`. Magnitude is used only to REFUSE a stated period, which is
+    disbelieving a witness rather than inventing one.
+
+    Returns all-None on anything it will not vouch for. Every refusal below was
+    measured on `_reports/flat.ndjson` [local 94-board harvest, 0.9.0, 2026-08-20];
+    3,292 of 3,500 target rows (94.1%) trip none of them.
+    """
+    m = _D_SALARY.search(str(raw or ""))
+    if not m:
+        return salary()
+
+    def _n(num, mul):
+        try:
+            v = float(str(num).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return (v * _MULT[mul.lower()] if mul else v) or None
+
+    lo = _n(m.group("lo"), m.group("lomul"))
+    hi = _n(m.group("hi"), m.group("himul"))
+    lo, hi = _distribute_multiplier(lo, m.group("lomul"), hi, m.group("himul"))
+    if lo is None or hi is None:
+        return salary()
+    if lo > hi:  # the honest repair; see google_salary
+        lo, hi = hi, lo
+    if hi / lo > _D_MAX_RATIO:
+        return salary()
+
+    # The string's own period wins over the caller's -- `165K-195K a year` states it
+    # inline, and that is stronger evidence than a word 90 characters away.
+    period = _PERIOD_MAP.get((m.group("per") or "").lower()) or period
+    # A figure under 1,000 with no period is genuinely undecidable: `$30-120` is an
+    # hourly rate or a thousands-shorthand and nothing here can tell. Emitting it
+    # with period=None would manufacture exactly the unusable rows this is fixing.
+    if lo < 1000 and not period:
+        return salary()
+    # MAGNITUDE VETO on a STATED period -- refusing to believe a witness, which is a
+    # different act from inventing one. Two real failures, both found by hand-reading
+    # output rather than by review:
+    #
+    #   "Estimated Hourly Pay Range $140,000 - $220,000"  -- the employer's own label,
+    #   and believing it writes `hour` on a six-figure salary.
+    #
+    #   "$186,400 - $233,000 USD PLEASE NOTE: our policy requires a 90-day waiting
+    #   period"  -- `day` harvested out of "90-day", giving $186,400 PER DAY. 66 of
+    #   872 period assignments (7.6%) were absurd this way: 55 day, 9 week, 2 month.
+    #   An earlier version of this veto covered only `hour` and `year` and missed
+    #   every one of them.
+    #
+    # Implied-annual is the general form; per-unit thresholds only ever cover the
+    # units someone thought of. The ceiling applies to SUB-annual periods only, so a
+    # genuine $1.5M/yr package is not vetoed for being large.
+    implied = lo * _ANNUALIZE.get(period or "", 0)
+    if period and period != "year" and implied > 1_000_000:
+        period = None
+    elif period == "year" and hi < 5_000:
+        period = None
+    return salary(lo, hi, currency=currency, period=period, basis="parsed")
 
 
 def google_salary(raw) -> dict:
@@ -1047,6 +1169,254 @@ _LEVEL = {
     "iii": "III", "3": "III", "iv": "IV", "4": "IV",
 }  # fmt: skip
 
+# Words a numeral QUALIFIES rather than levels: "Tier III", "Level 2", "Grade 4".
+# The numeral is real but it is not the role's level, and the antecedent is not
+# part of the role name either -- `Tier III Service Desk Engineer` is a Service
+# Desk Engineer.
+_LEVEL_ANTECEDENT = frozenset({"tier", "level", "grade", "band"})
+
+# A hyphen/dash/pipe/colon acting as a DELIMITER -- whitespace on at least one
+# side. See decompose_title for the measurement behind that test.
+_DECOR_RE = re.compile(r"\s+[-–—|:]+\s*|\s*[-–—|:]+\s+")
+
+# ── does this word name an OCCUPATION? ───────────────────────────────────────
+# MORPHOLOGY FIRST, VOCABULARY SECOND. English names an occupation with an AGENT
+# NOUN -- "one who does X" -- and that is a SUFFIX, not a word list: engineER,
+# directOR, scientIST, technicIAN, consultANT, superintendENT, millWRIGHT,
+# radioLOGIST. A rule written on the suffix generalises to industries nobody
+# enumerated; a word list only ever knows the jobs its author thought of.
+#
+# WHY THAT MATTERS HERE SPECIFICALLY: this corpus is 94 TECH boards. A list curated
+# against it silently under-performs on the lane it was not written for. Measured on
+# 67,481 PRODUCTION titles [live prod 2026-08-20] -- share carrying a recognisable
+# role noun:
+#
+#     source        list only   + morphology
+#     adzuna          94.3%        98.4%     <- the non-tech lane
+#     usajobs         90.2%        97.6%     <- the non-tech lane
+#     greenhouse      99.2%        99.6%
+#     ALL             98.5%        99.4%
+#
+# The suffix recovers Radiologist, Veterinarian, Underwriter, Millwright and
+# Sommelier -- none of which any hand-written list here would have held -- while
+# still rejecting Airbag, Ridehailing, Modeling, Guidance and G71.
+#
+# TWO EXCLUSIONS, both load-bearing: `Senior` ends in -or, and `Director` is a real
+# role. Seniority words and title noise are removed BEFORE the suffix test, or
+# `Senior, Applied AI Engineer` reads `Senior` as an occupation.
+# WHICH SUFFIXES EARN THEIR PLACE, measured on 67,481 production titles rather than
+# assumed. The precision of each was read off the words it actually catches:
+#
+#   -ist   panelist geologist receptionist phlebotomist pathologist radiologist  KEEP
+#   -ian   optician veterinarian physician clinician dietitian technician        KEEP
+#   -er    practitioner supplier owner provider ... but also customer center     keep
+#   -or    contractor vendor creator investor ... but also behavior floor motor  keep
+#   -wright millwright                                                           KEEP
+#   -ant   restaurant plant participant infant tenant grant want propellant      DROP
+#   -ent   development management client equipment content talent engagement     DROP
+#
+# `-ant` and `-ent` are dropped because they are overwhelmingly ordinary nouns, and
+# a FALSE POSITIVE here is not harmless: it suppresses a fall-through that should
+# have happened. `Plant 3 - Journeyman Millwright` rooted at `Plant` for exactly
+# that reason. The genuine `-ant`/`-ent` occupations (consultant, accountant, agent,
+# superintendent) live in the irregulars below, where they cost nothing.
+#
+# `-er` and `-or` are kept despite similar noise because they carry most of the
+# occupational vocabulary in English, and their false positives (`center`, `power`)
+# are rarely the ONLY word in a leading segment.
+# TWO TIERS OF EVIDENCE, because a suffix is not a single quality of proof.
+#
+# STRONG suffixes are occupational almost without exception. WEAK ones (-er, -or)
+# carry most of English's occupational vocabulary AND most of its ordinary nouns, so
+# they are worth reading but not worth trusting on their own. Measured on 67,481
+# production titles: words passing by a BARE -er/-or are the only word in a leading
+# segment 206 times outside tech against 39 inside it -- 5.3x -- and roughly 80% are
+# not occupations at all (`cyber` 115, `owner` 14, `power` 12, `center` 10,
+# `career` 7, `worcester`, `prior`).
+#
+# Treating them as full proof cost 152 MASKED REGRESSIONS: `Call Center - Customer
+# Service Agent` rooted at `Call Center`, `Prior Law Enforcement - Court Security
+# Officer` at `Prior Law Enforcement`. Masked because the false positive SATISFIES a
+# "does the root still name a role" check -- `center` passes it -- so the defect is
+# invisible to the obvious metric. Only a two-tier comparison surfaces it.
+#
+# -man/-woman/-person/-hand/-wife/-mate are here because English builds plenty of
+# occupations that way and none of them are common in software: foreman, lineman,
+# longshoreman, herdsman, switchman, deckhand, midwife, journeyman, crewmate.
+# Their absence is exactly the tech-corpus bias this whole function was rewritten to
+# remove.
+_STRONG_SUFFIX = ("ist", "ian", "smith", "wright", "keeper", "master", "logist",
+                  "man", "woman", "person", "hand", "wife", "mate")  # fmt: skip
+_WEAK_SUFFIX = ("er", "or")
+
+#: how strongly a word claims to name an occupation. 0 no · 1 weak · 2 strong.
+ROLE_NONE, ROLE_WEAK, ROLE_STRONG = 0, 1, 2
+
+
+def _role_evidence(word: str) -> int:
+    """How strongly does this word claim to name an occupation? See the tiers above.
+
+    PLURALS AND SLASH-COMPOUNDS are read too, because employers write both and a
+    suffix test that only knows the singular silently fails on them. Measured on 500
+    genuinely non-tech titles [live Adzuna probe, 10 trades, 2026-08-20]: the only
+    roots naming no occupation at all were `WELDERS`, `Electricians`,
+    `Machinist/Tool & Die` and `Certified Medical Assistant/LPN` -- a plural `s` and
+    a `/` that `_WORD_RE` keeps inside the token. Both are morphology, not
+    vocabulary, so both are handled here rather than by adding words to a table.
+    """
+    lw = word.lower()
+    # `machinist/tool` -> test each side; a compound counts if any part is a role.
+    if "/" in lw:
+        # A part that is a RANK contributes nothing: `Senior/Lead Cyber Security -
+        # Incident Response Engineer` rooted at the rank compound because `lead` is
+        # in the irregulars table, which is consulted before the seniority exclusion.
+        # `Machinist/Tool` and `Technician/Electrician` are unaffected.
+        return max(
+            (
+                _role_evidence(part)
+                for part in lw.split("/")
+                if part and part not in _SENIORITY
+            ),
+            default=ROLE_NONE,
+        )
+    # `welders` -> `welder`, `electricians` -> `electrician`. Only when it leaves a
+    # real word behind, so `sales` and `operations` are not read as occupations.
+    if len(lw) > 4 and lw.endswith("s") and not lw.endswith("ss"):
+        singular = lw[:-1]
+        if singular in _ROLE_NOUN or (
+            len(singular) > 3
+            and singular.endswith(_STRONG_SUFFIX)
+            and singular not in _SENIORITY
+            and singular not in _TITLE_NOISE
+        ):
+            return ROLE_STRONG
+    if lw in _ROLE_NOUN:
+        return ROLE_STRONG
+    if lw in _SENIORITY or lw in _TITLE_NOISE:
+        return ROLE_NONE
+    if len(lw) > 3 and lw.endswith(_STRONG_SUFFIX):
+        return ROLE_STRONG
+    if len(lw) > 3 and lw.endswith(_WEAK_SUFFIX):
+        return ROLE_WEAK
+    return ROLE_NONE
+
+
+def _best_role_evidence(words) -> int:
+    return max((_role_evidence(w) for w in words), default=ROLE_NONE)
+
+
+def _is_role_noun(word: str) -> bool:
+    """Does this word name an occupation? Suffix first, irregulars second.
+
+    Used for ONE thing: deciding a segment is not a role at all, so `Airbag - Senior
+    Developer` does not root at `Airbag`. NOT the same question as "is this root any
+    good" -- `Manager` IS an occupation, and `Manager, Payments` correctly roots at
+    `Manager`. Falling through there would swap the role for its domain, which is
+    strictly worse and was measured before being rejected.
+    """
+    return _role_evidence(word) != ROLE_NONE
+
+
+# The IRREGULARS -- occupations English does not build from an agent suffix, so the
+# rule above cannot reach them. An EXCEPTION TABLE, not the decider: a name missing
+# from it degrades to the suffix test rather than to a wrong answer, which is the
+# whole point of the morphology-first order.
+_ROLE_NOUN = frozenset(
+    {
+        # the genuine -ant / -ent occupations, here because those two suffixes are
+        # dropped from _AGENT_SUFFIX for being overwhelmingly ordinary nouns
+        "consultant",
+        "accountant",
+        "attendant",
+        "superintendent",
+        "sergeant",
+        "lieutenant",
+        "assistant",
+        "agent",
+        "engineer",
+        "engineering",
+        "developer",
+        "architect",
+        "scientist",
+        "analyst",
+        "manager",
+        "director",
+        "lead",
+        "head",
+        "chief",
+        "officer",
+        "president",
+        "vp",
+        "designer",
+        "researcher",
+        "consultant",
+        "specialist",
+        "advisor",
+        "advocate",
+        "strategist",
+        "administrator",
+        "coordinator",
+        "associate",
+        "assistant",
+        "technician",
+        "programmer",
+        "tester",
+        "writer",
+        "editor",
+        "recruiter",
+        "accountant",
+        "controller",
+        "auditor",
+        "attorney",
+        "counsel",
+        "paralegal",
+        "nurse",
+        "physician",
+        "therapist",
+        "pharmacist",
+        "technologist",
+        "operator",
+        "driver",
+        "mechanic",
+        "electrician",
+        "welder",
+        "machinist",
+        "supervisor",
+        "representative",
+        "agent",
+        "clerk",
+        "cashier",
+        "server",
+        "cook",
+        "chef",
+        "teacher",
+        "instructor",
+        "tutor",
+        "professor",
+        "trainer",
+        "coach",
+        "intern",
+        "apprentice",
+        "fellow",
+        "partner",
+        "principal",
+        "staff",
+        "generalist",
+        "planner",
+        "buyer",
+        "estimator",
+        "inspector",
+        "scheduler",
+        "dispatcher",
+        "artist",
+        "animator",
+        "producer",
+        "marketer",
+        "seller",
+        "salesperson",
+    }
+)
+
 _WORD_RE = re.compile(r"[A-Za-z0-9+#/&]+")
 
 
@@ -1080,7 +1450,116 @@ def decompose_title(title: str) -> dict:
         if piece:
             quals.extend(x.strip() for x in re.split(r"[(),]", piece) if x.strip())
     stem = _QUAL_RE.sub("", t)
+
+    # THE DELIMITER DECIDED EVERYTHING, AND ONLY COMMAS WORKED. `_QUAL_RE` has no
+    # alternative for a dash, pipe or colon, so decoration after one was never
+    # captured -- and worse, the delimiter itself was deleted and the tail welded
+    # into the root: `Forward Deployed Engineer - Tokyo` -> `Forward Deployed
+    # Engineer Tokyo`, a role name no employer wrote and no search matches.
+    # Measured [local 94-board harvest, 0.9.0, 2026-08-20]: comma-only titles 3,262,
+    # decoration captured on 99.9%; dash-only titles 1,388, captured on 17.2%. The
+    # same decoration, handled two opposite ways, decided by which key the employer
+    # happened to press.
+    #
+    # WHITESPACE ON AT LEAST ONE SIDE is the whole test, and it is measured rather
+    # than assumed: 1,605 titles have a spaced hyphen, 132 a spaced pipe, 80 a
+    # `word- ` (right space only), 52 an en-dash, 35 a `word: `, 18 an em-dash, 7 a
+    # ` -word` (left space only) -- against 222 with an INTRA-word hyphen
+    # (`Full-Stack`, `Go-to-Market`) which must never split. Requiring spaces on both
+    # sides would miss 122 of them; requiring none would shatter 222.
+    #
+    # This regex is LOCAL and deliberately not added to `dedup._QUAL_RE`: that table
+    # feeds `_marks`, which decides merges, and a wrong merge deletes a job.
+    segs = [s.strip(" -–—|:") for s in _DECOR_RE.split(stem)]
+    segs = [s for s in segs if s]
+    if len(segs) > 1:
+        stem = segs[0]
+        for tail in segs[1:]:
+            quals.extend(
+                x.strip().lower() for x in re.split(r"[(),]", tail) if x.strip()
+            )
+
+    # EVERY candidate segment, in the order the employer wrote them and in their
+    # ORIGINAL case: the delimiter-split pieces, then whatever `_QUAL_RE` lifted out
+    # (a trailing comma clause or a parenthetical). The role-noun rule below has to
+    # see BOTH, because the two paths produce the same defect. `Airbag - Senior
+    # Developer` roots at a product via the dash path; `Ridehailing, Site Reliability
+    # Engineer` roots at a domain via the comma path -- and `Senior, Applied AI
+    # Engineer` roots at the word `Senior`, which is not a role at all.
+    cand = list(segs)
+    for m in _QUAL_RE.finditer(t):
+        piece = (m.group(1) or m.group(2) or "").strip()
+        if piece:
+            cand.extend(x.strip() for x in re.split(r"[(),]", piece) if x.strip())
     toks = _WORD_RE.findall(stem)
+    # A SEGMENT THAT IS PURE DECORATION IS NOT A ROOT. `REMOTE -Principal Software
+    # Developer- Agentic AI` leads with a noise word, and taking segment 0 blindly
+    # would root the posting at `REMOTE`. The existing rule was "stripping never
+    # empties the root, it falls back to the whole title"; this extends it one step
+    # -- try the next segment BEFORE falling back, because a later segment is a real
+    # phrase from the same title while the whole title is the unparsed string.
+    if segs and not [w for w in toks if w.lower() not in _TITLE_NOISE]:
+        for alt in segs[1:]:
+            alt_toks = _WORD_RE.findall(alt)
+            if [w for w in alt_toks if w.lower() not in _TITLE_NOISE]:
+                toks = alt_toks
+                break
+    # A SEGMENT THAT NAMES NO ROLE IS NOT A ROOT EITHER. Employers put a requisition
+    # number, a company, a product or a programme in front of the role:
+    # `Airbag - Senior Developer`, `RQ11391 - Solutions Designer`, `G71 - Full Stack
+    # Engineer`, `Dynamo AI — Forward Deployed Engineer`. Segment 0 is the DOMAIN and
+    # the role is further right -- the mirror of the usual shape, and taking segment
+    # 0 roots the posting at a req number. 28 rows [local 94-board harvest, 0.9.0,
+    # 2026-08-20], every one of them wrong before this.
+    #
+    # THE TEST IS "CONTAINS NO ROLE NOUN AT ALL", never "contains a weak one". A
+    # `Manager, Payments` posting roots at `Manager` and must keep doing so: falling
+    # through on a GENERIC role swaps the role for its domain and is strictly worse.
+    # That distinction is why this is safe and why the bare-generic-noun version of
+    # the idea was measured, found to invert role and domain, and not built.
+    elif len(cand) > 1 and _best_role_evidence(toks) < ROLE_STRONG:
+        # STRICTLY BETTER EVIDENCE WINS -- the whole point of the two tiers.
+        # `Call Center - Customer Service Agent`: segment 0 offers only `center`
+        # (weak, -er) while a later one offers `agent` (strong), so the later one is
+        # the role. Requiring "no evidence at all" in segment 0 left 152 production
+        # titles rooted at `Call Center` / `Prior Law Enforcement` / `Power System
+        # Studies` / `Worcester County South`.
+        #
+        # A STRONG segment 0 is never overridden: `Manager, Payments` roots at
+        # `Manager`, because promoting there would swap the role for its domain --
+        # measured, and the reason the bare-generic version of this was rejected.
+        #
+        # THE BEST CANDIDATE, NOT THE FIRST BETTER ONE. `MA- Worcester County South-
+        # RN Case Manager` splits three ways: `MA` (none), `Worcester County South`
+        # (weak) and `RN Case Manager` (strong). Taking the first improvement roots
+        # it at a COUNTY.
+        best: tuple[str, str] | None = None
+        best_score = _best_role_evidence(toks)
+        for alt in cand[1:]:
+            # A candidate lifted out of a comma clause may carry its own decoration
+            # (`Forward Deployed Engineering - EMEA`); split it the same way segment 0
+            # was, or the tail is welded back into the root.
+            alt_head = next(
+                (s.strip(" -–—|:") for s in _DECOR_RE.split(alt) if s.strip(" -–—|:")),
+                alt,
+            )
+            score = _best_role_evidence(_WORD_RE.findall(alt_head))
+            if score > best_score:
+                best, best_score = (alt, alt_head), score
+            if score == ROLE_STRONG:
+                break  # nothing beats strong; keep the leftmost one that has it
+        if best is not None:
+            alt, alt_head = best
+            # The segment stepped over is decoration, not nothing -- `Airbag` and
+            # `Ridehailing` are the role's DOMAIN and belong in `title_qualifiers`.
+            # Dropping them silently lost a token on 24 titles.
+            skipped = " ".join(toks).strip().lower()
+            if skipped and skipped not in quals:
+                quals.append(skipped)
+            # ...and the segment PROMOTED to root is no longer a qualifier.
+            promoted = alt.strip().lower()
+            quals = [q for q in quals if q not in (promoted, alt_head.lower())]
+            toks = _WORD_RE.findall(alt_head)
 
     seniority = level = None
     i = 0
@@ -1091,16 +1570,46 @@ def decompose_title(title: str) -> dict:
             seniority = _SENIORITY[toks[i].lower()]
         i += 1
 
-    root_words = []
-    for w in toks[i:]:
+    root_words: list[str] = []
+    for j, w in enumerate(toks[i:]):
         lw = w.lower()
-        if lw in _LEVEL and level is None:
+        # A LEVEL MARK FOLLOWS THE ROLE; A LEADING NUMERAL IS A COUNT. `2 Full Stack
+        # AI Engineer, 1 GTM` is a headcount and read as level II; `Tier III Service
+        # Desk Engineer` is a support tier, read as level III, and the root came back
+        # mangled to `Tier Service Desk Engineer` with the III removed. Requiring at
+        # least one preceding word costs nothing real -- no employer writes `II
+        # Engineer` -- and refusing to set a field can never mis-select a value.
+        # 4 rows [local 94-board harvest, 0.9.0, 2026-08-20].
+        if lw in _LEVEL and level is None and j > 0:
+            # `Tier III` / `Level 2` / `Grade 4`: the numeral qualifies the word
+            # before it, and that word is not the role either.
+            if root_words and root_words[-1].lower() in _LEVEL_ANTECEDENT:
+                root_words.pop()
+                continue
             level = _LEVEL[lw]
             continue
         if lw in _TITLE_NOISE:
             continue
         root_words.append(w)
     root = " ".join(root_words).strip(" -–—,/")
+    # A LEVEL OR A SENIORITY WORD IS NOT A ROLE, and "never empty" was not a strong
+    # enough guard. `Staff II, Computer Vision Engineer` -> the comma clause goes to
+    # qualifiers, `Staff` is stripped as seniority, and the level guard above
+    # deliberately refuses to consume a numeral it cannot place -- leaving `II` as a
+    # NON-EMPTY root, so the `root or t` fallback never fired. 4 production rows
+    # (`Associate II, CMC Operations`, `Lead II, Category Management`, ...), and the
+    # class is a SHAPE -- any `<seniority> <level>, <role>` title reaches it.
+    #
+    # Introduced by the level-antecedent guard itself: before it, `II` was consumed
+    # as a level and the root came back empty, which the fallback did catch.
+    # LEVELS ONLY, and the distinction is load-bearing. `_SENIORITY` holds `director`,
+    # `vp`, `head`, `chief`, `associate` and `lead` -- every one of them a REAL ROLE as
+    # well as a rank. Blanking those sent `Director, Investor Relations` and `VP,
+    # Product` back to the whole unparsed title, which is worse than the bare
+    # `Director` they had before: caught by hand-reading 150 rows, ~16 of them.
+    # A bare `II` is never a role; a bare `Director` is.
+    if root_words and all(w.lower() in _LEVEL for w in root_words):
+        root = ""
 
     return {
         "title_root": root or t,  # never empty; falls back to the whole title

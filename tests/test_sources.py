@@ -2304,7 +2304,10 @@ def test_remote_scope_returns_areas_and_regions_separately():
     assert remote_scope("Remote - US & Canada") == (["CA", "US"], None)
     # BOTH fields when the string states both. An early return on regions discarded every
     # country on 111 measured rows.
-    assert remote_scope("Americas (USA or Canada) (Remote)") == (["CA", "US"], ["AMERICAS"])
+    assert remote_scope("Americas (USA or Canada) (Remote)") == (
+        ["CA", "US"],
+        ["AMERICAS"],
+    )
     # ISO 3166-2 for a stated US state -- never a bare `TX`, because seven codes are both a
     # US state and an ISO country and the column would be undecidable.
     assert remote_scope("Remote - TX") == (["US-TX"], None)
@@ -2319,7 +2322,10 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
     is the worst direction this field can be wrong in."""
     from job_radar.vocab import remote_scope
 
-    assert remote_scope("Anywhere in France, Belgium, Spain") == (["BE", "ES", "FR"], None)
+    assert remote_scope("Anywhere in France, Belgium, Spain") == (
+        ["BE", "ES", "FR"],
+        None,
+    )
     assert remote_scope("Any location, United States")[0] != []
     assert remote_scope("Anywhere in Texas")[0] != []
     # the genuine article still resolves
@@ -2377,7 +2383,7 @@ def test_a_list_of_blanks_is_malformed_not_worldwide():
 
 
 def test_the_continents_remotive_actually_sends_are_all_kept():
-    """"Americas, Europe, Asia, Africa, Oceania" is remotive's canonical five-continent
+    """ "Americas, Europe, Asia, Africa, Oceania" is remotive's canonical five-continent
     value -- the worked example in catalog/remotive.md -- on 11% of a live feed. Asia,
     Africa and Oceania were silently dropped, making a five-continent role invisible to a
     searcher on three of them."""
@@ -2418,7 +2424,9 @@ def test_a_comma_bearing_country_name_survives_the_string_branch():
     naming the wrong country is worse than no code, so the whole string is tried first."""
     from job_radar.sources import stated_scope
 
-    assert stated_scope("Congo, The Democratic Republic of the")["remote_areas"] == ["CD"]
+    assert stated_scope("Congo, The Democratic Republic of the")["remote_areas"] == [
+        "CD"
+    ]
     assert stated_scope("USA, EMEA")["remote_areas"] == ["US"]
 
 
@@ -2532,6 +2540,77 @@ def test_ashby_salary_never_reads_the_equity_component():
     # keyed on 'year' alone would drop every Ashby salary.
     assert got["salary_period"] == "year" and got["salary_currency"] == "USD"
     assert sources._ashby_salary({})["salary_min"] is None
+
+
+def test_ashby_reads_the_html_body_because_plain_text_carries_no_headers(monkeypatch):
+    """The 0.9.0 defect: this adapter read `descriptionPlain`, so `sections` was []
+    on 1,198 of 1,198 Ashby rows -- the feature dead on the second-largest source.
+
+    Asserted POSITIONALLY, on a header the plain field does not contain at all. A
+    test that only checked `len(sections) > 0` would pass against either field the
+    moment the plain text happened to carry a colon, and the repo has already been
+    bitten by tests that survive mutation of the thing they exist to pin.
+    """
+    payload = {
+        "jobs": [
+            {
+                "title": "Applied AI Engineer",
+                "location": "Remote",
+                "jobUrl": "https://jobs.ashbyhq.com/acme/1",
+                # BOTH present, as they are on 457/457 live postings. The headers
+                # exist only in the markup; the plain field is the same prose with
+                # every structural cue flattened out of it.
+                "descriptionHtml": (
+                    "<p><strong>ABOUT ACME</strong></p><p>We build things.</p>"
+                    "<p><strong>RESPONSIBILITIES</strong></p><p>Ship models.</p>"
+                ),
+                "descriptionPlain": (
+                    "ABOUT ACME\n\nWe build things.\n\nRESPONSIBILITIES\n\nShip models."
+                ),
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_ashby("acme")
+
+    headers = [s["header"] for s in row["sections"] if s.get("header")]
+    assert "RESPONSIBILITIES" in headers, (
+        f"read the plain field -- markup-derived headers absent. got {headers!r}"
+    )
+    assert any(s["type"] == "responsibilities" for s in row["sections"])
+    # The span must index THIS row's own text, and must resolve to the section it
+    # names -- not merely to a valid slice. Asserted against the OTHER section's
+    # prose too, because a wrong-span bug preserves every string-identity check
+    # while pointing at the neighbouring block; that is how one shipped before.
+    sec = next(s for s in row["sections"] if s.get("header") == "RESPONSIBILITIES")
+    span = row["text"][sec["start"] : sec["end"]]
+    assert "Ship models." in span
+    assert "We build things." not in span
+    # Markup never survives into the body.
+    assert "<p>" not in row["text"] and "<strong>" not in row["text"]
+
+
+def test_ashby_falls_back_to_plain_when_the_vendor_sends_no_html(monkeypatch):
+    """`descriptionHtml` was present on 457/457 live postings, so the fallback is a
+    safety net against a vendor change -- but a missing HTML field must not empty the
+    body, which is what reading `descriptionHtml` ALONE would have done. That failure
+    would be silent: a body of "" is a legal value, so nothing raises."""
+    payload = {
+        "jobs": [
+            {
+                "title": "Applied AI Engineer",
+                "location": "Remote",
+                "jobUrl": "https://jobs.ashbyhq.com/acme/1",
+                "descriptionPlain": "Plain body only.",
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_ashby("acme")
+    assert row["text"] == "Plain body only."
+    # No markup means no headers -- `[]` is "a body with no headers", NOT `None`,
+    # which is reserved for "no body at all".
+    assert row["sections"] == []
 
 
 def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
@@ -2948,7 +3027,7 @@ def test_the_raw_boundary_is_the_vendors_string_not_a_rebuild():
 
 
 def test_a_continent_inside_a_country_name_is_not_a_stated_region():
-    """"South Africa" contains "africa".
+    """ "South Africa" contains "africa".
 
     Adding the continents made ZA the one country in 425 that also carried a continent
     tag, while France carried no EUROPE. The tag is not false — South Africa is in
