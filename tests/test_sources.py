@@ -1881,6 +1881,119 @@ def test_hn_header_ends_at_a_block_tag_not_a_newline():
     )
 
 
+def _hn_one(text, company_id=1):
+    from job_radar.sources import _hn_rows
+
+    out: list = []
+    _hn_rows({"children": [{"text": text, "id": company_id, "author": "a"}]}, out)
+    return out[0]
+
+
+def test_hn_reads_the_href_not_the_truncated_anchor_text():
+    """HN renders a long link as `<a href="FULL">https://…/j...</a>`. `clean` strips the
+    tag, keeps the DISPLAY text, and throws the href away -- so the old prose regex
+    recovered a URL with a literal ellipsis in it, which 404s. 48 of 196 rows, skewed to
+    `boards.greenhouse.io` and `jobs.lever.co`: the bug destroyed the best links.
+
+    Live measurement over 196 comments, before -> after:
+        truncated (dead)  48 -> 0     deep link  69 -> 107
+        bare homepage     46 -> 34    hn thread  33 ->  55
+
+    Markup is entity-encoded exactly as HN sends it -- `&#x2F;` for a slash. Decoding
+    BEFORE matching is load-bearing and is the same ordering bug 0.9.0 fixed in `clean`.
+    """
+    encoded = (
+        "Acme Corp | Staff Engineer | Remote (US) | Full-time "
+        '<a href="https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmecorp&#x2F;jobs&#x2F;'
+        '596644?gh_jid=596644">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmecorp&#x2F;j'
+        "...</a><p>We build things."
+    )
+    assert (
+        _hn_one(encoded)["url"]
+        == "https://boards.greenhouse.io/acmecorp/jobs/596644?gh_jid=596644"
+    ), "the full target was in the markup the whole time"
+
+
+def test_hn_will_not_hand_you_another_employers_board():
+    """A host check proves a board is REAL, never WHOSE it is. Measured: the Phaselaw
+    comment carries `jobs.ashbyhq.com/Pear-VC/...` -- an investor's board posting for a
+    portfolio company. `_is_direct_apply` passes it on the ATS allowlist alone.
+
+    Handing a user the wrong employer's posting is worse than handing them a broken
+    link: the broken one fails visibly, this one looks right. Gated on RECOVERED links
+    only -- a URL the poster typed is never second-guessed."""
+    from job_radar.sources import _slug_owns_company
+
+    assert not _slug_owns_company(
+        "https://jobs.ashbyhq.com/Pear-VC/361caae7", "Phaselaw"
+    )
+    # A slug ABBREVIATES, so containment has to run both ways: "Eleos Technologies"
+    # ships as `eleostech`, and equality would reject a correct board.
+    assert _slug_owns_company(
+        "https://jobs.lever.co/eleostech/b48", "Eleos Technologies"
+    )
+    assert _slug_owns_company("https://jobs.ashbyhq.com/Nango", "Nango")
+    assert _slug_owns_company(
+        "https://job-boards.greenhouse.io/canopyworks/jobs/4317128009", "Canopy"
+    )
+    # Nothing to check is not evidence of a mismatch -- a bare careers page has no slug,
+    # and `_ATS_HOSTS` already carried the positive evidence that got it here.
+    assert _slug_owns_company(
+        "https://www.adalat.ai/careers/engineering-lead", "Adalat AI"
+    )
+
+    # AND THE GATE IS WIRED IN, which the three assertions above do not show. Deleting
+    # `and _slug_owns_company(...)` from `_hn_url` leaves every one of them green -- it
+    # was measured, not assumed, and it is the exact green-but-blind shape this file
+    # keeps finding. Only a row driven through `_hn_rows` pins the call site.
+    wrong_owner = (
+        "Phaselaw | Founding Engineer | Remote | Full-time https://phase.law "
+        '<a href="https://jobs.ashbyhq.com/Pear-VC/361caae7">apply</a>'
+        "<p>We build things."
+    )
+    assert _hn_one(wrong_owner)["url"] == "https://phase.law", (
+        "an investor's board is not this employer's posting"
+    )
+
+
+def test_hn_prefers_a_dead_end_it_can_explain_over_one_it_cannot():
+    """Two rules that only look like the same rule.
+
+    TIER 1 ONLY. `_best_apply_link`'s middle tier is "not on the known-aggregator list",
+    running on a list measured as under-populated. Applied here it promotes 15
+    unclassified hosts and, on the Double Holo row, trades an employer homepage for a
+    LinkedIn redirect -- on a product whose entire claim is direct-to-employer.
+
+    THREAD OVER A KNOWN 404. When no tier-1 href exists and the prose URL is truncated,
+    the comment link wins: it reaches the posting's details, and `_is_direct_apply` reads
+    False on it, so the row stays honestly not-direct rather than being promoted."""
+    # The real Double Holo row: the poster typed their homepage, and the comment also
+    # carries a LinkedIn href DEEPER than it. A "prefer the deeper link" rule takes the
+    # aggregator; tier-1 refuses it and the employer's own domain stands.
+    aggregator = (
+        "Double Holo | Engineer | Remote | Full-time https://doubleholo.com "
+        '<a href="https://www.linkedin.com/jobs/view/4438695357">jobs</a>'
+        "<p>We build things."
+    )
+    assert _hn_one(aggregator)["url"] == "https://doubleholo.com", (
+        "an aggregator must never displace the employer's own link"
+    )
+
+    truncated_only = (
+        "Acme Corp | Staff Engineer | Remote (US) | Full-time "
+        "https://uctalent.io/referral/Huynh_Nhu/DNwhgw...<p>We build things."
+    )
+    got = _hn_one(truncated_only, company_id=48889875)["url"]
+    assert got == "https://news.ycombinator.com/item?id=48889875", (
+        "a truncated URL is a known 404; the thread reaches the posting"
+    )
+    from job_radar.sources import _is_direct_apply
+
+    assert not _is_direct_apply(got, "Acme Corp"), (
+        "the fallback must not promote the row to direct_apply"
+    )
+
+
 def test_hn_reads_two_threads_not_one(monkeypatch):
     """One thread is the start-of-month cliff: on the 1st the newest thread is nearly
     empty and the prior month's rows vanish. Measured 2026-08-04: 138 vs 245."""

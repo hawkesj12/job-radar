@@ -14,6 +14,7 @@ opt-in extra, off by default; see the README.)
 from __future__ import annotations
 
 import atexit
+import html
 import re
 import threading
 import time
@@ -2505,6 +2506,77 @@ _HN_LOCATION_CAP = 64
 _HN_BLOCK = re.compile(r"<(?:p|br|div|ul|ol|li|blockquote)\b[^>]*>", re.I)
 
 
+_HN_HREF = re.compile(r'<a\s+href="([^"]+)"', re.I)
+
+
+def _slug_owns_company(url: str, company: str) -> bool:
+    """Does this board actually belong to `company`?
+
+    A host check proves a board is REAL, never WHOSE it is. Measured: the HN comment
+    for Phaselaw carries `jobs.ashbyhq.com/Pear-VC/...` -- an investor's board, posting
+    for a portfolio company. `_is_direct_apply` passes it because `ashbyhq.com` is on the
+    ATS allowlist, and handing a user the wrong employer's posting is worse than handing
+    them a broken one: the broken link fails visibly, this one looks right.
+
+    Gates only links this module RECOVERS, never a URL the poster typed -- the point is
+    to avoid ASSERTING an owner we invented, not to second-guess the source.
+
+    True when there is nothing to check. A board with no slug, or a name too short to
+    compare, is not evidence of a mismatch, and `_ATS_HOSTS` already carries the
+    positive evidence. CLAUDE.md records the same limit from the other side: identity
+    verification covers Greenhouse only, because it is the one ATS that reports an owner.
+    """
+    from .dedup import ats_from_url
+    from .discover import _norm_name
+
+    got = ats_from_url(url)
+    if not got or not got[1]:
+        return True
+    slug = re.sub(r"[^a-z0-9]", "", got[1].lower())
+    token = re.sub(r"[^a-z0-9]", "", _norm_name(company).lower())
+    # 4, and prefix-compared, because a board slug abbreviates: "Eleos Technologies"
+    # ships as `eleostech`, so equality fails and containment must run BOTH ways.
+    if len(token) < 4 or len(slug) < 4:
+        return True
+    return token[:6] in slug or slug[:6] in token
+
+
+def _hn_url(raw: str, company: str, text: str, item_id) -> str:
+    """The apply link in an HN comment, read from the MARKUP rather than the prose.
+
+    HN renders a long link as `<a href="FULL">https://boards.greenhouse.io/acme/j...</a>`.
+    `clean` strips the tag, keeps the DISPLAY text and throws the href away -- so the
+    regex below recovers a URL with a literal ellipsis in it, which 404s. 48 of 196 rows
+    carry one, and they skew to `boards.greenhouse.io` and `jobs.lever.co`: the bug
+    destroys the highest-value links. The full target was in the response the whole time.
+
+    Same invariant as `sections` and as the location split above: STRUCTURE IS READ
+    BEFORE THE STRIP, OR NOT AT ALL. An href is structure.
+
+    TIER 1 ONLY, and deliberately not `_best_apply_link`'s full preference order. Its
+    middle tier is "anything not on the known-aggregator list", running on a list
+    measured as under-populated -- applying it here promotes 15 unclassified hosts
+    (`notion.site`, `careers-page.com`) and, on one measured row, trades an employer
+    homepage for `linkedin.com/jobs/view/...` on a product whose whole claim is
+    direct-to-employer. Reuse the TIER, not the ORDER.
+    """
+    prose = m.group(0) if (m := re.search(r"https?://[^\s)\]]+", text)) else ""
+    thread = f"https://news.ycombinator.com/item?id={item_id}"
+    for href in (html.unescape(h) for h in _HN_HREF.findall(raw)):
+        parsed = urlparse(href)
+        if not (parsed.path.strip("/") or parsed.query):
+            continue  # a bare homepage is not a posting, and we already have one
+        if _is_direct_apply(href, company) and _slug_owns_company(href, company):
+            return href
+    # A truncated URL is a KNOWN 404, so the thread link -- which reaches the comment
+    # holding the posting -- beats it. Not a promotion: `_is_direct_apply` reads False
+    # on news.ycombinator.com, so these rows stay honestly not-direct and stay out of a
+    # direct-only consumer's intake. 15 of the 26 unrecovered rows are provably dead.
+    if prose and ("..." in prose or "…" in prose):
+        return thread
+    return prose or thread
+
+
 def _hn_location(segment: str) -> str:
     """One pipe segment -> at most a location-shaped head of it."""
     head = segment.split("\n", 1)[0].strip()  # a newline ends the header line outright
@@ -2544,7 +2616,6 @@ def _hn_rows(tree, out: list) -> None:
         # populated. 4 of 196 comments split short; 0 lose a location today, and this
         # keeps that true for a thread that formats differently next month.
         loc_parts = head_parts if len(head_parts) > 2 else parts
-        m = re.search(r"https?://[^\s)\]]+", text)
         # SCAN the segments, do not index them. The convention is loose: measured
         # across 174 comments in one thread, the remote token lands in slot 2 (62x),
         # slot 3 (34x), slot 1 (18x) and slot 4 (7x) -- "PostHog | Full-Time |
@@ -2570,9 +2641,7 @@ def _hn_rows(tree, out: list) -> None:
                 "location": " ".join(
                     t for t in (_hn_location(p) for p in loc_parts[2:4]) if t
                 ),
-                "url": m.group(0)
-                if m
-                else f"https://news.ycombinator.com/item?id={c.get('id')}",
+                "url": _hn_url(c.get("text") or "", parts[0], text, c.get("id")),
                 **posted_from(c.get("created_at")),
                 "department": "",
                 "remote_type": rtype,

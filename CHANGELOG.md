@@ -211,6 +211,62 @@ is basic…` — and `util.clean` flattens that tag into the same text run. By t
   so a pre-strip boundary is structurally invisible in it. The measurement was taken against
   HN's Firebase item API. A corpus that cannot contain the defect cannot clear the fix.
 
+- **Hacker News shipped a URL that could not reach the posting on 127 of 196 rows, and 48
+  of those were a link the response was carrying correctly all along.** HN renders a long
+  link as `<a href="FULL">https://boards.greenhouse.io/acme/j...</a>`. `util.clean` strips
+  the tag, keeps the **display text**, and discards the href — so `_hn_rows` then regexed a
+  URL with a literal ellipsis out of the cleaned prose. Those 404. They skew to
+  `boards.greenhouse.io` and `jobs.lever.co`, so the bug destroyed the **highest-value**
+  links in the source. `_hn_rows` now reads the href out of the decoded markup first — the
+  same invariant 0.9.0 ships for `sections` and applied above to the location.
+
+  Measured over 196 live comments, before → after:
+
+  | url bucket                       | before | after   |
+  | -------------------------------- | ------ | ------- |
+  | deep link (reaches a posting)    | 69     | **107** |
+  | truncated — dead by construction | **48** | **0**   |
+  | bare company homepage            | 46     | 34      |
+  | HN comment thread                | 33     | 55      |
+
+  62 rows change. Link quality on the rows the fix touches goes from **21%** reaching a
+  real posting to **60%** (200 plus a path depth ≥ 2, on the 47 URLs the fix newly
+  introduces). It does not reach 100% and cannot: a month-old thread contains postings that
+  have since been taken down, and 9 of those 47 are already 404/410.
+
+  **Two gates, because a recovered link must EARN its place rather than inherit it.**
+  - **Tier 1 only.** Selection reuses `_is_direct_apply` — a known ATS host or the
+    employer's own domain — and deliberately **not** `_best_apply_link`'s full preference
+    order, whose middle tier is "anything not on the known-aggregator list". That list is
+    measurably under-populated (it is why google_jobs preferred `learn4good.com` over
+    LinkedIn), and applying it here would promote 15 unclassified hosts and, on one
+    measured row, trade an employer homepage for `linkedin.com/jobs/view/…`. Reuse the
+    tier, not the order.
+  - **Slug-versus-company.** A host check proves a board is real, never **whose** it is:
+    the Phaselaw comment carries `jobs.ashbyhq.com/Pear-VC/…`, an investor's board posting
+    for a portfolio company, and the ATS allowlist waves it through. Handing a user the
+    wrong employer's posting is worse than handing them a broken link — the broken one
+    fails visibly. Gated on **recovered** links only; a URL the poster typed is never
+    second-guessed.
+
+  **A truncated URL now falls back to the HN comment link.** It is a known 404, and the
+  thread reaches the comment holding the posting's own details. This is not a promotion:
+  `_is_direct_apply` reads `False` on `news.ycombinator.com`, so those rows stay honestly
+  not-direct and stay out of a direct-only consumer's intake.
+
+  **Tier 1 leaves 21 rows unrecovered and that is the accepted price**, not an oversight:
+  their comments carry no ATS or employer-domain href at all. Taking 15 unvetted hosts to
+  rescue 15 links that are mostly dead anyway is the worse trade.
+
+  **`first_seen` resets on 29 hn rows.** `shortlist._upsert_locked` recovers a moved
+  `dedup_key` by URL and a moved URL by key; this release moves both, so neither index
+  fires. Splitting the two across a harvest would have cut it to 16 — **the sequencing was
+  available and deliberately not taken**, because the only harvest that re-keys the store
+  writes the owner's live shortlist and polls hundreds of third-party endpoints, which is
+  not worth 13 rows. Measured against that store today: 1,650 rows, **every `status`
+  empty**, so nothing recoverable is lost _today_. That conditional stops being true the
+  day the owner applies to something.
+
 - **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
   that describes the query rather than the posting.** Google's `location` is `Anywhere` on
   every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city
