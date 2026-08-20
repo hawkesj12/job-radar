@@ -79,6 +79,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   low-volume source whose rows all merged would have gone uncredited with no error,
   and attribution is a **condition of API access** on five of the wired sources.
 
+  **The root cause is upstream of all three and is now filed as a known limit** in
+  `shortlist._build_row` and the README: `shortlist.COLUMNS` has `source` and no
+  `sources`, so the store flattens a set into a comma-joined singular column and
+  every reader needs a decoder. A fourth reader of that CSV — a spreadsheet, a
+  `pandas.read_csv` — has no decoder at all. Adding the column would end the need
+  for any decoder, but it changes the CSV header, so it is filed rather than made.
+
   All three exits now read one helper, `emit._sources`, which takes `sources` as a set,
   list or tuple, and otherwise falls back to splitting the singular `source` — where a
   store row's joined string always lives, since there is no `sources` column to hold it. Recovering the set from that string is lossless and

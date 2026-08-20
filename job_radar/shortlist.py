@@ -248,6 +248,25 @@ def write_all(path, rows: list[dict]) -> None:
 def _build_row(p: dict, today: str) -> dict:
     key = p.get("dedup_key") or dedup_key(p)  # reuse the engine's key when present
     a = age_int(p.get("posted", ""))
+    # KNOWN LIMIT, and it is the root cause of three bugs already fixed elsewhere.
+    # `COLUMNS` has `source` and no `sources`, so a cross-source merge -- a set -- is
+    # flattened here into a comma-joined string inside a SINGULAR column. The value
+    # that comes back out, "adzuna, greenhouse", is not a source: no adapter has that
+    # name, it resolves against no `attribution` entry, and nothing can key on it.
+    #
+    # Three readers each grew their own decoder for that, and each was wrong until it
+    # was fixed: `emit._nested` emitted `sources: null`, `emit.manifest` counted a row
+    # under the fabricated name, and `cli`'s attribution credit line silently dropped
+    # it (12 such tokens in a 7,568-row local harvest). All three now route through
+    # `emit._sources`, which splits on `", "` -- lossless for the SET because no
+    # registered source token contains a comma or a space, 19 of 19 -- but never
+    # recovers WHICH source won the merge, because that is not written down anywhere.
+    #
+    # THE DECODER CANNOT REACH A FOURTH READER. `shortlist.csv` is a public artifact:
+    # a spreadsheet, a `pandas.read_csv`, or anyone's script sees the joined string
+    # with no decoder at all. Adding a `sources` column would fix it at the source and
+    # end the need for any decoder -- but that changes the CSV header, which is a
+    # user-facing schema change and deliberately not made here. Filed, not fixed.
     src = ", ".join(
         sorted(p.get("sources") or ([p.get("source")] if p.get("source") else []))
     )
