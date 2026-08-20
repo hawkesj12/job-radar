@@ -116,7 +116,17 @@ _CONTRACT_FIELDS = (
     "parent_company",  # umbrella org, when the source distinguishes one
     "team",  # the employer's own group -- the catalog's `org_unit`, see `category`
     # where
-    "locations",  # list[dict] | None -- every place, each with its own apply url
+    # list[dict] | None -- every place ONE posting names, each {raw, city, state,
+    # country}. NO per-place `url`: entries carried one until 0.9.0, and it was the
+    # posting's own url on all 9,585 of them in a 7,568-row harvest, 0 differing.
+    # The key was not merely unpaid but a false claim -- it advertised a per-place
+    # apply link that not one of the nineteen sources publishes, so a consumer could
+    # reasonably have built a per-office apply flow on a value that never varied.
+    # The one construction path that COULD differ made it worse, not better:
+    # `fetch_workable` built the record url from three fallback terms and the entry
+    # url from two, so with both vendor keys absent the entry was `None` while the
+    # record had a working constructed link.
+    "locations",
     "city",
     "state",
     "country",
@@ -581,10 +591,9 @@ def _coerce(p: dict) -> dict:
             # {raw, url}, so 644 of 3,153 live elements had no city/state/country
             # key at all and a consumer doing `l["city"]` raised on a fifth of the
             # list. The parsed values are per-place, so each is read from its own
-            # string rather than copied from the row's first place.
-            p["locations"] = [
-                {"raw": x, **_read_place(x), "url": p.get("url")} for x in parts
-            ]
+            # string rather than copied from the row's first place. `url` left the
+            # entry in 0.9.0 -- see the `locations` comment above.
+            p["locations"] = [{"raw": x, **_read_place(x)} for x in parts]
         elif parts:
             p["locations"] = [
                 {
@@ -592,7 +601,6 @@ def _coerce(p: dict) -> dict:
                     "city": p.get("city"),
                     "state": p.get("state"),
                     "country": p.get("country"),
-                    "url": p.get("url"),
                 }
             ]
 

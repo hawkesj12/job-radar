@@ -304,7 +304,7 @@ def _ashby_salary(comp: dict) -> dict:
     return salary()
 
 
-def _ashby_locations(j: dict, url: str) -> list[dict] | None:
+def _ashby_locations(j: dict) -> list[dict] | None:
     """Ashby `secondaryLocations[]` + the primary address -> the `locations` list.
 
     ASHBY SHIPS A STRUCTURED PER-PLACE ARRAY AND THIS ADAPTER NEVER READ IT. Measured
@@ -322,8 +322,9 @@ def _ashby_locations(j: dict, url: str) -> list[dict] | None:
     and the secondaries are explicitly secondary.
 
     NO PER-PLACE URL, and that is the vendor's doing rather than an omission here:
-    the entries carry an address and nothing else, so `url` is the posting's url on
-    every entry -- the same as every other adapter that builds this list.
+    the entries carry an address and nothing else. Entries used to carry the posting's
+    own url on every one of them, which asserted a per-place apply link that no source
+    publishes; the key was removed in 0.9.0 and the parameter with it.
     """
 
     def entry(raw: str, address) -> dict:
@@ -336,7 +337,7 @@ def _ashby_locations(j: dict, url: str) -> list[dict] | None:
         # vocabularies, which is the exact defect this series just removed elsewhere.
         if place["country"] == "US" and place["state"]:
             place["state"] = us_state_code(place["state"]) or place["state"]
-        return {"raw": raw, **place, "url": url}
+        return {"raw": raw, **place}
 
     entries: list[dict] = []
     seen: set[str] = set()
@@ -422,9 +423,7 @@ def fetch_ashby(slug: str):
                 "remote_type": remote_type(j.get("workplaceType")),
                 "remote_basis": "stated" if j.get("workplaceType") else None,
                 **_ashby_place(j.get("address")),
-                "locations": _ashby_locations(
-                    j, j.get("jobUrl") or j.get("applyUrl", "")
-                ),
+                "locations": _ashby_locations(j),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
                 **_ashby_salary(comp),
@@ -583,7 +582,6 @@ def fetch_workable(slug: str):
                         "city": x.get("city"),
                         "state": x.get("region"),
                         "country": x.get("countryCode") or x.get("country"),
-                        "url": j.get("application_url") or j.get("url"),
                     }
                     for x in places
                 ]
@@ -1721,7 +1719,6 @@ def fetch_teamtailor(slug: str):
                         "city": a.get("addressLocality"),
                         "state": a.get("addressRegion"),
                         "country": a.get("addressCountry"),
-                        "url": j.get("url", ""),
                     }
                     for a in places
                 ]

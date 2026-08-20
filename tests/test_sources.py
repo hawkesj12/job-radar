@@ -2838,15 +2838,15 @@ def test_ashby_secondary_locations_become_the_locations_list():
                     "address": addr("Seattle", "Washington", "United States"),
                 },
             ],
-        },
-        "u",
+        }
     )
     assert [e["raw"] for e in got] == ["San Francisco", "Toronto", "Seattle"]
     # a US subdivision is a CODE, matching the scalar rule; a non-US one keeps its name
     assert [e["state"] for e in got] == ["CA", "Ontario", "WA"]
-    assert {e["url"] for e in got} == {"u"}
+    # NO per-place url. Entries carried the posting's own on every one until 0.9.0.
+    assert all("url" not in e for e in got)
     # one place is not a list -- `_coerce` owns the single-place shape
-    assert _ashby_locations({"location": "Berlin", "address": None}, "u") is None
+    assert _ashby_locations({"location": "Berlin", "address": None}) is None
 
 
 def test_ashby_region_that_is_the_country_repeated_is_dropped():
@@ -3843,3 +3843,38 @@ def test_no_adapter_still_emits_the_removed_department_field(monkeypatch):
         "an adapter is setting `department` again -- it was removed at 0.9.0; "
         "use `team` (the employer's org unit) or `category` (the job family)"
     )
+
+
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_no_adapter_puts_a_url_on_a_location(name, monkeypatch):
+    """`locations[]` entries carried the posting's own url until 0.9.0 -- 9,585 of
+    9,585 in a 7,568-row harvest, 0 differing from the row's `url`. It was not merely
+    redundant: it ADVERTISED a per-place apply link that none of the nineteen sources
+    publishes, so a consumer could reasonably have built a per-office apply flow on a
+    value that never varied.
+
+    THIS RUNS OVER EVERY ADAPTER because the three that build the list are not the
+    ones the corpus covered. `engine._coerce`'s two fallback branches are guarded
+    separately by `test_every_locations_element_has_the_same_keys`, which calls the
+    engine rather than an adapter -- adapter output is not record output, and one test
+    cannot stand in for the other.
+    """
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+    if name in sources.DEPTH_ALL:
+        out = sources.DEPTH_ALL[name]("slug")
+    else:
+        out = sources.BREADTH_ALL[name](["AI Engineer"])
+    want = {"raw", "city", "state", "country"}
+    for row in out:
+        for el in row.get("locations") or []:
+            assert set(el) == want, (
+                f"{name}: location keys {sorted(el)} != {sorted(want)} -- a per-place "
+                "`url` is the row's own url on every source and was removed at 0.9.0"
+            )

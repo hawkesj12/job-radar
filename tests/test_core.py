@@ -3463,7 +3463,7 @@ def test_every_locations_element_has_the_same_keys():
             "location": "Waco, TX",
         }
     )
-    want = {"raw", "city", "state", "country", "url"}
+    want = {"raw", "city", "state", "country"}
     for row in (multi, single):
         for el in row["locations"]:
             assert set(el) == want, f"element keys {sorted(el)} != {sorted(want)}"

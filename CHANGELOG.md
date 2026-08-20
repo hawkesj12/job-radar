@@ -87,6 +87,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
+- **`locations[]` entries no longer carry a `url`.** Each entry is now
+  `{raw, city, state, country}` — four keys, not five. The key held the posting's own
+  apply url on **9,585 of 9,585 entries** in a 7,568-row harvest, with **zero**
+  differing from the row's `url` `[local 94-board harvest, 0.9.0]`.
+
+  Redundancy is not the reason it went. **It advertised a per-place apply link that
+  not one of the nineteen sources publishes**, so a consumer could reasonably have
+  built a per-office apply flow on a value that never varied. Ashby's own adapter
+  docstring had said so for as long as the key existed: the vendor's
+  `secondaryLocations[]` entries carry an address and nothing else.
+
+  The one construction path that *could* produce a different value made it **worse**:
+  `fetch_workable` builds the record's url from three fallback terms and built the
+  entry's from two, so with both vendor keys absent the entry was `null` while the
+  record had a working constructed link. Recovery for a consumer is the record's own
+  `url`, which is what the entry always held.
+
 - **`department` is gone.** It was deprecated in 0.7.0 because it was four different
   things depending on the adapter — an org unit (Greenhouse, Ashby), a job family
   (Adzuna's `IT Jobs`), a seniority (Braintrust), and _the employer_ (USAJOBS'
