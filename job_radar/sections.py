@@ -263,12 +263,17 @@ def _header_at(body: str, m: re.Match) -> tuple[str, bool]:
             # </strong>: Be a technical thought partner`. Reading only the first made
             # the leaf rule below disagree with itself on 149 sections of one shape.
             #
-            # It is NOT absorbed into the header, and that is a measured limit rather
-            # than an oversight: `clean` turns the `</strong>` into a SPACE, so the
-            # body reads "...Partnership : Be a..." and a header ending in ":" cannot
-            # be found in it -- `pos` then fails to advance and the span opens on the
-            # colon anyway, which is worse than leaving it alone. Absorbing it becomes
-            # correct only once inline tags stop leaving a space behind them.
+            # It counts for the leaf test but is NOT absorbed into the header, and the
+            # reason changed once inline tags stopped leaving a space behind them.
+            # Before that, absorbing was impossible: the body read "...Partnership : Be
+            # a..." so a header ending in ":" could not be found in its own text, `pos`
+            # failed to advance, and the span opened on the colon regardless. That
+            # blocker is now gone -- and absorbing it was tried here and REVERTED,
+            # because it also swallows the colon in `<strong>PLEASE NOTE</strong>
+            # <strong>: Due to federal requirements.</strong>`, where the run after the
+            # colon is a real adjacent heading rather than this label's value. Telling
+            # those apart needs more than the next character, so the colon stays in the
+            # span and this stays a named limit.
             outside_colon = cand.startswith(":")
     if _in_leaf(body, anchor) and not (
         head.rstrip().endswith(":") or tail.startswith(":") or outside_colon

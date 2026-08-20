@@ -44,6 +44,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An inline tag no longer leaves a space where it stood — 4,580 → 62 spaces sitting
+  before a punctuation mark.** `clean` replaced EVERY tag with a space, which is right
+  for a block tag and wrong for a bold or a link: `At <a>Smartsheet</a>, your ideas`
+  became `At Smartsheet , your ideas`, on 67.7% of rows with a body, and a tag boundary
+  landing mid-word split "the" into "t he". Measured on 2,712 raw bodies `[live fetch, 9
+  boards, 2026-08-20]`; also 5 → on himalayas and 7 on a non-tech Muse sample.
+
+  **The uppercase guard is the whole rule**, and it is why this is not simply "delete
+  inline tags": a word split by a tag always CONTINUES in lower case and two distinct
+  words do not, so an uppercase letter after the run means the space stays. Without it
+  `<strong>Requirements</strong>Must have` collapses to `RequirementsMust`. Zero words
+  were glued — a camel-case proxy held at exactly 3,099 before and after. The
+  case-insensitive flag is **scoped to the tag half on purpose**: a module-level `re.I`
+  case-folds the `(?![A-Z])` lookahead too and silently turns the guard off, with every
+  test still green. Two people hit that independently while building this.
+
+  **Composition, reported rather than explained:** this change and the header rule each
+  produce **0** sections whose span cannot be located. Applied together they produce
+  **10** of 22,202, which fail safely — the section keeps its `type` and `header` and
+  carries no offsets, which is what `clean_with_sections` documents for a disagreement
+  it cannot resolve. The cause is not understood and could not be reproduced on a
+  separate 910-body corpus at any combination, so it is recorded as corpus-specific and
+  nothing further is claimed about it. The two changes ship as separate commits for that
+  reason.
+
 - **A Braintrust row reports `sections: []`, not `null`, because it has a body.** `null`
   means "there was no body to read" and `[]` means "a body with no headers"; this adapter
   emitted `null` while shipping a built body on 29 of 29 rows, which is a false statement

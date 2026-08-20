@@ -175,6 +175,27 @@ def q(s: str) -> str:
 # after the `<` makes that impossible instead of merely unobserved -- which is also what
 # lets the second strip below be safe.
 _TAG = re.compile(r"</?[A-Za-z][^>]*>")
+# AN INLINE TAG NEVER SEPARATED TWO WORDS, so it must not leave a space where it stood.
+# `_TAG.sub(" ", ...)` replaced EVERY tag with a space, which is right for a block tag
+# and wrong for a bold or a link: `At <a>Smartsheet</a>, your ideas` became
+# `At Smartsheet , your ideas`, and a tag boundary falling mid-word split "the" into
+# "t he". Measured across 2,712 live bodies from 9 boards: 4,580 spaces sitting before a
+# punctuation mark, on 67.7% of rows with a body.
+#
+# THE UPPERCASE GUARD IS THE WHOLE RULE. Deleting an inline run unconditionally would
+# glue two real words together -- `<strong>Requirements</strong>Must have` -> the single
+# token `RequirementsMust`. A word split by a tag always CONTINUES in lower case, and two
+# distinct words do not, so an uppercase letter after the run means "these were two
+# words, keep the space". Measured: 4,580 -> 62 space-before-punctuation with zero words
+# glued, against a camel-case proxy that stayed at exactly 3,099 either way.
+#
+# THE `(?i:)` IS SCOPED ON PURPOSE AND MUST STAY THAT WAY. A module-level `re.I` here
+# case-folds the `(?![A-Z])` lookahead too, so it rejects lower case as well, the guard
+# silently becomes a no-op, and the rule reverts to the gluing version -- with every test
+# still green. Two of us hit this independently and it cost four measurements between us.
+_INLINE_RUN = re.compile(
+    r"(?:(?i:</?(?:a|b|strong|em|i|u|span|code|sup|sub|small|abbr|cite|q|mark|s|del|ins|font)\b[^>]*>))+(?![A-Z])"
+)
 # Block-level closers become line breaks. NOT because the source runs its bullets
 # together -- 2,554 of 2,697 real bodies already put a literal newline between `</li>`
 # and `<li>`, and the `\s*\n\s*` collapse at the end of clean() is what recovers those.
@@ -232,6 +253,7 @@ def _clean_decoded(txt: str) -> str:
     has not appeared yet, not a fix for one that has.
     """
     txt = _BLOCK_END.sub("\n", txt)
+    txt = _INLINE_RUN.sub("", txt)
     txt = _TAG.sub(" ", txt)
     # A SECOND pass, because one is not enough. Greenhouse's escaped markup contains its
     # own entities, so an `&amp;amp;` in the source needs two decodes to reach `&` --
@@ -244,6 +266,8 @@ def _clean_decoded(txt: str) -> str:
     # function just had, and under the strict pattern above it cannot damage prose. A
     # fixed-point loop was measured and rejected: unbounded decoding buys nothing over two
     # passes and is only safe by luck.
+    # The inline pass is repeated here for the same reason and under the same guard.
+    txt = _INLINE_RUN.sub("", txt)
     txt = _TAG.sub(" ", txt)
     # `[^\S\n]+`, not `[ \t]+`: 0.8.2's `\s+` collapsed a non-breaking space and this
     # replaced it with a class that does not, leaving a literal U+00A0 on 67% of bodies --

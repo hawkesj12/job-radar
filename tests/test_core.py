@@ -1035,6 +1035,42 @@ def test_clean_does_not_eat_prose_between_angle_brackets():
     )
 
 
+def test_an_inline_tag_leaves_no_space_where_it_stood():
+    """`_TAG.sub(" ", ...)` replaced every tag with a space, which is right for a block
+    tag and wrong for a bold or a link. Measured across 2,712 live bodies from 9 boards:
+    4,580 spaces sitting before a punctuation mark, on 67.7% of rows with a body -- and
+    a tag boundary landing mid-word split "the" into "t he". Both strings below are
+    verbatim from live postings (himalayas, clickhouse).
+    """
+    assert util.clean("At <a href='#'>Smartsheet</a>, your ideas are heard") == (
+        "At Smartsheet, your ideas are heard"
+    )
+    assert util.clean("the United States<span>, t</span>he typical salary") == (
+        "the United States, the typical salary"
+    )
+
+
+def test_an_inline_tag_between_two_words_still_separates_them():
+    """THE GUARD, and the reason the rule is not simply "delete inline tags". A word
+    split by a tag always CONTINUES in lower case; two distinct words do not. So an
+    uppercase letter after the run means these were two words and the space stays --
+    without it `<strong>Requirements</strong>Must have` collapses to the single token
+    "RequirementsMust".
+
+    A module-level `re.I` on the pattern case-folds the `(?![A-Z])` lookahead too, which
+    turns this guard into a no-op while leaving every test green; that is why the flag is
+    scoped to the tag half. This test is what notices.
+    """
+    assert util.clean("<strong>Requirements</strong>Must have 5 years") == (
+        "Requirements Must have 5 years"
+    )
+    # And the same shape through the section reader, where it decides a boundary.
+    text, _secs = util.clean_with_sections(
+        "<p><strong>Deploy</strong><strong>X</strong>Deploy</p>"
+    )
+    assert text == "Deploy X Deploy"
+
+
 def test_clean_leaves_a_plain_text_body_alone():
     """Eleven of nineteen sources send plain text. The fix must be a no-op for them."""
     assert util.clean("  Senior  Engineer\n\n  Remote (US)  ") == (
