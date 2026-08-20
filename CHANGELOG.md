@@ -8,11 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed — BREAKING
 
-- **`remote_areas` is populated on far fewer rows, and that is the fix.** Two changes below
+- **`remote_areas` is populated on far fewer rows, and that is the fix.** Three changes below
   under **Fixed** stop the field asserting a boundary nobody stated — an office address the
-  location parser could not read, and a search-mode token from google_jobs. Together they
-  move **665 rows** from a populated `remote_areas` to `null` in a 7,545-row local harvest,
-  and **~2,502 rows** in a 67,481-row production store — roughly a **30% drop in fill rate**.
+  location parser could not read, a search-mode token from google_jobs, and an English
+  pronoun mined out of an HN comment body. The first two move **665 rows** from a populated
+  `remote_areas` to `null` in a 7,545-row local harvest and **~2,502 rows** in a 67,481-row
+  production store — roughly a **30% drop in fill rate**. The third empties it on far fewer
+  rows and is **the only one of the three that changes what a consumer serves**.
 
   It is filed here rather than only under Fixed because a consumer can **filter** on this
   field, not merely display it, and a dashboard measuring "how many rows carry a boundary"
@@ -37,11 +39,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
         dropped today -> kept after (a leak)              0
   ```
 
-  **Zero rows change what a user sees, and the reason is structural rather than lucky:**
-  every value this removes was _derived from the location text_, and jobfitr's fallback
-  branch re-reads that same text (`place_evidence(job["location"])`). The evidence is not
-  lost — it stops being laundered through a field whose contract says the posting **stated**
-  it. The areas verdict and the text verdict agree on all 2,492.
+  **Zero, for this change, and the reason is structural rather than lucky:** every value it
+  removes was _derived from the location text_, and jobfitr's fallback branch re-reads that
+  same text (`place_evidence(job["location"])`). The evidence is not lost — it stops being
+  laundered through a field whose contract says the posting **stated** it. The areas verdict
+  and the text verdict agree on all 2,492.
+
+  **But the HN location fix below is a different story, and 5 production rows do move.** It
+  shortens `location`, which removes a spurious `US` that the English pronoun had put into
+  `remote_areas` — and a `US` entry makes jobfitr's areas branch **short-circuit to KEEP**,
+  skipping the text fallback entirely. So removing it is not neutral there. Replaying the
+  same filter over the 172 production HN rows:
+
+  ```
+  rows whose remote_areas changes under the cap          21
+    KEPT today -> DROPPED after                           5
+    DROPPED today -> KEPT after (a leak)                  0
+  ```
+
+  All five leave correctly, and each is a job a US-based worker cannot take:
+  `REMOTE (EU, Switzerland, Norway)` · `Toronto, Canada REMOTE (Canada only)` ·
+  `HYBRID (Berlin) or REMOTE (CET ±2h)` · `Remote (Italy)` · `Madrid (ONSITE 60%)`. Every one
+  was reaching a US-only board on the strength of the word "us" appearing in prose like
+  "read more about us here".
+
+  **Two caveats on that 5.** Production stores the old joined location, so the cap is applied
+  to the joined string rather than per raw segment — this sizes the class rather than
+  counting it exactly. And it measures the cap alone; the block-tag split that follows it
+  removes further pronoun matches, so **5 is a floor**.
 
   **Nothing reaches a downstream consumer without a deliberate act.** jobfitr pins
   `job-radar>=0.8,<0.9`, so this cannot arrive through a `git pull` on its box — someone has
