@@ -8,6 +8,72 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.0] - 2026-08-20
 
+### Added
+
+- **`sections` — the posting's own structure, read before the markup is stripped.**
+  A job body's headers exist only in the vendor's markup, and the `clean()` fix below finally
+  removes that markup correctly — which would have destroyed the only structural signal the
+  corpus has. So it is captured first: `[{type, header, start, end}]`, where the span indexes
+  the record's own `text`. Both halves ship together for that reason; the fix alone would have
+  been a net loss of information.
+
+  - **Ten types.** Measured across **478 distinct employers**: `requirements` on 93.5% of them,
+    `responsibilities` 92.3%, `about_company` 61.1%, `benefits` 42.5%, `compensation` 37.0%,
+    `location_travel` 31.2%, `eeo_legal` 23.6%, `metadata` 5.9%, `apply_cta` 5.4%,
+    `fraud_warning` 1.5%. Report coverage **per employer, not per posting** — a posting-weighted
+    percentage mostly measures how many roles one employer happens to have open.
+
+    **Those figures are not out-of-sample, and three things qualify them.** The classifier's
+    patterns were chosen by mining unclassified headers out of a 730-employer corpus, and **406
+    of these 478 employers — 2,312 of the 3,000 postings — are in that same corpus**, so this is
+    substantially a training-set score. On the **72 employers that are not**, `requirements` is
+    97.2% and `responsibilities` 94.4%, above the headline; the marginal types move more and on
+    n=72 (`about_company` 54.2%, `eeo_legal` 20.8%). Second, coverage rises with how deeply an
+    employer was sampled — `requirements` is 85.6% for the 125 employers contributing a single
+    posting against 98.1% for the 156 contributing five or more — so the denominator is partly
+    measuring sampling depth. Third, the same classifier on the larger corpus reads up to 16
+    points differently on the marginal types (`location_travel` 47.0% there against 31.2% here),
+    so the decimal place implies a stability the data does not have. The two smallest figures
+    rest on 7 and 26 employers.
+  - **`type` PRECISION is not measured — only coverage.** Nothing here reports how often a
+    classification is *wrong*, and two buckets are known to be loose: `eeo_legal` matches a bare
+    `commitment to` / `privacy` / `sponsorship` (36% of its entries match only those), and
+    `location_travel` matches a bare `remote` (23% of its entries), which files "Lead Remote
+    Teams:" as a location section. Treat `type` as a strong hint rather than an assertion, and
+    read the retained raw `header` when it matters.
+  - **`type: null` is a real answer, not a failure.** Roughly half of all headers are employer
+    prose ("Building something special") and forcing those into a bucket would assert something
+    the source never said. The employer's raw `header` is kept beside our guess so a
+    misclassification can be corrected in a later release without re-harvesting anything.
+  - **Spans, not copies.** Carrying each section's text would grow a record by 104%; spans cost
+    14.3% and lose nothing, since `text` is right there. A section that cannot be located emits
+    **no span at all** rather than a plausible-looking one.
+  - **`null` vs `[]`.** `null` means there was no body; `[]` means the body carried no headers.
+
+  **This is effectively a Greenhouse field.** Greenhouse sends HTML on 100% of postings and the
+  other eighteen sources send plain text, so they get `[]`. Anything built on `sections` is built
+  on about two thirds of the corpus and none of the local lane — adzuna and google_jobs return
+  nothing here. Two caveats worth stating rather than burying: `fraud_warning` appears for only
+  7 employers in this corpus (10 in the larger one) and **one of them is ~80% of the rows**, so
+  it is not a rate to plan on. And the 8,000-character cap bites harder than "undercounts" would
+  suggest: **the median body in this corpus IS 8,000 characters** — 1,765 of 3,000 are truncated
+  — and on an uncapped corpus the same cut costs `eeo_legal` 11 points (55.1% → 44.1%) and
+  `benefits` 3. `eeo_legal` and `benefits` are the late sections, and they are the ones hit.
+  That 11-point figure describes the corpora as they were captured, under the OLD `clean()`;
+  once a consumer re-harvests on 0.9.0 the bodies are 21.6% shorter, so the same cap bites
+  roughly 2.4 points instead.
+
+  Cost, measured against this implementation rather than the prototype it was designed from:
+  **412 µs added per HTML posting** (304 → 716), about **9.5 seconds** on a harvest with 23k
+  Greenhouse rows; an independent re-measurement on other hardware got 380 µs, so treat these as
+  the right order rather than the exact figure. A plain-text posting pays **~3 µs** (191 → 194) —
+  the guard skips the split, not the decode, so it is nearly free rather than exactly free.
+  Two costs that belong beside it: `sections` adds about **34% to the resident memory** of a held
+  row (roughly 4 KB against 12 KB of `text`), which matters because a depth harvest holds many
+  rows at once; and Python's `re` holds the GIL, so this CPU competes with the fetch threads
+  rather than hiding entirely behind them. No claim is made here about downstream retrieval quality; that has not been
+  measured on a second corpus or a second reader.
+
 ### Fixed
 
 - **`clean()` stripped HTML tags before decoding HTML entities, which is backwards for any

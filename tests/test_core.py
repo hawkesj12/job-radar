@@ -3,6 +3,7 @@ LLM no-op guarantee. Run: pytest"""
 
 import json
 import os
+import time
 import types
 import urllib.error
 from dataclasses import replace
@@ -18,6 +19,7 @@ from job_radar import (
     funnel,
     llm,
     scoring,
+    sections,
     seed,
     sources,
     shortlist,
@@ -1041,6 +1043,214 @@ def test_clean_leaves_a_plain_text_body_alone():
     # bodies -- enough to break the multi-token keyword "prompt engineering" on a posting
     # that used one between the words.
     assert util.clean("prompt&amp;nbsp;engineering") == "prompt engineering"
+
+
+# ── sections: the structure clean() would otherwise destroy (0.9.0) ───────────
+def test_sections_are_read_before_the_tags_are_stripped():
+    """THE ORDERING INVARIANT, as an executable assertion. The same body yields
+    structure from the raw vendor string and NOTHING once it has been cleaned, because
+    a header is only a header while it is still wrapped in a tag."""
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    assert secs, "no sections from the raw body"
+    assert util.clean_with_sections(text)[1] == [], (
+        "cleaned text still yielded sections -- the invariant is not what it claims"
+    )
+
+
+def test_sections_offsets_index_the_records_own_text():
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    for s in secs:
+        assert 0 <= s["start"] <= s["end"] <= len(text)
+    # Non-overlapping and in document order: the lookup walks forward, so a heading
+    # whose words recur later in the posting cannot capture the wrong span.
+    bounds = [(s["start"], s["end"]) for s in secs]
+    assert bounds == sorted(bounds)
+    assert all(a[1] <= b[0] for a, b in zip(bounds, bounds[1:]))
+
+
+def test_two_sections_with_identical_text_get_different_spans():
+    """The forward `pos` cursor, pinned. Dropping it -- `text.find(seg)` instead of
+    `text.find(seg, pos)` -- passes every other test in this file, because no fixture
+    happens to repeat a section's text. Measured against the shipped code, dropping it
+    moves 190 spans across 105 of 2,697 live bodies -- silently, and all in the same
+    direction: a later occurrence collapses onto an earlier one."""
+    text, secs = util.clean_with_sections(
+        "&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;"
+        "&lt;p&gt;Five years of Python.&lt;/p&gt;"
+        "&lt;p&gt;&lt;strong&gt;Nice to have&lt;/strong&gt;&lt;/p&gt;"
+        "&lt;p&gt;Five years of Python.&lt;/p&gt;"
+    )
+    assert len(secs) == 2
+    assert secs[0]["start"] != secs[1]["start"], "the second span collapsed onto the first"
+    assert secs[0]["end"] <= secs[1]["start"]
+    assert text[secs[1]["start"] : secs[1]["end"]] == "Five years of Python."
+
+
+def test_an_unclosed_bold_tag_cannot_make_the_header_scan_quadratic():
+    """`(.*?)` under re.S sends every unclosed `<strong>` scanning to end-of-string,
+    and the next opener repeats it -- 16,000 of them in a 158 KB body took 7.6 seconds
+    before the bound went on. Real postings carry at most ONE unclosed tag, so this is
+    insurance, not a live fix; the test exists so the bound cannot be quietly removed.
+    """
+    body = ("<strong>x" * 4000) + ("filler " * 500)
+    start = time.perf_counter()
+    sections.split(body)
+    assert time.perf_counter() - start < 2.0, "the header scan went quadratic again"
+
+
+def test_the_header_bound_is_wide_enough_for_a_real_header():
+    """The companion to the test above, and the one that matters more. That test proves
+    a bound EXISTS; this proves it is wide enough. An over-tight bound fails silently --
+    the header is simply never found, the section boundary disappears, and the body
+    still parses. At `{0,60}` the suite stays green while 2,947 section boundaries
+    vanish across 1,645 of 2,697 real bodies.
+
+    The longest real header seen carries 739 characters of inner markup (p50 is 27), so
+    a 740-character header must still extract. `{0,400}` is the tightest bound that
+    fails this.
+    """
+    header = "Responsibilities " + ("and more duties " * 46)  # 753 chars
+    assert len(header) > 739
+    parts = sections.split(f"<p><strong>{header}</strong></p><p>Ship things.</p>")
+    assert parts, "a real-length header was not extracted -- the bound is too tight"
+    assert parts[0][1].strip() == header.strip()
+    assert "Ship things." in parts[0][2]
+
+
+def test_a_span_never_points_into_its_own_header():
+    """The failure the design's docstring rules out, pinned. `pos` advanced only over
+    section BODIES, so every header stayed inside the next search window -- and a
+    section whose opening words also appear in the header above it matched THERE.
+    Measured on 6,697 real bodies: 14 of 63,209 sections carried a span pointing into
+    their own header, and `text[start:end]` returned the right STRING in every one, so
+    nothing downstream could detect it. Only the position was wrong.
+
+    A zero-length section is the same bug in its clearest form: it used to anchor
+    BEFORE its own header rather than after it, on all 4,516 of them.
+    """
+    text, secs = util.clean_with_sections(
+        "&lt;strong&gt;Deploy&lt;/strong&gt;&lt;strong&gt;X&lt;/strong&gt;Deploy"
+    )
+    assert text == "Deploy X Deploy"
+    # The body under "X" is the SECOND "Deploy" at index 9, not the header at index 0.
+    assert text[secs[1]["start"] : secs[1]["end"]] == "Deploy"
+    assert secs[1]["start"] == 9
+    # And the empty section under the first header sits after that header, not at 0.
+    assert secs[0]["start"] == secs[0]["end"] == 6
+
+
+def test_the_pre_header_intro_carries_a_null_header_not_an_empty_string():
+    """`""` is not a contract value. The intro entry is the one section with no header
+    of its own, so it is the only place this can regress."""
+    _text, secs = util.clean_with_sections(
+        "&lt;p&gt;We are hiring.&lt;/p&gt;"
+        "&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;&lt;p&gt;Python.&lt;/p&gt;"
+    )
+    assert secs[0]["header"] is None and secs[0]["type"] is None
+    assert all(s["header"] is None or s["header"] for s in secs)
+
+
+def test_a_section_that_cannot_be_located_gets_no_offsets_rather_than_wrong_ones(
+    monkeypatch,
+):
+    """The load-bearing test, and the only one that pins the design's single self-check.
+
+    Asserting `text[start:end] == section_text` proves nothing -- it is true by
+    construction, because the offsets are produced BY searching for that text. What can
+    actually go wrong is the splitter and `clean` disagreeing about the same bytes, and
+    the contract is that such a section arrives with its `type` and `header` and no
+    boundaries at all. Never with a plausible-looking guess.
+    """
+    monkeypatch.setattr(
+        util.sections,
+        "split",
+        lambda body: [("requirements", "Experience", "text that is not in the body")],
+    )
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    assert len(secs) == 1
+    assert secs[0]["type"] == "requirements" and secs[0]["header"] == "Experience"
+    assert "start" not in secs[0] and "end" not in secs[0]
+    assert text == util.clean(_GREENHOUSE_BODY)  # the body itself is unaffected
+
+
+def test_a_body_with_no_headers_yields_no_sections_not_a_copy_of_itself():
+    """Eighteen of nineteen sources send plain text. The module this was ported from
+    returned the WHOLE BODY as one unclassified section, which would have put a second
+    complete copy of every description into every one of their records."""
+    assert util.clean_with_sections("Plain prose. No markup at all.") == (
+        "Plain prose. No markup at all.",
+        [],
+    )
+    assert util.clean_with_sections(None) == ("", [])  # HN can send a null body
+    assert util.clean_with_sections("") == ("", [])
+
+
+def test_a_header_with_nothing_under_it_is_an_empty_span_not_a_failure():
+    """4,516 of 31,258 entries on the nine-board corpus are one bold line immediately
+    followed by the next. That is an empty section, and giving it ABSENT offsets would
+    make it indistinguishable from the genuine disagreement above."""
+    _text, secs = util.clean_with_sections(
+        "&lt;strong&gt;Requirements&lt;/strong&gt;&lt;strong&gt;Benefits&lt;/strong&gt;"
+        "&lt;p&gt;Health cover.&lt;/p&gt;"
+    )
+    empty = [s for s in secs if s["start"] == s["end"]]
+    assert empty, "expected at least one zero-length section"
+    assert all("start" in s for s in secs)
+
+
+def test_about_you_is_a_requirements_header_not_a_company_blurb():
+    """The ordering bug, pinned. `about_company`'s `^about [a-z]` catches "About You",
+    and it did so on 2,085 entries across 82 employers until it moved after
+    `requirements`. The real company header must NOT move with it."""
+    assert sections.classify("About You") == "requirements"
+    assert sections.classify("About you and the role") == "requirements"
+    assert sections.classify("About Anthropic") == "about_company"
+    assert sections.classify("About Us") == "about_company"
+    # THE OTHER HALF, and the larger one. `about_company`'s bare `^about [a-z]` also
+    # claimed "About the Role", which is a RESPONSIBILITIES header -- 5,256 entries
+    # across 326 employers, 2.5x the "About You" case above. Ordering cannot fix it,
+    # because responsibilities runs LAST; only the negative lookahead can. Both guards
+    # are load-bearing and this is the one place that says so.
+    assert sections.classify("About the Role") == "responsibilities"
+    assert sections.classify("About this role") == "responsibilities"
+    assert sections.classify("About the job") == "responsibilities"
+    assert sections.classify("About the opportunity") == "responsibilities"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "You have:",                      # 855 entries / 50 employers
+        "You bring to the team:",
+        "What we are looking for",        # 332 / 50
+        "Who we\u2019re looking for",      # 156 / 22 -- CURLY apostrophe, the common form
+        "Bonus if:",                      # 179 / 60
+        "We\u2019d love to hear from you if you have:",  # 94 / 5
+    ],
+)
+def test_the_five_measured_pattern_additions_classify(header):
+    """Each was measured as UNCLASSIFIED against a 730-employer corpus rather than
+    guessed at, and verified corpus-wide to steal nothing from `responsibilities`."""
+    assert sections.classify(header) == "requirements"
+
+
+def test_an_employer_header_that_means_nothing_stays_unclassified():
+    """55% of header entries classify to nothing, and that is the honest answer --
+    forcing marketing copy into a bucket asserts something the employer never said."""
+    assert sections.classify("Monthly family dinner night") is None
+    assert sections.classify("Building something special") is None
+    # THE 70-CHARACTER CEILING, and it has to be tested with a string that WOULD
+    # otherwise classify -- the first version of this line used `"x" * 80`, which
+    # matches no pattern at any length, so it passed with the ceiling raised to 700.
+    # One employer's template bolds an entire paragraph; without the ceiling that
+    # paragraph becomes a section header.
+    long_but_matching = (
+        "We are looking for someone with responsibilities spanning the entire "
+        "platform organisation and its partner teams"
+    )
+    assert len(long_but_matching) > 70
+    assert sections.classify(long_but_matching[:60]) is not None  # short: classifies
+    assert sections.classify(long_but_matching) is None  # long: refused by the ceiling
 
 
 def test_clean_is_idempotent():

@@ -31,7 +31,7 @@ from .util import (
     NET_ERRORS,
     age_int,
     posted_from,
-    clean,
+    clean_with_sections,
     get_json,
     post_json,
     q,
@@ -72,7 +72,7 @@ def fetch_greenhouse(slug: str):
     data = get_json(f"{GREENHOUSE_API}/{slug}/jobs?content=true")
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("content", ""))
+        text, secs = clean_with_sections(j.get("content", ""))
         depts = j.get("departments") or []
         out.append(
             {
@@ -110,6 +110,7 @@ def fetch_greenhouse(slug: str):
                 "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -140,8 +141,8 @@ def _lever_remote(workplace_type) -> dict:
     return {"remote_type": rt, "remote_basis": "stated" if rt else None}
 
 
-def _lever_text(j: dict) -> str:
-    """The WHOLE posting body, which Lever splits across three fields.
+def _lever_text(j: dict) -> tuple[str, list[dict]]:
+    """The WHOLE posting body, which Lever splits across three fields, plus its sections.
 
     `descriptionPlain` is only the intro -- 1,118 chars on average (binance, n=295).
     The requirements and responsibilities live in `lists[]`, each a heading plus HTML
@@ -155,7 +156,7 @@ def _lever_text(j: dict) -> str:
             parts.append(sec.get("text") or "")
             parts.append(sec.get("content") or "")
     parts.append(j.get("additionalPlain") or "")
-    return clean("\n".join(str(x) for x in parts if x))
+    return clean_with_sections("\n".join(str(x) for x in parts if x))
 
 
 def fetch_lever(slug: str):
@@ -163,7 +164,7 @@ def fetch_lever(slug: str):
     out = []
     for j in data:
         cats = j.get("categories") or {}
-        text = _lever_text(j)
+        text, secs = _lever_text(j)
         sr = j.get("salaryRange") or {}
         # PROBED 2026-08-05 on leverdemo: {min, max, currency, interval} where
         # interval is a vendor-specific string ("per-year-salary", "per-hour-wage")
@@ -199,6 +200,7 @@ def fetch_lever(slug: str):
                 **pay,
                 "salary": salary,
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -261,7 +263,7 @@ def fetch_ashby(slug: str):
         loc = j.get("location", "")
         if j.get("isRemote"):
             loc = (loc + " (Remote)").strip()
-        text = clean(j.get("descriptionPlain", ""))
+        text, secs = clean_with_sections(j.get("descriptionPlain", ""))
         comp = j.get("compensation") or {}
         salary = (comp.get("compensationTierSummary") or "").split("•")[0].strip()
         if not salary:
@@ -302,6 +304,7 @@ def fetch_ashby(slug: str):
                 "salary": salary or salary_from_text(text),
                 **_ashby_salary(comp),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -433,7 +436,7 @@ def fetch_workable(slug: str):
         loctext = ", ".join(p for p in (city, state, country) if p)
         if j.get("telecommuting"):
             loctext = (loctext + " (Remote)").strip()
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("title", "") or j.get("full_title", ""),
@@ -485,6 +488,7 @@ def fetch_workable(slug: str):
                 "employment_type": j.get("employment_type", ""),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -1036,7 +1040,7 @@ def search_google_jobs(queries):
                 break
             for j in data.get("jobs_results", []) or []:
                 ext = j.get("detected_extensions") or {}
-                text = clean(j.get("description", ""))
+                text, secs = clean_with_sections(j.get("description", ""))
                 out.append(
                     {
                         "title": j.get("title", ""),
@@ -1091,6 +1095,7 @@ def search_google_jobs(queries):
                         "salary": ext.get("salary") or salary_from_text(text),
                         **vocab.google_salary(ext.get("salary")),
                         "text": text,
+                        "sections": secs,
                         "source": "google_jobs",
                     }
                 )
@@ -1358,9 +1363,10 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
         except Exception:  # noqa: BLE001
             return
         info = data.get("jobPostingInfo") or {}
-        text = clean(info.get("jobDescription", "") or "")
+        text, secs = clean_with_sections(info.get("jobDescription", "") or "")
         if text:
             r["text"] = text
+            r["sections"] = secs
             r["salary"] = r["salary"] or salary_from_text(text)
         # startDate is a real ISO date; prefer it over anything derived from a
         # relative string when the detail call gives us one. THROUGH THE HELPER, so
@@ -1404,11 +1410,14 @@ def _rippling_detail(slug: str, row: dict) -> None:
         # Two HTML blocks: `company` is boilerplate repeated across every role,
         # `role` is the actual posting. Order matters -- role first, so a truncated
         # body keeps the part that describes the job.
-        row["text"] = clean(
+        row["text"], row["sections"] = clean_with_sections(
             " ".join(x for x in (desc.get("role"), desc.get("company")) if x)
         )
     elif isinstance(desc, str):
-        row["text"] = clean(desc)
+        # BOTH branches. An earlier draft wired only the dict-shaped one above, which
+        # would have left every string-shaped Rippling response with a body and no
+        # sections -- a per-source hole nothing at the adapter level would surface.
+        row["text"], row["sections"] = clean_with_sections(desc)
     # Through the helper, so the basis travels with the date. The list endpoint sends
     # no date at all, so this detail call is where a Rippling row gets one -- and
     # setting `posted` directly here left every Rippling row with a date and no
@@ -1518,7 +1527,7 @@ def fetch_teamtailor(slug: str):
         loc = _fmt(first)
         if jp.get("jobLocationType") == "TELECOMMUTE":
             loc = (loc + " (Remote)").strip()
-        text = clean(
+        text, secs = clean_with_sections(
             j.get("content_html", "")
             or (jp.get("description", "") if isinstance(jp, dict) else "")
         )
@@ -1550,6 +1559,7 @@ def fetch_teamtailor(slug: str):
                 "employment_type": jp.get("employmentType") or "",
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -1729,7 +1739,7 @@ def search_remotive(queries, strict: bool = False):
         return []
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("title", ""),
@@ -1756,6 +1766,7 @@ def search_remotive(queries, strict: bool = False):
                 "employment_type": j.get("job_type", ""),
                 "salary": j.get("salary", "") or salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "remotive",
             }
         )
@@ -1776,7 +1787,7 @@ def search_jobicy(queries):
     data = get_json("https://jobicy.com/api/v2/remote-jobs?count=100")
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("jobDescription") or j.get("jobExcerpt", ""))
+        text, secs = clean_with_sections(j.get("jobDescription") or j.get("jobExcerpt", ""))
         out.append(
             {
                 "title": j.get("jobTitle", ""),
@@ -1808,6 +1819,7 @@ def search_jobicy(queries):
                 # 100/100 -- a region, never a city.
                 **stated_scope(j.get("jobGeo")),
                 "text": text,
+                "sections": secs,
                 "source": "jobicy",
             }
         )
@@ -1820,7 +1832,7 @@ def search_arbeitnow(queries):
     for j in data.get("data", []):
         if not j.get("remote"):
             continue
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         jt = j.get("job_types")
         out.append(
             {
@@ -1838,6 +1850,7 @@ def search_arbeitnow(queries):
                 else (jt or ""),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "arbeitnow",
             }
         )
@@ -1850,7 +1863,7 @@ def search_remoteok(queries):
     for j in data:
         if not isinstance(j, dict) or not j.get("position"):
             continue  # first element is legal/attribution metadata
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("position", ""),
@@ -1875,6 +1888,7 @@ def search_remoteok(queries):
                     j.get("salary_min"), j.get("salary_max"), currency="USD"
                 ),
                 "text": text,
+                "sections": secs,
                 "source": "remoteok",
             }
         )
@@ -1998,7 +2012,7 @@ def _himalayas_rows(jobs, out, seen=None):
             if url in seen:
                 continue
             seen.add(url)
-        text = clean(j.get("description") or j.get("excerpt", ""))
+        text, secs = clean_with_sections(j.get("description") or j.get("excerpt", ""))
         regions = j.get("locationRestrictions") or []
         loc = (", ".join(regions) if regions else "") + " (Remote)"
         # The browse lane returns the literal string "name" as companyName on the
@@ -2064,6 +2078,7 @@ def _himalayas_rows(jobs, out, seen=None):
                     j.get("salaryPeriod"),
                 ),
                 "text": text,
+                "sections": secs,
                 "source": "himalayas",
             }
         )
@@ -2162,7 +2177,7 @@ def search_adzuna(queries):
                 break  # a dead page ends this query; other queries still run
             results = data.get("results", [])
             for j in results:
-                text = clean(j.get("description", ""))
+                text, secs = clean_with_sections(j.get("description", ""))
                 loc = j.get("location") or {}
                 city, state, country, is_remote = _adzuna_place(loc.get("area"))
                 out.append(
@@ -2206,6 +2221,7 @@ def search_adzuna(queries):
                         # than being assumed annual, however annual they look.
                         **_adzuna_pay(j),
                         "text": text,
+                        "sections": secs,
                         "source": "adzuna",
                     }
                 )
@@ -2253,7 +2269,7 @@ def search_hn_whoishiring(queries):
 
 def _hn_rows(tree, out: list) -> None:
     for c in tree.get("children", []):
-        text = clean(c.get("text"))
+        text, secs = clean_with_sections(c.get("text"))
         parts = [p.strip() for p in text.split("|")]
         if len(parts) < 2 or not parts[0]:
             continue
@@ -2301,6 +2317,7 @@ def _hn_rows(tree, out: list) -> None:
                 ),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "hn",
             }
         )
@@ -2454,8 +2471,8 @@ def _usajobs_grade(d: dict) -> str | None:
     return f"{plan}-{band}" if plan else band
 
 
-def _usajobs_text(d: dict) -> str:
-    """The whole federal posting, not just its summary.
+def _usajobs_text(d: dict) -> tuple[str, list[dict]]:
+    """The whole federal posting plus its sections, not just its summary.
 
     `JobSummary` averages 305 characters (probed 2026-08-05, n=25) while the content
     a scorer needs sits in sibling fields: MajorDuties 1,692, Evaluations 1,487,
@@ -2472,7 +2489,7 @@ def _usajobs_text(d: dict) -> str:
             v = " ".join(str(x) for x in v if x)
         if v:
             parts.append(str(v))
-    return clean("\n".join(parts))
+    return clean_with_sections("\n".join(parts))
 
 
 def _usajobs_remote(d: dict) -> dict:
@@ -2597,6 +2614,11 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
     for it in result.get("SearchResultItems", []):
         d = it.get("MatchedObjectDescriptor") or {}
         pay = (d.get("PositionRemuneration") or [{}])[0]
+        # HOISTED out of the dict literal below, which is the whole reason this line
+        # exists: `_usajobs_text` returns a pair now, and writing `_usajobs_text(d)[0]`
+        # inline would compile, pass every existing test, and silently discard the
+        # sections for this source alone.
+        _text, _secs = _usajobs_text(d)
         out.append(
             {
                 "title": d.get("PositionTitle", ""),
@@ -2695,7 +2717,8 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     currency="USD",
                     period=pay.get("RateIntervalCode") or pay.get("Description"),
                 ),
-                "text": _usajobs_text(d),
+                "text": _text,
+                "sections": _secs,
                 "source": "usajobs",
             }
         )
@@ -2824,7 +2847,7 @@ def _themuse_rows(results, seen: set, out: list) -> None:
         levels = [
             x.get("name", "") for x in (j.get("levels") or []) if isinstance(x, dict)
         ]
-        text = clean(j.get("contents", ""))
+        text, secs = clean_with_sections(j.get("contents", ""))
         out.append(
             {
                 "title": j.get("name", ""),
@@ -2848,6 +2871,7 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 "employment_type": j.get("type", ""),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "themuse",
             }
         )

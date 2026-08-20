@@ -128,6 +128,20 @@ _CONTRACT_FIELDS = (
     # provenance
     "direct_apply",  # bool -- the url reaches the EMPLOYER, not an aggregator
     "remote",  # bool | None -- DERIVED from remote_type; see _coerce
+    # list[dict] | None -- the posting's own structure: [{type, header, start, end}]
+    # where start/end index THIS record's `text`. `None` means there was no body to
+    # look at; `[]` means we looked and the body carried no headers. Those are
+    # different facts and a consumer must be able to tell them apart.
+    #
+    # THE FIRST CONTRACT FIELD DERIVED WHOLLY BY US -- no vendor sends it, which has
+    # two consequences that otherwise read as violations of this file's own rules.
+    # (1) There is no scalar-to-list guard like `tags` gets below: `tags` needs one
+    # because a real source can send a bare string, and nothing can send a malformed
+    # `sections`. (2) There is no `sections_basis`, though every other derived field
+    # carries a basis -- because the retained raw `header` IS the basis. It is the
+    # employer's own words next to our guess, so a misclassification stays auditable
+    # and fixable in a later release without re-harvesting anything.
+    "sections",
     # dict | None -- the third tier. Fields ONE source sends that no other can, kept
     # verbatim so nothing is lost while the core stays queryable. The promotion rule:
     # a field enters the core contract when TWO OR MORE sources can fill it; a

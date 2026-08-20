@@ -121,6 +121,13 @@ def _nested(r: dict) -> dict:
         "url": r.get("url") or None,
         "direct_apply": r.get("direct_apply"),
         "text": r.get("text") or None,
+        # NO `or None`, and that is not an oversight. `[] or None` is `None`, which
+        # would collapse "we looked and the body had no headers" into "there was no
+        # body" -- the exact two-state distinction this field exists to carry. Every
+        # `or None` above is on a str-typed field where "" and None mean the same
+        # thing; every list- or dict-typed field here already omits it, and `sections`
+        # follows `remote_areas` rather than the line above it.
+        "sections": r.get("sections"),
         "source": r.get("source") or None,
         "sources": sorted(r["sources"]) if isinstance(r.get("sources"), set) else None,
         "source_extra": r.get("source_extra"),

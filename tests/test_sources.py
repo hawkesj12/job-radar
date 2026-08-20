@@ -897,6 +897,51 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
     _assert_contract(out, required=required)
 
 
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_every_adapter_emits_sections_or_honestly_omits_them(name, monkeypatch):
+    """0.9.1 wired `sections` at eighteen body sites across FOUR different call shapes
+    -- a plain assignment, two helpers that return the value, a mutator writing into a
+    caller's dict, and one where the local is a parsing intermediate. A site missed in
+    any of them fails SILENTLY: that source simply carries no structure, forever, and
+    nothing else in the suite would notice.
+
+    `list | None`, not `list`. Three adapters legitimately produce None because they
+    send no body at all -- smartrecruiters' list endpoint, and the workday/rippling list
+    endpoints before their detail calls run. Braintrust is a fourth and a different
+    reason: it SYNTHESIZES its text from the title and skill tags, so there is no vendor
+    markup to read and never will be.
+    """
+    assert name in SAMPLES, f"no SAMPLE payload for adapter {name!r} — add one"
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+
+    if name in sources.DEPTH_ALL:
+        out = sources.DEPTH_ALL[name]("slug")
+    else:
+        out = sources.BREADTH_ALL[name](["AI Engineer"])
+    assert out, f"{name}: produced no row from its own sample payload"
+
+    bodyless = {"smartrecruiters", "workday", "rippling", "braintrust"}
+    for row in out:
+        secs = row.get("sections")
+        assert secs is None or isinstance(secs, list), (
+            f"{name}: sections is {type(secs).__name__}, not list or None"
+        )
+        if name not in bodyless and row.get("text"):
+            assert secs is not None, (
+                f"{name}: has a body but sections is None — a wiring site was missed"
+            )
+        for sec in secs or []:
+            assert set(sec) <= {"type", "header", "start", "end"}, sec
+            assert ("start" in sec) == ("end" in sec), "half a span is not a span"
+
+
 # ── the three adapters added in 0.7.0 ───────────────────────────────────────
 def test_rippling_detail_fills_what_the_list_omits(monkeypatch):
     """The list endpoint has no body, no date and one location. Everything that
@@ -932,7 +977,70 @@ def test_rippling_detail_fills_what_the_list_omits(monkeypatch):
     assert j["employment_type"] == "Salaried, full-time"  # not SALARIED_FT
     # the detail's multi-location array replaces the list's single label
     assert j["location"] == "New York, NY; Remote (Massachusetts, US)"
-    _assert_contract(out, required=REQUIRED_KEYS)
+    # Sections arrive through the DETAIL call, which is why they are asserted here and
+    # not in the all-adapter contract test: that test drives the LIST endpoint, whose
+    # rows carry no body at all, so it exempts rippling and workday by name and could
+    # never see a missed wiring site in either. Un-wiring this branch used to leave the
+    # whole suite green.
+    # `[]`, not None -- and the difference IS the assertion. This fixture's description
+    # is plain text, so "we looked and found no headers" is the right answer; a row that
+    # never reached `clean_with_sections` at all would arrive as None from `_coerce`.
+    # The two-state contract is what makes a missed wiring site visible here.
+    assert j["sections"] == []
+
+
+def test_rippling_string_shaped_description_also_carries_sections(monkeypatch):
+    """`description` arrives as EITHER a dict of two HTML blocks or a bare string, and
+    the two are separate assignments in `_rippling_detail`. An earlier draft of 0.9.1
+    wired only the dict-shaped one, which would have left every string-shaped response
+    with a body and no structure -- silently, for that response shape alone."""
+    listing = [{"uuid": "u1", "name": "AI Engineer", "url": "u", "workLocation": {}}]
+    detail = {
+        # `<p><strong>…</strong></p>` is the real Greenhouse/Rippling heading shape --
+        # the line break comes from `</p>`, since `</strong>` is not a block closer.
+        "description": (
+            "<p><strong>What you'll do</strong></p><p>Build RAG systems.</p>"
+        ),
+        "createdOn": "2023-10-31T10:40:35.194000-07:00",
+    }
+    monkeypatch.setattr(
+        sources, "get_json", lambda url: detail if "/jobs/u1" in url else listing
+    )
+    j = sources.fetch_rippling("acme")[0]
+    assert j["text"] == "What you'll do\nBuild RAG systems."
+    kinds = [s["type"] for s in j["sections"]]
+    assert "responsibilities" in kinds
+
+
+def test_workday_detail_carries_sections_not_just_a_body(monkeypatch):
+    """Same hole as rippling: a Workday body exists only after the per-job detail call,
+    so the list-driven contract test exempts it and cannot catch an un-wired site."""
+    _cfg()
+    # `_wd_path` is what drives the detail call; a row without it is skipped entirely.
+    rows = [
+        {
+            "title": "AI Engineer",
+            "url": "https://x/job/AI_Engineer_R-1",
+            "text": "",
+            "salary": "",
+            "_wd_path": "/job/AI_Engineer_R-1",
+        }
+    ]
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url, *a, **k: {
+            "jobPostingInfo": {
+                "jobDescription": (
+                    "<p><strong>Responsibilities</strong></p><p>Build systems.</p>"
+                ),
+                "startDate": "2026-08-01",
+            }
+        },
+    )
+    sources._workday_add_details("https://x", rows)
+    assert rows[0]["text"] == "Responsibilities\nBuild systems."
+    assert [s["type"] for s in rows[0]["sections"]] == ["responsibilities"]
 
 
 def test_rippling_survives_a_detail_call_that_fails(monkeypatch):
@@ -2429,7 +2537,9 @@ def test_ashby_salary_never_reads_the_equity_component():
 def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
     """Lever and USAJOBS both put a tenth of the posting in the obvious field and the
     rest in siblings, so reading the obvious one fed the scorer a fragment."""
-    lever = sources._lever_text(
+    # Both helpers return (text, sections) as of 0.9.1 -- the body still has to carry
+    # every field, which is what this test is about.
+    lever, _ = sources._lever_text(
         {
             "descriptionPlain": "Intro.",
             "lists": [{"text": "Requirements", "content": "<li>Python</li>"}],
@@ -2439,7 +2549,7 @@ def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
     assert "Intro." in lever and "Requirements" in lever and "Python" in lever
     assert "Why us." in lever
 
-    federal = sources._usajobs_text(
+    federal, _ = sources._usajobs_text(
         {
             "UserArea": {
                 "Details": {

@@ -63,6 +63,23 @@ def test_the_machine_feed_carries_the_whole_contract():
     )
 
 
+def test_an_empty_sections_list_survives_the_wire_as_an_empty_list():
+    """`or None` on the sections line of `emit._nested` collapses `[]` into `null` and
+    destroys the two-state contract: `[]` means we read the body and it had no headers,
+    `null` means there was no body. A consumer cannot tell those apart afterwards.
+
+    This assertion exists because that mutation passed the ENTIRE suite. The six-line
+    comment on that line was the only thing protecting it, and a comment is not a gate.
+    Every other `or None` in `_nested` is on a str-typed field, where "" and None do
+    mean the same thing; `sections` follows `remote_areas`, which omits it.
+    """
+    assert emit._nested({"sections": []})["sections"] == []
+    assert emit._nested({})["sections"] is None
+    assert emit._nested({"sections": [{"type": None, "header": "x"}]})["sections"] == [
+        {"type": None, "header": "x"}
+    ]
+
+
 def test_a_real_row_survives_the_whole_pipeline_to_json():
     """End to end on the values, not just the key names: a harvested posting, coerced
     at the real boundary, emitted, and read back as JSON the way a consumer would."""
