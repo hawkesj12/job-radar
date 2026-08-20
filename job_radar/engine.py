@@ -20,6 +20,7 @@ from .sources import (
     DIRECT_APPLY_SOURCES,
     DEPTH_ALL,
     DEPTH_EXTRA_FIELDS,
+    _is_direct_apply,
     enabled_breadth,
     enabled_depth,
 )
@@ -626,10 +627,29 @@ def _coerce(p: dict) -> dict:
     # throwing it away. A DEPTH source IS the employer's applicant-tracking system,
     # so its link is direct by construction; an aggregator serves a redirect.
     # google_jobs decides for itself (see _best_apply_link) and is left alone here.
+    # The URL is now consulted too, and the OR is the whole design. Deciding per SOURCE
+    # alone labelled the SAME HOST differently depending on which adapter found it:
+    # `jobs.ashbyhq.com` is direct on 1,202 rows and not-direct on 10, the only
+    # difference being that hn carried the second set. 92 rows across the corpus sit on
+    # an ATS or the employer's own domain while reported not-direct -- every one of them
+    # hn, because it is the only source carrying a link the poster typed.
+    #
+    # MONOTONE, NEVER REPLACING, and this is not a stylistic preference. Swapping the
+    # source rule for the URL rule DEMOTES 2,638 rows in a 67,481-row production store
+    # (eyecare-partners 286, esri 204, zipline 201, okta 80, buckner 34) against 85
+    # gained -- 31:1, and they do not drop cleanly, they rot: the consumer's intake
+    # rejects them on every harvest while the stale rows stay served. `_is_direct_apply`
+    # is positive-evidence-only and blind to a 4-character company name, so it is a
+    # rescue, not an oracle. jobfitr reached the same conclusion independently and wrote
+    # it down at its `store.py` -- "WHY _is_direct_apply IS NOT THE ORACLE".
     if p.get("direct_apply") is None and p.get("source"):
-        p["direct_apply"] = (
-            p["source"] in DEPTH_ALL or p["source"] in DIRECT_APPLY_SOURCES
+        by_source = p["source"] in DEPTH_ALL or p["source"] in DIRECT_APPLY_SOURCES
+        # A link the ADAPTER recovered is excluded: it must earn the flag rather than
+        # inherit it from host shape. Of 5 such rows measured, 4 are 404/410.
+        by_url = not p.get("_url_recovered") and _is_direct_apply(
+            str(p.get("url") or ""), str(p.get("company") or "")
         )
+        p["direct_apply"] = by_source or by_url
 
     p["harvested_at"] = p.get("harvested_at") or now_et()
     return p
@@ -1075,4 +1095,5 @@ def _harvest(cfg, watchlist_path, companies):
         r.pop("_blk", None)
         r.pop("_nt", None)
         r.pop("_ref", None)  # the stashed job_ref — same reasoning as the two above
+        r.pop("_url_recovered", None)  # adapter-internal; read once by _coerce
     return rows, discovered, errors

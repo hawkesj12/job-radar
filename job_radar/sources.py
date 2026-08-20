@@ -981,6 +981,19 @@ _ATS_HOSTS = (
     "ultipro.com",
     "adp.com",
     "oraclecloud.com",
+    # ADD THESE BEFORE TIGHTENING THE EMPLOYER-DOMAIN BRANCH BELOW, NOT AFTER. All five
+    # rows they cover were already being reported direct -- by ACCIDENT, through the old
+    # substring test matching the company name in an ATS SUBDOMAIN
+    # (`elucid.applytojob.com` contains `elucid`). Naming the platforms moves them onto
+    # the intentional branch. Reversed, the tightening lands first, silently drops
+    # 6 measured rows, and every gate stays green while it happens.
+    "applytojob.com",  # JazzHR
+    "welcomekit.co",
+    "careers-page.com",
+    # `personio.de` is listed above and does NOT match `friendlycaptcha.jobs.personio.com`.
+    # The same vendor under a second TLD -- the gap that survives an audit precisely
+    # because a reader scanning this tuple sees "Personio" and ticks it off.
+    "personio.com",
 )
 
 
@@ -1026,9 +1039,27 @@ def _is_direct_apply(url: str, company: str = "") -> bool:
     from .discover import _norm_name
 
     token = _norm_name(company).replace(" ", "")
+    # THE REGISTRABLE DOMAIN, not any substring of the host. `bitpay.applytojob.com`
+    # matched on `bitpay` and read as BitPay's own careers page -- the company name was
+    # the ATS's SUBDOMAIN, and a substring test cannot tell those apart. 6 rows measured;
+    # every one is a real ATS platform, so they were right BY ACCIDENT rather than by
+    # principle: the identical rule promotes `nike.some-aggregator.com`. No such row
+    # exists in the corpus, so the hole was latent, not demonstrated -- and it is closed
+    # here rather than after something lands in it.
+    #
+    # The four platforms are on _ATS_HOSTS above BECAUSE of this line. Adding them there
+    # is not a separate improvement; it is the half of this change that keeps it free.
+    #
+    # KNOWN RESIDUAL, and do not "fix" it by allowlisting: shared hosting where the
+    # SUBDOMAIN is the owner -- github.io, netlify.app, vercel.app, pages.dev -- is
+    # invisible to this. `joulent.github.io` is one row in 7,545 and stays unrecognised.
+    # Allowlisting github.io would certify every project page on GitHub as a direct
+    # apply, which is a far worse trade than one missed employer.
+    labels = host.split(".")
+    registrable = ".".join(labels[-2:]) if len(labels) >= 2 else host
     # 5 chars, because short tokens produce nonsense matches -- a company called
     # "Ace" would claim every host containing "ace", which is most of them.
-    return len(token) >= 5 and token in re.sub(r"[^a-z0-9]", "", host)
+    return len(token) >= 5 and token in re.sub(r"[^a-z0-9]", "", registrable)
 
 
 def _is_aggregator(url: str) -> bool:
@@ -2541,8 +2572,13 @@ def _slug_owns_company(url: str, company: str) -> bool:
     return token[:6] in slug or slug[:6] in token
 
 
-def _hn_url(raw: str, company: str, text: str, item_id) -> str:
+def _hn_url(raw: str, company: str, text: str, item_id) -> tuple[str, bool]:
     """The apply link in an HN comment, read from the MARKUP rather than the prose.
+
+    Returns `(url, recovered)`. `recovered` is True only when the link came out of an
+    href this function went looking for -- the caller uses it to withhold a
+    `direct_apply` promotion, because a link WE dug up must earn that flag rather than
+    inherit it from host shape. See the note in `_hn_rows` where it is stashed.
 
     HN renders a long link as `<a href="FULL">https://boards.greenhouse.io/acme/j...</a>`.
     `clean` strips the tag, keeps the DISPLAY text and throws the href away -- so the
@@ -2567,14 +2603,14 @@ def _hn_url(raw: str, company: str, text: str, item_id) -> str:
         if not (parsed.path.strip("/") or parsed.query):
             continue  # a bare homepage is not a posting, and we already have one
         if _is_direct_apply(href, company) and _slug_owns_company(href, company):
-            return href
+            return href, True
     # A truncated URL is a KNOWN 404, so the thread link -- which reaches the comment
     # holding the posting -- beats it. Not a promotion: `_is_direct_apply` reads False
     # on news.ycombinator.com, so these rows stay honestly not-direct and stay out of a
     # direct-only consumer's intake. 15 of the 26 unrecovered rows are provably dead.
     if prose and ("..." in prose or "…" in prose):
-        return thread
-    return prose or thread
+        return thread, False
+    return (prose or thread), False
 
 
 def _hn_location(segment: str) -> str:
@@ -2616,6 +2652,7 @@ def _hn_rows(tree, out: list) -> None:
         # populated. 4 of 196 comments split short; 0 lose a location today, and this
         # keeps that true for a thread that formats differently next month.
         loc_parts = head_parts if len(head_parts) > 2 else parts
+        hn_url, hn_recovered = _hn_url(c.get("text") or "", parts[0], text, c.get("id"))
         # SCAN the segments, do not index them. The convention is loose: measured
         # across 174 comments in one thread, the remote token lands in slot 2 (62x),
         # slot 3 (34x), slot 1 (18x) and slot 4 (7x) -- "PostHog | Full-Time |
@@ -2641,7 +2678,15 @@ def _hn_rows(tree, out: list) -> None:
                 "location": " ".join(
                     t for t in (_hn_location(p) for p in loc_parts[2:4]) if t
                 ),
-                "url": _hn_url(c.get("text") or "", parts[0], text, c.get("id")),
+                "url": hn_url,
+                # A link this adapter RECOVERED does not earn `direct_apply` from host
+                # shape. Measured: of 5 rows the ATS-platform additions newly reach, 4
+                # are 404/410 -- `applytojob.com` postings expire fast -- so promoting on
+                # the host would assert "you can apply here" about a dead posting. That is
+                # the same lie as the `direct_apply=False` this release fixes, pointed the
+                # other way, and manufactured by the fix for it. Transient key, popped in
+                # engine._consume alongside _blk/_nt.
+                "_url_recovered": hn_recovered,
                 **posted_from(c.get("created_at")),
                 "department": "",
                 "remote_type": rtype,

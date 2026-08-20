@@ -2423,6 +2423,97 @@ def test_direct_apply_asks_whether_you_can_actually_apply_there(monkeypatch):
         assert r["direct_apply"] is want, f"{src} -> {r['direct_apply']}"
 
 
+def test_direct_apply_reads_the_url_too_and_can_only_ever_raise():
+    """The test above passes NO url, so it exercises only the source branch and cannot
+    see that the URL was ignored -- which is how `direct_apply` stayed per-SOURCE while
+    its own docstring said per-URL. `jobs.ashbyhq.com` is direct on 1,202 rows and
+    not-direct on 10, the only difference being that hn carried the second set.
+
+    MONOTONE IS THE WHOLE DESIGN. Replacing the source rule with the URL rule demotes
+    2,638 rows in a 67,481-row production store against 85 gained -- 31:1, all genuine
+    employer careers pages, and they rot rather than drop: intake rejects them every
+    harvest while the stale rows stay served."""
+    from job_radar import engine
+
+    # RAISES: hn is not a depth source, but this link reaches the employer's ATS.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "hn",
+                "url": "https://jobs.ashbyhq.com/runway-ml/c3e",
+            }
+        )["direct_apply"]
+        is True
+    )
+
+    # NEVER LOWERS: a depth source stays direct even on a host the URL rule cannot read.
+    # This is the 2,638 in one assertion -- `okta` is 4 characters, so the employer-domain
+    # branch is structurally blind to Okta's own careers page.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "greenhouse",
+                "company": "Okta",
+                "url": "https://www.okta.com/company/careers/opportunity/8139696",
+            }
+        )["direct_apply"]
+        is True
+    )
+    # ...and an aggregator with no positive evidence stays false.
+    assert (
+        engine._coerce(
+            {"title": "x", "source": "remoteok", "url": "https://remoteok.com/l/123"}
+        )["direct_apply"]
+        is False
+    )
+
+    # A RECOVERED link does not promote. Of 5 rows the ATS-platform additions newly
+    # reach, 4 are 404/410 -- promoting on host shape would assert "you can apply here"
+    # about a dead posting, which is the defect this release fixes, pointed the other way.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "hn",
+                "url": "https://jobs.ashbyhq.com/runway-ml/c3e",
+                "_url_recovered": True,
+            }
+        )["direct_apply"]
+        is False
+    )
+
+
+def test_the_company_name_can_be_the_ats_subdomain():
+    """`bitpay.applytojob.com` matched on `bitpay` and read as BitPay's own careers page.
+    The company name was the ATS's SUBDOMAIN and a substring test cannot tell those apart.
+
+    All 6 measured rows were real ATS platforms, so they were right BY ACCIDENT -- the
+    identical rule promotes `nike.some-aggregator.com`. The platforms are named in
+    `_ATS_HOSTS` so those rows keep their verdict through the INTENTIONAL branch, which
+    is why that addition and this tightening are one change and not two."""
+    from job_radar.sources import _ATS_HOSTS, _is_direct_apply
+
+    # Right for the right reason now: the platform is named, not the subdomain guessed.
+    assert "applytojob.com" in _ATS_HOSTS
+    assert _is_direct_apply("https://bitpay.applytojob.com/apply/scufGKyASo/", "BitPay")
+    # The latent hole, closed: an employer-named subdomain on a host nobody vouched for.
+    assert not _is_direct_apply("https://nike.some-aggregator.com/jobs/1", "Nike Inc")
+    # A real careers page on the employer's own registrable domain still passes.
+    assert _is_direct_apply("https://careers.acmehealth.com/jobs/1", "Acme Health Inc")
+    # `personio.de` was listed while the same vendor's .com was not -- the gap that
+    # survives an audit because a reader sees "Personio" in the tuple and ticks it off.
+    assert _is_direct_apply(
+        "https://friendlycaptcha.jobs.personio.com/job/2686399", "Friendly Captcha"
+    )
+    # ACCEPTED RESIDUAL. Shared hosting where the SUBDOMAIN is the owner is invisible to
+    # a registrable-domain match. 1 row in 7,545. Allowlisting github.io would certify
+    # every project page on GitHub as a direct apply -- a far worse trade, so this stays
+    # failing ON PURPOSE and a future reader must not "fix" it.
+    assert not _is_direct_apply("https://joulent.github.io/careers/", "Joulent")
+
+
 def test_google_jobs_decides_direct_apply_per_row(monkeypatch):
     """_best_apply_link already prefers the first non-aggregator option to CHOOSE the
     url — it just discarded the reasoning. A row whose only option is LinkedIn is not

@@ -267,6 +267,62 @@ is basic…` — and `util.clean` flattens that tag into the same text run. By t
   empty**, so nothing recoverable is lost _today_. That conditional stops being true the
   day the owner applies to something.
 
+- **`direct_apply` was decided per SOURCE and never looked at the URL, so the same host
+  carried opposite verdicts.** `jobs.ashbyhq.com` is direct on 1,202 rows and not-direct on
+  10 — the only difference being that hn found the second set. 92 rows corpus-wide sit on a
+  known ATS or the employer's own domain while reported not-direct, and **every one is hn**,
+  because it is the only source carrying a link a human typed. Every other breadth
+  aggregator serves its own URL, so per-source and per-URL agree there. In production all
+  172 hn rows are frozen out of the consumer's intake, so this is a **resurrection** of 85
+  rows rather than a relabel.
+
+  `engine._coerce` now reads `source_rule OR _is_direct_apply(url, company)`.
+
+  **Monotone, never replacing — this is the design, not a style choice.** Swapping the
+  source rule for the URL rule **demotes 2,638 rows in a 67,481-row production store**
+  (eyecare-partners 286, esri 204, zipline 201, okta 80, buckner 34) to gain 85 — **31:1**,
+  every one a genuine employer careers page. And they do not drop cleanly, they **rot**:
+  intake rejects them on every harvest while the stale rows stay served.
+  `_is_direct_apply` is positive-evidence-only and structurally blind to a company name
+  under 5 characters, so it is a rescue, not an oracle. The downstream consumer reached the
+  same conclusion independently and recorded it in its own source as _"WHY
+  `_is_direct_apply` IS NOT THE ORACLE"_.
+
+  **A link the adapter RECOVERED does not earn the flag from host shape.** Of the 5 rows
+  the ATS-platform additions below newly reach, **4 are 404/410** — `applytojob.com`
+  postings expire fast. Promoting on the host would assert "you can apply here" about a
+  dead posting: the same lie this entry fixes, pointed the other way and manufactured by
+  the fix for it. Only a link the poster typed can promote.
+
+  **The test that guarded this could not see it.** Its docstring says the question is
+  _"can you complete an application from this URL"_ and _"not is it a depth adapter"_ — and
+  all six of its cases call `_coerce` **with no `url` key at all**, so it exercised only
+  the branch that was wrong. A new test passes URLs; all six original assertions still pass
+  untouched, because `_is_direct_apply("")` is `False` and the OR is a no-op without one.
+
+- **The company name can be the ATS's SUBDOMAIN, and a substring test cannot tell.**
+  `bitpay.applytojob.com` matched on `bitpay` and read as BitPay's own careers page. All 6
+  measured rows are real ATS platforms, so they were right **by accident** — the identical
+  rule promotes `nike.some-aggregator.com`. No such row exists in the corpus, so the hole
+  was **latent, not demonstrated**, and is closed before something lands in it.
+  `_is_direct_apply` now matches the **registrable domain**, not any substring of the host.
+
+  **`applytojob.com` (JazzHR), `welcomekit.co`, `careers-page.com` and `personio.com` are
+  added to `_ATS_HOSTS` as part of the same change, and the order is load-bearing.** Those
+  five rows keep their verdict through the _intentional_ branch. Tightening first and
+  adding second silently drops 6 measured rows with every gate green — they are one change,
+  not two cheap ones. `personio.de` was already listed and does not match
+  `friendlycaptcha.jobs.personio.com`: the same vendor under a second TLD, which is the gap
+  that survives an audit precisely because a reader scanning the tuple sees "Personio" and
+  ticks it off.
+
+  **One accepted regression, named so nobody "fixes" it.** Shared hosting where the
+  _subdomain_ is the owner — `github.io`, `netlify.app`, `vercel.app`, `pages.dev` — is
+  structurally invisible to a registrable-domain match. `joulent.github.io` is **1 row in
+  7,545** and stays unrecognised. Allowlisting `github.io` would certify every project page
+  on GitHub as a direct apply, which is a far worse trade than one missed employer. The
+  test asserts the failure on purpose.
+
 - **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
   that describes the query rather than the posting.** Google's `location` is `Anywhere` on
   every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city
