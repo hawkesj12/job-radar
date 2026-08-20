@@ -1293,6 +1293,29 @@ def test_two_adjacent_bold_runs_are_two_headings():
     ]
 
 
+def test_a_bolded_value_after_a_bolded_label_is_not_a_heading():
+    """The cost of treating two adjacent bold runs as two headings, paid down.
+
+    The relaxation is right for `<strong>Key responsibilities</strong><strong><br>
+    </strong>` and wrong the moment an employer bolds a label AND its value: this
+    verbatim affirm compensation table otherwise yields sections headed "2", "$16,000-
+    $24,000" and "$5,000", and databricks' metadata header yields one headed a
+    recruiter's personal name. Two employers, two unrelated block types -- a shape, not
+    one template.
+
+    The discriminator is the colon rule at the second boundary, not a new idea: inside a
+    leaf a bold is a heading only if it terminates its label; at an adjacency, only if
+    the bold BEFORE it did not.
+    """
+    _text, secs = util.clean_with_sections(
+        "<p><strong>Equity grade: </strong><strong>2<br></strong>"
+        "<strong>New hire equity: </strong><strong>$16,000-$24,000<br></strong></p>"
+    )
+    assert [s["header"] for s in secs] == ["Equity grade:", "New hire equity:"], (
+        "a bolded value was promoted to a section heading"
+    )
+
+
 def test_a_heading_with_no_letter_or_digit_is_not_a_heading():
     """275 sections corpus-wide were headed by ".", ":", "," or ">>" -- an employer
     bolding a separator. No convention makes that a heading, and a consumer rendering

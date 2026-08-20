@@ -52,8 +52,12 @@ sponsor visas!`, 487 of 487 postings at one employer) and took `eeo_legal` cover
   two headings (160 occurrences across 52 of 2,752 bodies, 9 of 11 vendors), which is
   correct for `<h2><strong>Key responsibilities</strong><strong><br></strong></h2>` and
   wrong for a bolded label followed by a bolded value — `Equity grade:` → `2`,
-  `Recruiter:` → a recruiter's name. 94 sections on the live corpus. A narrower rule was
-  prototyped and dropped: it buys 26 sections for a third clause.
+  `Recruiter:` → a recruiter's personal name. That second case is now handled by the
+  colon rule applied at the SECOND boundary: a bold is a heading only if the bold before
+  it did not terminate a label. Not a third clause — one idea in two places. **68
+  sections still read a value as a heading**, down from 94, with the typed-section count
+  unchanged at 13,925 and every other defect metric flat on two corpora that share no
+  board.
 
 - **`employment_type` is read from vendor metadata by VALUE, not by key name — 1,558
   rows `[local 94-board harvest, 0.9.0]`, and 8,239 rows across 264 employers `[live

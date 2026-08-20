@@ -338,8 +338,29 @@ def split(body: str) -> list[tuple[str | None, str, str]]:
                 marks.append((m.start(), m.end(), head))
             continue
         head, is_heading = _header_at(body, m)
-        if head and is_heading:
-            marks.append((m.start(), m.end(), head))
+        if not (head and is_heading):
+            continue
+        # A BOLD LABEL'S BOLD VALUE IS NOT A HEADING. Two adjacent bold runs are two
+        # headings often enough to be the rule (`<h2><strong>Key responsibilities
+        # </strong><strong><br></strong></h2>`), but an employer that bolds a label AND
+        # its value produces `Equity grade:` followed by a section headed `2`, and
+        # `Recruiter:` followed by one headed a recruiter's personal name. Two boards,
+        # two employers, two unrelated block types (a compensation table and a metadata
+        # header), so it is a shape rather than one template.
+        #
+        # This is not a third rule -- it is the colon rule at the second boundary. Inside
+        # a leaf, a bold is a heading only if it terminates its label; at an adjacency, a
+        # bold is a heading only if the bold BEFORE it did not. Measured: 94 -> 68 such
+        # sections on 2,712 live bodies, with the typed-section count unchanged at 13,925
+        # and every other defect metric flat, on both this corpus and a 910-body one that
+        # shares no board with it.
+        if (
+            marks
+            and marks[-1][2].rstrip().endswith(":")
+            and not body[marks[-1][1] : m.start()].strip()
+        ):
+            continue
+        marks.append((m.start(), m.end(), head))
     if not marks:
         return []
     out: list[tuple[str | None, str, str]] = []
