@@ -1368,6 +1368,80 @@ def test_usajobs_employer_is_not_a_category(monkeypatch):
     assert sources._usajobs_place(None)["state"] is None
 
 
+def test_lever_reads_the_html_body_and_promotes_its_own_list_headings(monkeypatch):
+    """The Ashby defect, one adapter over, and missed when Ashby's was fixed: this read
+    `descriptionPlain`/`additionalPlain`, so `sections` was `[]` on 122 of 135 Lever
+    rows. Lever also labels each `lists[]` entry with its own heading, which the adapter
+    appended as bare prose -- throwing away structure the vendor handed us, then failing
+    to find it again.
+
+    Asserted POSITIONALLY, on headings the plain fields do not contain, and against the
+    NEIGHBOURING section's prose: a wrong-span bug survives every string-identity check
+    while pointing at the wrong block, and one shipped here before.
+    """
+    payload = [
+        {
+            "text": "Applied AI Engineer",
+            "hostedUrl": "https://jobs.lever.co/acme/1",
+            "categories": {"location": "Remote"},
+            # HTML and plain are BOTH sent; only the first carries structure.
+            "description": "<div><strong>A World-Changing Company</strong></div>",
+            "descriptionPlain": "A World-Changing Company",
+            "lists": [
+                {
+                    "text": "What We Require",
+                    "content": "<li>Three years of Python.</li>",
+                },
+                {
+                    "text": "What We Value",
+                    "content": "<li>Ability to adjust quickly.</li>",
+                },
+            ],
+            "additional": "<div><strong>Benefits</strong> Health cover.</div>",
+            "additionalPlain": "Benefits Health cover.",
+        }
+    ]
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_lever("acme")
+
+    headers = [s["header"] for s in row["sections"] if s.get("header")]
+    assert "What We Require" in headers and "What We Value" in headers, (
+        f"the vendor's own list headings did not become sections. got {headers!r}"
+    )
+    # PINS THE FIELD CHOICE, not just the list wrapping. This heading is bold in
+    # `description` and flat prose in `descriptionPlain`, so it is the only assertion
+    # here that fails when the adapter reads the plain field again -- the list headings
+    # survive either way, which made an earlier version of this test pass against the
+    # very mutation it exists to catch.
+    assert "A World-Changing Company" in headers, (
+        f"read the plain intro -- a markup-only heading is missing. got {headers!r}"
+    )
+    assert "Benefits" in headers, "read `additionalPlain` -- its heading is missing"
+    sec = next(s for s in row["sections"] if s.get("header") == "What We Require")
+    span = row["text"][sec["start"] : sec["end"]]
+    assert "Three years of Python." in span
+    assert "Ability to adjust quickly." not in span, "span points at the next section"
+    assert "<li>" not in row["text"] and "<strong>" not in row["text"]
+
+
+def test_lever_falls_back_to_plain_when_the_vendor_sends_no_html(monkeypatch):
+    """Reading the HTML field ALONE would silently empty the body for an employer who
+    fills only the plain one -- `""` is a legal value, so nothing raises and the row
+    ships with no description at all. Same safety net as Ashby's."""
+    payload = [
+        {
+            "text": "Applied AI Engineer",
+            "hostedUrl": "https://jobs.lever.co/acme/1",
+            "categories": {"location": "Remote"},
+            "descriptionPlain": "We build things.",
+            "additionalPlain": "Health cover.",
+        }
+    ]
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_lever("acme")
+    assert "We build things." in row["text"] and "Health cover." in row["text"]
+
+
 def test_lever_workplace_type_is_read_not_inferred():
     assert sources._lever_remote("remote")["remote_type"] == "remote"
     # hybrid is now EXPRESSIBLE. It used to collapse to `remote: False`, which reads

@@ -149,13 +149,33 @@ def _lever_text(j: dict) -> tuple[str, list[dict]]:
     (2,279 chars), and the closing sits in `additionalPlain` (712). Reading only the
     first field fed the scorer a third of each posting, so a role whose skills were
     all in the Requirements list scored as though it had none.
+
+    HTML FIRST, PLAIN AS THE FALLBACK -- the same correction Ashby got in 0.9.0, one
+    adapter over, and missed here. A header exists only in markup, so reading the
+    `*Plain` variants meant this adapter could never produce a section: `sections: []`
+    on 122 of 135 rows `[local 94-board harvest, 0.9.0]`. Worse, `lists[].text` IS the
+    vendor's own section heading -- Lever hands us the structure in a labelled field --
+    and appending it as bare prose threw that structure away and then failed to find it
+    again. Wrapping it in a heading tag is not a heuristic; it is transcribing what the
+    source said. Measured `[live api.lever.co, 4 boards, 489 postings, 2026-08-20]`:
+    rows with no sections 471 -> 1, typed sections 1 -> 1,336, 0 unresolved spans.
+
+    THE COST, because it is real: `text` changes on every Lever row. Median length
+    7,286 -> 7,304 on palantir (HTML drops inline URLs and bullet markers the plain
+    field spells out, the same trade Ashby took). Fit scores move on 7 of 489 postings,
+    range -2..+3, mean -0.29 -- so 98.6% are byte-identical in score.
+
+    `or`, not a bare swap: a body of "" is a legal value and nothing raises on it, so
+    an employer who fills only the plain field would silently lose its whole posting.
     """
-    parts = [j.get("descriptionPlain") or j.get("description", "")]
+    parts = [j.get("description") or j.get("descriptionPlain") or ""]
     for sec in j.get("lists") or []:
         if isinstance(sec, dict):
-            parts.append(sec.get("text") or "")
+            head = str(sec.get("text") or "").strip()
+            if head:
+                parts.append(f"<h3>{head}</h3>")
             parts.append(sec.get("content") or "")
-    parts.append(j.get("additionalPlain") or "")
+    parts.append(j.get("additional") or j.get("additionalPlain") or "")
     return clean_with_sections("\n".join(str(x) for x in parts if x))
 
 

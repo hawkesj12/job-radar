@@ -25,6 +25,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Lever reads the markup body and promotes its own list headings — `sections` on 488
+  of 489 postings, up from 13 of 135.** This adapter read `descriptionPlain` and
+  `additionalPlain`, so it could never produce a section: a header exists only in
+  markup. It is the same defect Ashby had, one adapter over, missed when Ashby's was
+  fixed in 0.9.0. Lever also labels every `lists[]` entry with its own heading —
+  `{text: "What We Require", content: "<li>…"}` — and the adapter appended that label as
+  bare prose, discarding structure the vendor states outright and then failing to find
+  it again. Wrapping it in a heading tag transcribes the source rather than guessing at
+  it. Measured `[live api.lever.co, 4 boards, 489 postings, 2026-08-20]`: rows with no
+  sections 471 → 1, typed sections 1 → 1,336, 0 unresolved spans.
+
+  **`text` changes on every Lever row**, which is the real cost: median 7,286 → 7,304
+  chars on palantir, because the HTML body drops inline URLs and bullet markers the
+  plain field spells out — the same trade Ashby took. **Fit scores are unchanged on 482
+  of 489 postings**; the 7 that move span −2 to +3, mean −0.29. The `or` fallbacks are
+  load-bearing: an employer who fills only the plain field would otherwise ship with an
+  empty body, silently, because `""` is a legal value and nothing raises.
+
 - **Only a HEADING starts a section — inline emphasis inside a sentence no longer does.**
   0.9.0 promoted every `<strong>`/`<b>` it found, anywhere. So
   `...leverages state-of-the-art <strong>computer vision, deep learning, and generative
