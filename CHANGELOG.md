@@ -27,6 +27,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `None`-defaulted. Without it a 500-character excerpt and a 6,870-character description
   are indistinguishable in the record, and 10.6% of production rows are excerpts.
 
+- **Ashby postings now carry every office they name.** `secondaryLocations` is a
+  structured per-place array Ashby has always sent — populated on **422 of 1,730 live
+  postings (24.4%)**, each entry carrying its own `addressLocality` / `addressRegion` /
+  `addressCountry` — in a response the adapter already fetched. `fetch_ashby` never read
+  it (`grep` returned zero hits), so Ashby emitted no `locations` key and the engine fell
+  back to splitting the display string, which on this source names a single place: a
+  posting open in three offices reported one. Verified live after the change — **203 of
+  906 postings now emit a real multi-place list**, up to six entries. The nested `state`
+  is canonicalized in the adapter, because `_coerce` applies the US-state-is-a-code rule
+  to the scalar only and builds `locations[]` only when an adapter left it `None`.
+
+  Every other geography fix in this release parses a display string harder; this one
+  stops parsing and reads the array. **No per-place url** — the entries carry an address
+  and nothing else, which is the vendor's shape, not an omission here.
+
 - **`seniority_raw`** — a new record field holding the vendor's level string verbatim,
   the partner `employment_type_raw` has had since 0.7.0. `None` on the `title` basis,
   because nobody quoted anything there. Additive and `None`-defaulted.

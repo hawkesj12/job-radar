@@ -2568,6 +2568,49 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
     assert remote_scope("Worldwide") == ([], None)
 
 
+def test_ashby_secondary_locations_become_the_locations_list():
+    """Ashby ships a structured per-place array and the adapter used to ignore it.
+
+    `secondaryLocations` is populated on 422 of 1,730 live postings (24.4%) and carries
+    a full addressLocality / addressRegion / addressCountry per entry, in a response
+    already fetched. Without it Ashby emitted no `locations` key at all and `_coerce`
+    fell back to splitting the DISPLAY string -- which on this source names one place,
+    so a posting open in three offices reported one.
+
+    The nested `state` is canonicalized HERE because nothing downstream does it:
+    `_coerce` applies the US-state-is-a-code rule to the scalar only, and builds
+    `locations[]` only when an adapter left it None.
+    """
+    from job_radar.sources import _ashby_locations
+
+    def addr(city, region, country):
+        return {
+            "postalAddress": {
+                "addressLocality": city,
+                "addressRegion": region,
+                "addressCountry": country,
+            }
+        }
+
+    got = _ashby_locations(
+        {
+            "location": "San Francisco",
+            "address": addr("San Francisco", "California", "United States"),
+            "secondaryLocations": [
+                {"location": "Toronto", "address": addr("Toronto", "Ontario", "Canada")},
+                {"location": "Seattle", "address": addr("Seattle", "Washington", "United States")},
+            ],
+        },
+        "u",
+    )
+    assert [e["raw"] for e in got] == ["San Francisco", "Toronto", "Seattle"]
+    # a US subdivision is a CODE, matching the scalar rule; a non-US one keeps its name
+    assert [e["state"] for e in got] == ["CA", "Ontario", "WA"]
+    assert {e["url"] for e in got} == {"u"}
+    # one place is not a list -- `_coerce` owns the single-place shape
+    assert _ashby_locations({"location": "Berlin", "address": None}, "u") is None
+
+
 def test_ashby_region_that_is_the_country_repeated_is_dropped():
     """A vendor putting the country in `addressRegion` is not stating a subdivision.
 

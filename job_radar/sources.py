@@ -26,7 +26,14 @@ from zoneinfo import ZoneInfo
 from . import config
 from . import iso3166
 from . import vocab
-from .vocab import country_code, remote_type, salary, salary_period, split_place
+from .vocab import (
+    country_code,
+    remote_type,
+    salary,
+    salary_period,
+    split_place,
+    us_state_code,
+)
 from .util import (
     NET_ERRORS,
     age_int,
@@ -298,6 +305,59 @@ def _ashby_salary(comp: dict) -> dict:
     return salary()
 
 
+def _ashby_locations(j: dict, url: str) -> list[dict] | None:
+    """Ashby `secondaryLocations[]` + the primary address -> the `locations` list.
+
+    ASHBY SHIPS A STRUCTURED PER-PLACE ARRAY AND THIS ADAPTER NEVER READ IT. Measured
+    on a live probe of 8 boards (1,730 postings): 422 -- 24.4% -- carry a populated
+    `secondaryLocations`, each entry an `{location, address.postalAddress}` pair with
+    its own addressLocality / addressRegion / addressCountry. It arrives in a response
+    already fetched, so reading it costs nothing.
+
+    Without this, Ashby emitted no `locations` key at all and `engine._coerce` fell
+    back to splitting the DISPLAY string -- which on this source is a single place, so
+    a posting open in three offices reported one. Every other fix in this series parses
+    a display string harder; this one stops parsing and reads the array.
+
+    The primary address leads, because `location` is the posting's own headline place
+    and the secondaries are explicitly secondary.
+
+    NO PER-PLACE URL, and that is the vendor's doing rather than an omission here:
+    the entries carry an address and nothing else, so `url` is the posting's url on
+    every entry -- the same as every other adapter that builds this list.
+    """
+
+    def entry(raw: str, address) -> dict:
+        place = _ashby_place(address)
+        # CANONICALIZE HERE, because nothing downstream will. `engine._coerce` applies
+        # the US-state-is-a-code rule to the SCALAR `state` only, and it builds
+        # `locations[]` only when an adapter left it None -- so a list this adapter
+        # supplies is never normalized. Without this, one row would carry state="CA" at
+        # the top and state="California" in its own locations[0]: the same field, two
+        # vocabularies, which is the exact defect this series just removed elsewhere.
+        if place["country"] == "US" and place["state"]:
+            place["state"] = us_state_code(place["state"]) or place["state"]
+        return {"raw": raw, **place, "url": url}
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+    primary = (j.get("location") or "").strip()
+    if primary:
+        entries.append(entry(primary, j.get("address")))
+        seen.add(primary.lower())
+    for sec in j.get("secondaryLocations") or []:
+        if not isinstance(sec, dict):
+            continue
+        raw = (sec.get("location") or "").strip()
+        if not raw or raw.lower() in seen:
+            continue
+        seen.add(raw.lower())
+        entries.append(entry(raw, sec.get("address")))
+    # ONE entry is not a list worth emitting -- `_coerce` builds the single-place shape
+    # itself from the scalars, and returning None here keeps that one path.
+    return entries if len(entries) > 1 else None
+
+
 def fetch_ashby(slug: str):
     data = get_json(
         f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
@@ -364,6 +424,7 @@ def fetch_ashby(slug: str):
                 "remote_type": remote_type(j.get("workplaceType")),
                 "remote_basis": "stated" if j.get("workplaceType") else None,
                 **_ashby_place(j.get("address")),
+                "locations": _ashby_locations(j, j.get("jobUrl") or j.get("applyUrl", "")),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
                 **_ashby_salary(comp),
