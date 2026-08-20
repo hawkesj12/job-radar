@@ -107,6 +107,25 @@ sponsor visas!`, 487 of 487 postings at one employer) and took `eeo_legal` cover
   `Temp` titles (34). `Contract to Perm` (2) is genuinely ambiguous and vetoing it is
   the safe reading, not a clean win.
 
+  **Two names for one arrangement do not contradict.** `{PER_DIEM, PART_TIME}` and
+  `{CONTRACTOR, TEMPORARY}` are compatible: an employer's form offers
+  Full-time/Part-time with no per-diem option, so a nursing manager picks Part-time
+  and writes `Per Diem` in the title. That is a vocabulary GRANULARITY mismatch — the
+  title is more specific than the form allowed — not a disagreement, and vetoing on it
+  discarded 40 rows the metadata had right. Final: **94 → 54 vetoes, 0.63%**, and the
+  repo's own rule is restored — a structured signal stands when nothing actually
+  contradicts it.
+
+  **The pattern this lens should be remembered for.** That class is 100% NON-TECH
+  (nursing, creative contract work) and measures **zero** on the 94 tech boards the
+  rule was built against — the third such class here, after the title-contradiction
+  defect itself and the `b2b`/`trainee`/`contract` false positives. A defect can
+  measure zero on the corpus you designed against and be real in production.
+
+  **NOT covered by any of this:** the Braintrust numeric-tag filter and the
+  parenthetical strip were never exercised by the hand read. That is untested, not
+  cleared — three green passes on a different rule imply nothing about them.
+
   **How this was found is the more useful half.** The n=150 hand read found the defect
   KIND — 2 rows — and could never have found its RATE: at 0.46% prevalence the sample
   was underpowered by construction, with an expected count of ~1. A mechanical scan of

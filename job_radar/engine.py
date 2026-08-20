@@ -205,6 +205,22 @@ _TERM_KEY = re.compile(r"duration|contract type|employee class|employment term",
 # this, 54 of 163 title vetoes (33.1%) were rows like these, each a correct fill
 # discarded. Every entry here is a NON-TECH role shape, which is why none of them
 # appear in the 94-board tech corpus this rule was designed against.
+# Types that are TWO NAMES FOR ONE ARRANGEMENT, not a disagreement. An employer's
+# form offers Full-time/Part-time and has no per-diem option, so a nursing manager
+# picks Part-time and writes `Per Diem` in the title; `(Fixed-Term Contract)` and
+# TEMPORARY are likewise one arrangement under two labels. That is a VOCABULARY
+# GRANULARITY MISMATCH between a form and a title -- the title is more specific than
+# the form allowed -- and vetoing on it discarded 40 rows the metadata had right.
+#
+# Worth noting what this class is made of: it is 100% NON-TECH -- nursing and
+# creative contract work -- and measures zero on the 94 tech boards this rule was
+# designed against. That is the third such class in this lens, after the
+# title-contradiction defect itself and the b2b/trainee/contract false positives.
+_COMPATIBLE_TYPES = (
+    frozenset({"PER_DIEM", "PART_TIME"}),
+    frozenset({"CONTRACTOR", "TEMPORARY"}),
+)
+
 _TITLE_DOMAIN = re.compile(
     r"contract(?:s|or)?\s+(?:management|administration|manager|administrator"
     r"|specialist|analyst|negotiat\w+|attorney|counsel|officer|support|lead)"
@@ -300,7 +316,9 @@ def _employment_from_extra(p: dict) -> None:
             for m in vocab.TITLE_EMPLOYMENT_RE.finditer(title)
         } - {None}
         if spoken and types.isdisjoint(spoken):
-            return
+            both = spoken | types
+            if not any(both <= group for group in _COMPATIBLE_TYPES):
+                return
     p["employment_type"] = types.pop() if len(types) == 1 else None
     # Sorted so a conflicting pair records identically on every run -- a raw that
     # reorders between harvests would look like a changed value to a diffing consumer.

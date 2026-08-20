@@ -3960,3 +3960,37 @@ def test_a_second_axis_in_the_title_is_not_a_contradiction():
         source_extra={"Employment Type": "Intern"},
     )
     assert r["employment_type"] == "INTERN"
+
+
+def test_two_names_for_one_arrangement_are_not_a_contradiction():
+    """A VOCABULARY GRANULARITY MISMATCH, not a disagreement. An employer's form offers
+    Full-time/Part-time with no per-diem option, so a nursing manager picks Part-time
+    and writes `Per Diem` in the title; `(Fixed-Term Contract)` against TEMPORARY is
+    the same shape. The title is more specific than the form allowed. Vetoing on it
+    discarded 40 rows the metadata had right, and it restores the repo's own rule that
+    a structured signal stands when nothing actually contradicts it.
+
+    The class is 100% NON-TECH — nursing and creative contract work — and measures
+    zero on the 94 tech boards this rule was designed against. Third such class in
+    this lens."""
+    r = _row(
+        title="Per Diem Registered Nurse - Pre-Op/PACU",
+        source="greenhouse",
+        source_extra={"Employment Type": "Part-time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+    r = _row(
+        title="Patient Access Specialist (Fixed-Term Contract)",
+        source="greenhouse",
+        source_extra={"Worker Sub-Type": "Temporary"},
+    )
+    assert r["employment_type"] == "TEMPORARY"
+    # ...and a genuine cross-axis contradiction still vetoes.
+    assert (
+        _row(
+            title="Store Lead - Part Time",
+            source="greenhouse",
+            source_extra={"Time Type": "Full Time"},
+        )["employment_type"]
+        is None
+    )
