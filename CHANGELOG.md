@@ -8,6 +8,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The cross-source merge record no longer disappears at the wire.** `sources` — the
+  set of adapters that saw one role, and the only place in the record that a dedup
+  merge is written down — reached the two NDJSON exits through two different readers,
+  and they disagreed. `emit._nested` accepted a `set` and nothing else, so the same
+  value after **any** JSON round trip is a `list` and emitted `null`. `emit.manifest`
+  accepted set and list, then fell back to `[r["source"]]` — and a store row folds its
+  merge into the singular `source` as `", ".join(sorted(tokens))`, because
+  `shortlist.COLUMNS` has no `sources` column at all. So `--format ndjson --all`
+  counted a row under a **fabricated source named `"adzuna, greenhouse"`**, a string
+  no adapter has ever been called, in the one output a consumer reads to tell "the
+  market was quiet" from "four adapters were down".
+
+  Both exits now read one helper, `emit._sources`, which takes set, list, tuple, or a
+  store row's joined string. Recovering the set from that string is lossless and
+  provably so rather than by inspection: **no registered source token contains a comma
+  or a space (19 of 19)**, so `", ".join` has exactly one inverse. The singular
+  `source` on such a row now emits a real adapter token instead of the joined string —
+  it resolved against no `attribution` entry and matched nothing a consumer could key
+  on. What the store never recorded is **which** source won the merge, so that stays
+  unrecoverable and the first token is the deterministic stand-in.
+
+  **35 rows in a 7,568-row local harvest** `[local 94-board harvest, 0.9.0]` carry more
+  than one source. Dedup is where a mistake deletes a job, so these are exactly the
+  rows that must not lose their provenance. Single-source rows are unaffected.
+
 - **An Adzuna model prediction no longer renders as a posted salary.** `_adzuna_pay`
   routes a `salary_is_predicted` row into `salary_estimated_min`/`_max` and leaves the
   commitment columns null, exactly as designed — but `salary`, the human-readable
@@ -25,7 +50,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   `util.salary_range` had already stopped rendering the fake range
   `$109,106–$109,106`, and its comment names this exact failure — but removing the
-  *range* appearance is not the same as removing the *commitment* appearance, and the
+  _range_ appearance is not the same as removing the _commitment_ appearance, and the
   bare figure kept it. `SALARY_BASES` deliberately has no `estimated` member so that a
   figure in `salary_min` is always one an employer committed to; `salary` is the
   display of those columns, so a row with no commitment now has no string. The figures

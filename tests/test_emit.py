@@ -15,7 +15,7 @@ import inspect
 import json
 import re
 
-from job_radar import emit, engine, shortlist
+from job_radar import config, emit, engine, shortlist
 
 
 def _keys_read_by_nested() -> set[str]:
@@ -155,3 +155,47 @@ def test_records_emits_one_valid_json_object_per_line():
     assert len(lines) == 3 and not text.endswith("\n")
     for ln in lines:
         json.loads(ln)
+
+
+def test_a_merge_record_survives_every_shape_sources_arrives_in():
+    """`sources` reached the wire through two exits that disagreed about its shape.
+
+    `_nested` accepted only a `set`, so the SAME value after a json round trip -- a
+    list -- emitted `null`, silently destroying the record that a cross-source dedup
+    merge ever happened. `manifest` accepted set and list, then fell back to
+    `[r["source"]]`, so a store row (which has no `sources` column at all) counted one
+    row under a source literally named "adzuna, greenhouse".
+
+    Dedup is where a mistake deletes a job, and these 35 multi-source rows in a
+    7,568-row local harvest are the only record a merge happened anywhere.
+    """
+    base = {
+        "title": "AI Engineer",
+        "company": "Acme",
+        "url": "https://x/1",
+        "dedup_key": "acme|ai engineer|us",
+    }
+    want = ["adzuna", "greenhouse"]
+    for shape in ({"adzuna", "greenhouse"}, ["greenhouse", "adzuna"], ("adzuna", "greenhouse")):
+        row = {**base, "source": "greenhouse", "sources": shape}
+        assert emit._nested(row)["sources"] == want, f"lost the merge from a {type(shape).__name__}"
+
+    # THE STORE ROW: no `sources` key, the merge folded into the singular `source`.
+    stored = {**base, "source": "adzuna, greenhouse"}
+    got = emit._nested(stored)
+    assert got["sources"] == want, "the store's joined source did not round-trip back"
+    assert got["source"] == "adzuna", "`source` must be a real adapter token, never the joined string"
+
+    counts = json.loads(emit.manifest([stored], [], [], config.Config()))["rows_by_source"]
+    assert counts == {"adzuna": 1, "greenhouse": 1}, (
+        f"manifest counted {sorted(counts)} -- a fabricated source name is not a source"
+    )
+
+
+def test_a_single_source_row_is_untouched_by_the_merge_recovery():
+    """The split is on `", "`, and no registered source token contains a comma or a
+    space (19 of 19), so it has exactly one inverse and cannot fire on a normal row."""
+    row = {"title": "T", "company": "C", "url": "https://x/1", "source": "google_jobs"}
+    got = emit._nested(row)
+    assert got["source"] == "google_jobs" and got["sources"] == ["google_jobs"]
+    assert emit._nested({**row, "source": ""})["source"] is None

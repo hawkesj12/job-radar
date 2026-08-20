@@ -45,6 +45,40 @@ from . import attribution
 _ET = ZoneInfo("America/New_York")  # every timestamp in job-radar is Eastern
 
 
+def _sources(r: dict) -> list[str] | None:
+    """Every adapter that produced this row, from whatever SHAPE the caller holds.
+
+    ONE reader for a field that arrives in three shapes and was being read two
+    different ways at two different exits, which is how they came to disagree:
+
+      * a `set` -- what `engine._merge` builds and what a live harvest row carries
+      * a `list` -- the same value after ANY json round trip, and what a caller that
+        loaded our own NDJSON back hands us
+      * absent, with the singular `source` holding `", ".join(sorted(tokens))` --
+        what a STORE row carries, because `shortlist.COLUMNS` has no `sources`
+        column at all and `_build_row` folds the merge into `source`
+
+    `_nested` read only the first (`isinstance(..., set)`), so a list-valued
+    `sources` emitted `null` -- the merge record silently destroyed by a round trip.
+    `manifest` read the first two and then fell back to `[r["source"]]`, so a store
+    row counted one row under a FABRICATED source named `"adzuna, greenhouse"`, a
+    string no adapter has ever been called. Same field, two exits, two failures.
+
+    Splitting the store's joined string back is lossless for the SET, and provably
+    so rather than by inspection: no registered source token contains a comma or a
+    space (19 of 19, `sources.DEPTH_ALL | BREADTH_ALL`), so `", ".join` has exactly
+    one inverse. What it does NOT recover is WHICH source won the merge -- the store
+    never wrote that down. See `_nested`'s `source` key for what that costs.
+    """
+    got = r.get("sources")
+    if isinstance(got, (set, frozenset, list, tuple)):
+        return sorted(str(s) for s in got if s)
+    one = r.get("source")
+    if not one:
+        return None
+    return sorted(t for t in str(one).split(", ") if t)
+
+
 def _nested(r: dict) -> dict:
     """One harvested posting -> the emitted record.
 
@@ -63,6 +97,7 @@ def _nested(r: dict) -> dict:
     released version and reads it today, so removing it here would break a consumer
     at a minor version. It goes at 1.0.
     """
+    srcs = _sources(r)
     return {
         "id": r.get("id") or None,
         "dedup_key": r.get("dedup_key") or None,
@@ -134,8 +169,15 @@ def _nested(r: dict) -> dict:
         # thing; every list- or dict-typed field here already omits it, and `sections`
         # follows `remote_areas` rather than the line above it.
         "sections": r.get("sections"),
-        "source": r.get("source") or None,
-        "sources": sorted(r["sources"]) if isinstance(r.get("sources"), set) else None,
+        # A REAL ADAPTER TOKEN OR NOTHING. A store row folds a merge into this field
+        # as `", ".join(sorted(tokens))`, so a two-source row arrived here as the
+        # string "adzuna, greenhouse" -- which is not a source, resolves against no
+        # entry in `attribution`, and matches nothing a consumer can key on. The
+        # store never recorded WHICH source won the merge, so the winner is not
+        # recoverable; the first token is the deterministic stand-in, and `sources`
+        # beside it carries the whole truth. A single-source row is unaffected.
+        "source": srcs[0] if srcs else None,
+        "sources": srcs,
         "source_extra": r.get("source_extra"),
         "score": r.get("score"),
         "signals": r.get("signals") or None,
@@ -158,7 +200,11 @@ def manifest(rows, errors, discovered, cfg, started_at=None) -> str:
     """
     by_source: dict[str, int] = {}
     for r in rows:
-        for s in r.get("sources") or ([r["source"]] if r.get("source") else []):
+        # `_sources`, not a local fallback to `[r["source"]]`. That fallback counted a
+        # store row's joined `source` as one source literally named
+        # "adzuna, greenhouse" -- a name no adapter has, in the one output a consumer
+        # reads to tell "the market was quiet" from "four adapters were down".
+        for s in _sources(r) or ():
             by_source[s] = by_source.get(s, 0) + 1
     return json.dumps(
         {
