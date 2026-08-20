@@ -12,11 +12,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the partner `employment_type_raw` has had since 0.7.0. `None` on the `title` basis,
   because nobody quoted anything there. Additive and `None`-defaulted.
 
+  It is emitted in NDJSON and **deliberately not** in `shortlist.csv`, whose 19
+  columns are a human shortlist rather than the record contract — `seniority` is not
+  there either, and a raw without its normalized partner would be incoherent. Stated
+  in `shortlist.py` so the divergence is a decision rather than a discovery.
+
+  Adding it to `_CONTRACT_FIELDS` without adding it to the emitter turned
+  `test_the_machine_feed_carries_the_whole_contract` red within seconds. That test
+  exists because 23 of 29 contract fields were once never emitted at all, and it is
+  the clearest example in this repo of a check that can actually see its own failure
+  — worth preserving exactly as it is.
+
 ### Fixed
 
 - **`employment_type` is read from vendor metadata by VALUE, not by key name — 1,558
-  rows filled, all Greenhouse.** It was `None` on 100% of Greenhouse rows while a third
-  of them carried an unambiguous type string in `source_extra`. The fix ignores key
+  rows `[local 94-board harvest, 0.9.0]`, and 8,239 rows across 264 employers `[live
+  prod, 2026-08-20]`.** Both numbers are real and the second is the blast radius: the
+  local corpus is one 94-board slice, so quoting only 1,558 understates what ships by
+  5.3×. It was `None` on 100% of Greenhouse rows while a third of them carried an
+  unambiguous type string in `source_extra`. The fix ignores key
   names entirely and tests every metadata _value_ against `vocab._EMPLOYMENT_MAP`,
   accepting only a real map hit. Key names could never have worked: measured `[live
 prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including

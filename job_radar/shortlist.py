@@ -9,6 +9,17 @@ the market, so your application history is never lost. Written atomically
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
 salary, company, industry, title, department, employment_type, location,
 source, url, signals, dedup_key
+
+THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 19 columns
+are a HUMAN shortlist you open in a spreadsheet; `emit.py`'s NDJSON is the machine
+contract, and a test asserts every `engine._CONTRACT_FIELDS` member appears there.
+So contract fields land here only when a person reading a row wants them —
+`seniority`, `seniority_raw`, `category`, `team` and `tags` are all deliberately
+absent, and `seniority_raw` in particular would be incoherent without the
+`seniority` beside it that this file also does not carry. Adding a column is a
+schema change for every existing CSV, which is a real cost to a CLI user; decide it
+here on purpose rather than letting a field appear in one surface and vanish from
+the other by accident.
 """
 
 from __future__ import annotations
