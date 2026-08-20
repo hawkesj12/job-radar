@@ -25,11 +25,62 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Only a HEADING starts a section — inline emphasis inside a sentence no longer does.**
+  0.9.0 promoted every `<strong>`/`<b>` it found, anywhere. So
+  `...leverages state-of-the-art <strong>computer vision, deep learning, and generative
+AI</strong> to automatically analyze...` produced a section headed by that noun phrase
+  whose span opened on the word "to": **5,753 sections across 2,056 rows** `[local
+94-board harvest, 0.9.0]`. Measured on 2,712 raw bodies `[live fetch, 9 boards,
+2026-08-20]`: headers that do not start a line **1,701 → 94**, spans opening
+  mid-clause **1,334 → 158**, headers with no letter or digit **13 → 0**, `type: null`
+  46.9% → ~34%, and **0 sections whose span could not be located**, unchanged. This also
+  closes the mid-sentence half of the "span ends mid-sentence" and "span starts on
+  punctuation" reports — they were one bug, not three.
+
+  A heading is **block-initial**: nothing but whitespace and punctuation between it and
+  the start of its block. What FOLLOWS it is deliberately not tested. Requiring the bold
+  to be the whole line scores better on every span-quality metric and is wrong — it
+  deletes the label-value paragraph (`<p><strong>Visa sponsorship:</strong> We do
+sponsor visas!`, 487 of 487 postings at one employer) and took `eeo_legal` coverage
+  from 100% to 0% on three boards. **The metric could not see its own cost, because a
+  deleted section has no span left to judge.** Inside a list item the rule is stricter
+  and the discriminator is morphology rather than the container — a heading terminates
+  its label with a colon, inside the tag or just outside it — because excluding list
+  items outright destroys 130 typed headers, 34 of them at a non-tech employer.
+
+  **Known residual, named rather than left to be re-found:** two adjacent bold runs are
+  two headings (160 occurrences across 52 of 2,752 bodies, 9 of 11 vendors), which is
+  correct for `<h2><strong>Key responsibilities</strong><strong><br></strong></h2>` and
+  wrong for a bolded label followed by a bolded value — `Equity grade:` → `2`,
+  `Recruiter:` → a recruiter's name. 94 sections on the live corpus. A narrower rule was
+  prototyped and dropped: it buys 26 sections for a third clause.
+
 - **`employment_type` is read from vendor metadata by VALUE, not by key name — 1,558
   rows `[local 94-board harvest, 0.9.0]`, and 8,239 rows across 264 employers `[live
   prod, 2026-08-20]`.** Both numbers are real and the second is the blast radius: the
   local corpus is one 94-board slice, so quoting only 1,558 understates what ships by
-  5.3×. It was `None` on 100% of Greenhouse rows while a third of them carried an
+  5.3×. **A title that contradicts the metadata vetoes the fill** — a hand-read of 150
+  sampled rows found the metadata asserting a type the posting denies (`Store Lead -
+  Part Time` carrying `Full Time`; `Clinical Lab Scientist (Contract)` carrying
+  `Full-time`), 163 rows / 1.91% of the live fill, landing in `shortlist.csv` where a
+  CLI user reads them. The title is a **veto, never a rival answer**: reading it as a
+  competing answer was measured and abandoned after three attempts surfaced three
+  false-positive classes, each a NON-TECH role invisible on the 94 tech boards this
+  corpus is built from — `b2b` ("B2B Performance Marketing", a market), `trainee`
+  ("Manager Trainee", a permanent trades role), `contract` ("Contract Management
+  Lead", a domain noun). Under a veto each costs one unfilled row rather than a wrong
+  assertion — and the veto carries **two measured guards**: it does not fire on domain
+  usage (without that, 54 of 163 vetoes, **33.1%**, were correct fills discarded), and
+  it compares by **overlap rather than difference**, so a title naming a second axis
+  (`Customer Operations Intern - Part-time` against `Intern` metadata) corroborates
+  instead of contradicting. Net: **8,526 → 8,432 filled `[live prod]`**, 94 withdrawn
+  (1.10%), zero domain false positives remaining.
+
+  **How this was found is the more useful half.** The n=150 hand read found the defect
+  KIND — 2 rows — and could never have found its RATE: at 0.46% prevalence the sample
+  was underpowered by construction, with an expected count of ~1. A mechanical scan of
+  all 8,555 rows found 62 in seconds. **A hand read finds defect kinds; only a full
+  scan finds their rate.** Both were necessary and neither would have sufficed. It was `None` on 100% of Greenhouse rows while a third of them carried an
   unambiguous type string in `source_extra`. The fix ignores key
   names entirely and tests every metadata _value_ against `vocab._EMPLOYMENT_MAP`,
   accepting only a real map hit. Key names could never have worked: measured `[live
@@ -41,6 +92,7 @@ prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including
   alone. `permanent` is skipped under a key naming a _term_ (`Contract Type`,
   `Duration`) — `vocab` already flags that entry as its shakiest, and such a key makes
   the flagged failure more likely, not less.
+
 - **Two disagreeing metadata fields now yield `None`, not an arbitrary pick.** 11 rows
   state two different types at once (`Employment Type=Contractor` with
   `Time Type=Part Time`). A source that said two things has not said one; both raws are

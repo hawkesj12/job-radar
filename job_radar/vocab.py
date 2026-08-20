@@ -87,6 +87,21 @@ _PUNCT = re.compile(r"[^a-z0-9 ]+")
 # changed. The raw keeps the qualifier -- "contract (long)" is the truth.
 _PAREN_TAIL = re.compile(r"\s*\([^)]*\)\s*$")
 
+# Every employment word, as a whole phrase, for scanning a TITLE. Built from the map
+# above so the two can never drift, and used ONLY as a veto -- see
+# engine._employment_from_extra for why a title is never asked what the type IS.
+# Longest-first so "contract to hire" wins over "contract"; the separator class lets
+# one entry match "part time", "part-time" and "part/time".
+TITLE_EMPLOYMENT_RE = re.compile(
+    r"(?<![a-z])("
+    + "|".join(
+        re.escape(k).replace(r"\ ", r"[\s\-_/]+")
+        for k in sorted(_EMPLOYMENT_MAP, key=len, reverse=True)
+    )
+    + r")(?![a-z])",
+    re.I,
+)
+
 
 def _flatten(v) -> str:
     """Vendor values arrive as a string OR a list of them (jobicy, arbeitnow).

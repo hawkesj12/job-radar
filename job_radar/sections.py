@@ -150,6 +150,136 @@ _ENT = (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"), ("&rsquo;", "’"),
         ("&quot;", '"'), ("&lt;", "<"), ("&gt;", ">"), ("&ndash;", "–"),
         ("&mdash;", "—"))  # fmt: skip
 
+# WHERE A BLOCK BEGINS AND ENDS. `_HDR` finding a `<strong>` says nothing about whether
+# it is a HEADING -- 0.9.0 promoted every one of them, including emphasis in the middle
+# of a sentence, which put 5,753 sections across 2,056 rows under a header like
+# "computer vision, deep learning, and generative AI" with a span opening on the word
+# "to" [local 94-board harvest, 0.9.0]. A heading starts its block; mid-sentence
+# emphasis does not. That distinction needs the block boundaries, so here they are.
+#
+# The closing-emphasis clause carries a LOOKAHEAD on purpose and is the narrowest thing
+# that works. `</strong>` is a boundary ONLY when an opening `<strong>`/`<b>` follows it,
+# because two adjacent bold runs are two headings -- a real construct, not a fixture
+# artifact: 160 occurrences across 52 of 2,752 live bodies and 9 of 11 vendors, e.g.
+# `<h2><strong>Key responsibilities</strong><strong><br></strong></h2>`. Making EVERY
+# closing emphasis a boundary also works and costs more: it turns a bolded value into a
+# header 174 times on that corpus where this clause does it 94 times, for the same
+# section count.
+_BOUND = re.compile(
+    r"</?(?:p|div|li|ul|ol|h[1-6]|tr|table|section|article|blockquote|dl|dt|dd)\b[^>]*>"
+    r"|<br\s*/?>"
+    r"|</(?:strong|b|h[1-6])\s*>(?=\s*<(?:strong|b)\b)",
+    re.I,
+)
+# What may sit beside a heading inside its own block without making it prose. A colon
+# belongs to the heading; a sentence does not.
+_ONLY_PUNCT = re.compile(r"^[\s:\-–—•*.,()\[\]/|]*$")
+# BODY-12's whole fix: 275 sections corpus-wide were headed by ".", ":", "," or ">>".
+# A header with no letter or digit in it is not a heading under any convention.
+_ALNUM = re.compile(r"[0-9A-Za-zÀ-\uffff]")
+# A list item is a LEAF -- content, not a container of sections. `<td>`/`<dd>` are
+# deliberately absent: they appear in 0 of 910 bodies measured, and an unexercised
+# branch in a rule that decides the record contract is worse than a narrower rule.
+_LEAF = ("li",)
+
+
+def _in_leaf(body: str, i: int) -> bool:
+    """Is offset `i` inside a list item? Nearest unclosed `<li>` wins."""
+    for tag in _LEAF:
+        o = max(body.rfind("<" + tag, 0, i), body.rfind("<" + tag.upper(), 0, i))
+        c = max(body.rfind("</" + tag, 0, i), body.rfind("</" + tag.upper(), 0, i))
+        if o > c:
+            return True
+    return False
+
+
+def _header_at(body: str, m: re.Match) -> tuple[str, bool]:
+    """One `_HDR` match -> (header text, is it actually a heading).
+
+    A heading is BLOCK-INITIAL: nothing but whitespace and punctuation between it and
+    the start of its block. What FOLLOWS it is deliberately not tested, and that is the
+    one clause worth defending -- requiring the emphasis to be the whole line reads
+    better and is wrong. It deletes the label-value paragraph, which is the commonest
+    real section shape here (`<p><strong>Visa sponsorship:</strong> We do sponsor
+    visas!` on 487 of 487 postings at one employer) and took `eeo_legal` coverage from
+    100% to 0% on three boards when tried. That variant scores BETTER on every
+    span-quality metric, because deleting a section satisfies "does this span end
+    mid-sentence"; the metric cannot see its own cost.
+
+    Inside a list item the rule is stricter, and the discriminator is MORPHOLOGY rather
+    than the container: a heading terminates its label with a colon. `<li><strong>
+    Experience:</strong> 3+ years...` is a real heading; `<li><strong>7+ years</strong>
+    of software engineering...` is a sentence cut in half. Excluding list items outright
+    instead destroys 130 typed headers, 34 of them at a non-tech employer.
+    """
+    inner_start, inner_end = (
+        (m.start(2), m.end(2)) if m.group(1) else (m.start(4), m.end(4))
+    )
+    inner = body[inner_start:inner_end]
+    # The emphasis run may itself span blocks (`<strong><br><br>RESPONSIBILITIES:
+    # </strong>` is real). Only its FIRST non-empty chunk can be the heading.
+    chunks, last = [], 0
+    for b in _BOUND.finditer(inner):
+        chunks.append((last, b.start()))
+        last = b.end()
+    chunks.append((last, len(inner)))
+    solid = [(a, z) for a, z in chunks if _detag(inner[a:z])]
+    if not solid:
+        return "", False
+    a, z = solid[0]
+    head = _detag(inner[a:z])
+    if a > 0:
+        before, anchor = "", inner_start + a  # a boundary inside the run resets it
+    else:
+        # NOT `finditer(body, 0, m.start())`. `endpos` TRUNCATES the string, so the
+        # lookahead in `_BOUND`'s closing-emphasis clause cannot see the opener that
+        # follows -- and that opener sits at exactly `m.start()`, i.e. the boundary is
+        # invisible precisely where it decides the answer. This cost a full
+        # reproduction to find and the suite stayed green throughout.
+        lo = 0
+        for b in _BOUND.finditer(body):
+            if b.end() > m.start():
+                break
+            lo = b.end()
+        before, anchor = _detag(body[lo : m.start()]), m.start()
+    if not _ONLY_PUNCT.match(before):
+        return head, False
+    # A trailing punctuation-only run sitting just OUTSIDE the emphasis belongs to the
+    # heading: `<strong>The Opportunity</strong>:` otherwise leaves the colon as the
+    # first character of the span, which is 205 of the 208 remaining span-opens-on-
+    # punctuation cases.
+    tail = ""
+    outside_colon = False
+    if len(solid) == 1:
+        nxt = _BOUND.search(body, m.end())
+        edge = nxt.start() if nxt else len(body)
+        cand = (_detag(inner[z:]) + " " + _detag(body[m.end() : edge])).strip()
+        if cand and _ONLY_PUNCT.match(cand):
+            tail = cand
+        else:
+            # A colon terminates the label whether the employer put it inside the tag
+            # or outside it, and both spellings are live: `<li><strong>Experience:
+            # </strong> 7+ years` and `<li><strong>Strategic Technical Partnership
+            # </strong>: Be a technical thought partner`. Reading only the first made
+            # the leaf rule below disagree with itself on 149 sections of one shape.
+            #
+            # It is NOT absorbed into the header, and that is a measured limit rather
+            # than an oversight: `clean` turns the `</strong>` into a SPACE, so the
+            # body reads "...Partnership : Be a..." and a header ending in ":" cannot
+            # be found in it -- `pos` then fails to advance and the span opens on the
+            # colon anyway, which is worse than leaving it alone. Absorbing it becomes
+            # correct only once inline tags stop leaving a space behind them.
+            outside_colon = cand.startswith(":")
+    if _in_leaf(body, anchor) and not (
+        head.rstrip().endswith(":") or tail.startswith(":") or outside_colon
+    ):
+        return head, False
+    if tail:
+        head = re.sub(r"\s+([:.,])", r"\1", head + " " + tail).strip()
+    if not _ALNUM.search(head):
+        return head, False
+    return head, True
+
 
 def _detag(s: str) -> str:
     for a, b in _ENT:
@@ -200,11 +330,16 @@ def split(body: str) -> list[tuple[str | None, str, str]]:
     """
     if not body:
         return []
-    marks = [
-        (m.start(), m.end(), _detag(m.group(2) or m.group(4) or ""))
-        for m in _HDR.finditer(body)
-    ]
-    marks = [m for m in marks if m[2]]
+    marks = []
+    for m in _HDR.finditer(body):
+        if m.group(1):  # a heading TAG is a heading, whatever surrounds it
+            head = _detag(m.group(2) or "")
+            if head and _ALNUM.search(head):
+                marks.append((m.start(), m.end(), head))
+            continue
+        head, is_heading = _header_at(body, m)
+        if head and is_heading:
+            marks.append((m.start(), m.end(), head))
     if not marks:
         return []
     out: list[tuple[str | None, str, str]] = []

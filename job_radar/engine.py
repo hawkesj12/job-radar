@@ -199,6 +199,19 @@ _NULLABLE_TEXT = (
 # rather than guessed. Every other value under those keys is still read.
 _TERM_KEY = re.compile(r"duration|contract type|employee class|employment term", re.I)
 
+# An employment word used as a DOMAIN, a market or a training grade rather than as a
+# term of employment. `Contract Management Lead` is a permanent role ABOUT contracts;
+# `B2B` is a market; `Manager Trainee` is a permanent trades job. Measured: without
+# this, 54 of 163 title vetoes (33.1%) were rows like these, each a correct fill
+# discarded. Every entry here is a NON-TECH role shape, which is why none of them
+# appear in the 94-board tech corpus this rule was designed against.
+_TITLE_DOMAIN = re.compile(
+    r"contract(?:s|or)?\s+(?:management|administration|manager|administrator"
+    r"|specialist|analyst|negotiat\w+|attorney|counsel|officer|support|lead)"
+    r"|contractor\s+special|\bb2b\b|\bc2c\b|trainee",
+    re.I,
+)
+
 
 def _employment_from_extra(p: dict) -> None:
     """Fill a missing `employment_type` from any vendor metadata value in source_extra.
@@ -248,6 +261,46 @@ def _employment_from_extra(p: dict) -> None:
     if not found:
         return
     types = set(found.values())
+    # THE TITLE IS A VETO, NEVER A COMPETING ANSWER, and the asymmetry is the whole
+    # point. Hand-read of 150 sampled fills found the metadata asserting a type the
+    # posting contradicts: `Store Lead - Part Time` carried `Full Time` metadata,
+    # `Clinical Lab Scientist (Contract)` carried `Full-time`. 157 rows, 1.88% of the
+    # live fill, and they land in shortlist.csv where a CLI user reads them.
+    #
+    # Reading the title as a RIVAL answer was tried and measured, and it fails the way
+    # everything in this field fails -- on vocabulary that is fine in a vendor's
+    # employment field and wrong in a title. Three distinct false-positive classes
+    # surfaced in three attempts, every one of them a NON-TECH role invisible on the
+    # 94 tech boards this corpus is built from:
+    #   `b2b`     -> "Senior Associate, B2B Performance Marketing"  (a market, not a term)
+    #   `trainee` -> "Manager Trainee", "Door Technician Trainee"   (permanent trades roles)
+    #   `contract`-> "Contract Management Lead"                     (a domain noun)
+    # A fourth attempt would likely find a fourth. So the title is not asked what the
+    # type IS -- only whether it CONTRADICTS what the metadata claims, and a
+    # contradiction withdraws the claim instead of replacing it.
+    #
+    # That makes the failure direction safe: a false positive here costs one unfilled
+    # row (`None`, which honestly means "not established"), where a rival answer would
+    # cost a wrong assertion. Filling 8,197 of 8,354 correctly beats filling 8,354 with
+    # 157 known-wrong, and the 157 are exactly the rows a consumer would have believed.
+    # TWO GUARDS, both measured on 8,526 live fills, both required.
+    #
+    # (1) DOMAIN USAGE. `Contract Management Lead`, `Contractor Special Security
+    #     Officer`, `B2B Performance Marketing`, `Manager Trainee` -- the word names
+    #     what the job is ABOUT, or a market, or a training grade. Without this guard
+    #     **54 of 163 vetoes (33.1%) were these**, each one a correct fill thrown away.
+    # (2) OVERLAP, NOT DIFFERENCE. `Customer Operations Intern - Part-time` speaks
+    #     INTERN *and* PART_TIME while the metadata says INTERN. That is one axis
+    #     corroborated and a second one added -- not a contradiction. The veto fires
+    #     only when the title and the metadata share NO type at all.
+    title = p.get("title")
+    if isinstance(title, str) and title and not _TITLE_DOMAIN.search(title):
+        spoken = {
+            vocab.employment_type(m.group(1))[0]
+            for m in vocab.TITLE_EMPLOYMENT_RE.finditer(title)
+        } - {None}
+        if spoken and types.isdisjoint(spoken):
+            return
     p["employment_type"] = types.pop() if len(types) == 1 else None
     # Sorted so a conflicting pair records identically on every run -- a raw that
     # reorders between harvests would look like a changed value to a diffing consumer.

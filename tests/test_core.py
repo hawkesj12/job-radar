@@ -1013,7 +1013,10 @@ def test_clean_keeps_bullets_on_their_own_lines():
     )
     # `<br>` is the same case and was missing from the pattern entirely -- 7,610 of them
     # across 1,495 of 2,697 bodies.
-    assert util.clean("Remote-first&lt;br /&gt;Flexible hours") == "Remote-first\nFlexible hours"
+    assert (
+        util.clean("Remote-first&lt;br /&gt;Flexible hours")
+        == "Remote-first\nFlexible hours"
+    )
 
 
 def test_clean_does_not_eat_prose_between_angle_brackets():
@@ -1081,7 +1084,9 @@ def test_two_sections_with_identical_text_get_different_spans():
         "&lt;p&gt;Five years of Python.&lt;/p&gt;"
     )
     assert len(secs) == 2
-    assert secs[0]["start"] != secs[1]["start"], "the second span collapsed onto the first"
+    assert secs[0]["start"] != secs[1]["start"], (
+        "the second span collapsed onto the first"
+    )
     assert secs[0]["end"] <= secs[1]["start"]
     assert text[secs[1]["start"] : secs[1]["end"]] == "Five years of Python."
 
@@ -1198,6 +1203,106 @@ def test_a_header_with_nothing_under_it_is_an_empty_span_not_a_failure():
     assert all("start" in s for s in secs)
 
 
+# ── which <strong> is a HEADING (0.9.0). Markup below is verbatim from live boards ──
+def test_mid_sentence_emphasis_is_not_a_section_heading():
+    """0.9.0 promoted every `<strong>` it found, so emphasis inside a sentence became a
+    header and the REST OF THAT SENTENCE became its section: 5,753 sections across
+    2,056 rows `[local 94-board harvest, 0.9.0]`, spans opening on the word "to".
+
+    Body is verbatim clickhouse. The measurement that matters is not that the header is
+    gone -- it is that the sentence is still one span.
+    """
+    body = (
+        "<p>We are seeking an experienced <strong>Solutions Architect</strong> to help "
+        "expand our presence in Germany.</p>"
+    )
+    text, secs = util.clean_with_sections(body)
+    # No heading in the body at all, so `[]` -- the documented "this posting has no
+    # headers" value, not an intro entry.
+    assert secs == [], "mid-sentence emphasis was promoted to a heading"
+    assert "Solutions Architect to help expand" in text
+
+
+def test_a_label_value_paragraph_is_a_heading_even_though_prose_follows_it():
+    """THE CLAUSE THAT MUST NOT BE TIGHTENED, and the reason the rule tests only what
+    comes BEFORE the emphasis.
+
+    Requiring the bold to be the whole line scores better on every span-quality metric
+    -- and deletes this shape, which is 487 of 487 postings at one employer and took
+    `eeo_legal` coverage from 100% to 0% on three boards when measured. A metric built
+    from "does this span end mid-sentence" cannot see that cost, because a deleted
+    section has no span to judge. Verbatim anthropic.
+    """
+    body = (
+        "<p><strong>Visa Sponsorship: </strong>We are not currently able to sponsor "
+        "visas for fellows.</p>"
+    )
+    _text, secs = util.clean_with_sections(body)
+    assert [s["header"] for s in secs] == ["Visa Sponsorship:"]
+    assert secs[0]["type"] == "eeo_legal"
+
+
+def test_inside_a_list_item_a_heading_must_terminate_its_label():
+    """A bullet's bold lead-in is a TERM, not a heading -- unless it terminates its
+    label with a colon. The discriminator is morphology, not the container: excluding
+    list items outright instead destroys 130 typed headers, 34 of them at a non-tech
+    employer, because `<li><strong>Experience:</strong> 7+ years` is the same construct
+    as the paragraph above with a different wrapper.
+
+    All three bullets are verbatim (clickhouse, anthropic). The colon counts whether the
+    employer put it inside the tag or outside it -- reading only the first spelling made
+    the rule disagree with itself on 149 sections of one shape.
+    """
+    body = (
+        "<ul>"
+        "<li><strong>Experience:</strong> 7+ years in SRE.</li>"
+        "<li><strong>Strategic Technical Partnership</strong>: Be a thought partner.</li>"
+        "<li><strong>Close the delivery loop.</strong> Track forecast-versus-delivered.</li>"
+        "</ul>"
+    )
+    _text, secs = util.clean_with_sections(body)
+    assert [s["header"] for s in secs] == [
+        "Experience:",
+        "Strategic Technical Partnership",
+    ], "a colonless bullet lead-in was read as a heading"
+
+
+def test_two_adjacent_bold_runs_are_two_headings():
+    """`<strong>A</strong><strong>B</strong>` with no block tag between them is real
+    markup, not a fixture artifact: 160 occurrences across 52 of 2,752 live bodies and
+    9 of 11 vendors. A block-initial rule that does not know this reads the FIRST bold's
+    text as content disqualifying the second, and drops it.
+
+    The `<h2>` form is verbatim anthropic. This also pins the lookup that finds the
+    boundary: searching `finditer(body, 0, m.start())` truncates the string at `endpos`,
+    so the lookahead cannot see the opener that follows -- and that opener sits at
+    exactly `m.start()`. The rule then silently reverts and this test is the only thing
+    that notices.
+    """
+    _text, secs = util.clean_with_sections(
+        "<h2><strong>Key responsibilities</strong><strong><br></strong></h2>"
+        "<ul><li>Lead the team.</li></ul>"
+    )
+    assert secs[0]["header"] == "Key responsibilities"
+    _text, secs = util.clean_with_sections(
+        "<p><strong>PLEASE NOTE</strong><strong>: Due to federal requirements.</strong></p>"
+    )
+    assert [s["header"] for s in secs] == [
+        "PLEASE NOTE",
+        ": Due to federal requirements.",
+    ]
+
+
+def test_a_heading_with_no_letter_or_digit_is_not_a_heading():
+    """275 sections corpus-wide were headed by ".", ":", "," or ">>" -- an employer
+    bolding a separator. No convention makes that a heading, and a consumer rendering
+    a section list gets a row titled "." """
+    _text, secs = util.clean_with_sections(
+        "<p><strong>.</strong></p><p><strong>Requirements</strong></p><p>Python.</p>"
+    )
+    assert [s["header"] for s in secs] == [None, "Requirements"]
+
+
 def test_about_you_is_a_requirements_header_not_a_company_blurb():
     """The ordering bug, pinned. `about_company`'s `^about [a-z]` catches "About You",
     and it did so on 2,085 entries across 82 employers until it moved after
@@ -1220,11 +1325,11 @@ def test_about_you_is_a_requirements_header_not_a_company_blurb():
 @pytest.mark.parametrize(
     "header",
     [
-        "You have:",                      # 855 entries / 50 employers
+        "You have:",  # 855 entries / 50 employers
         "You bring to the team:",
-        "What we are looking for",        # 332 / 50
-        "Who we\u2019re looking for",      # 156 / 22 -- CURLY apostrophe, the common form
-        "Bonus if:",                      # 179 / 60
+        "What we are looking for",  # 332 / 50
+        "Who we\u2019re looking for",  # 156 / 22 -- CURLY apostrophe, the common form
+        "Bonus if:",  # 179 / 60
         "We\u2019d love to hear from you if you have:",  # 94 / 5
     ],
 )
@@ -3497,7 +3602,9 @@ def test_the_delimiter_no_longer_decides_whether_decoration_is_captured():
     tokyo = vocab.decompose_title("Forward Deployed Engineer - Tokyo")
     assert tokyo["title_root"] == "Forward Deployed Engineer"
     assert tokyo["title_qualifiers"] == ["tokyo"]
-    assert vocab.decompose_title("AI Engineer | Platform")["title_root"] == "AI Engineer"
+    assert (
+        vocab.decompose_title("AI Engineer | Platform")["title_root"] == "AI Engineer"
+    )
 
 
 def test_an_intra_word_hyphen_is_not_a_delimiter():
@@ -3512,9 +3619,10 @@ def test_an_intra_word_hyphen_is_not_a_delimiter():
         "Go to Market Engineer"
     )
     # one-sided space still splits
-    assert vocab.decompose_title("Sr Software Engineer -Public Sector")[
-        "title_root"
-    ] == "Software Engineer"
+    assert (
+        vocab.decompose_title("Sr Software Engineer -Public Sector")["title_root"]
+        == "Software Engineer"
+    )
 
 
 def test_a_leading_segment_that_names_no_role_is_not_the_root():
@@ -3536,9 +3644,10 @@ def test_a_generic_role_noun_is_still_the_root_and_is_never_swapped_for_its_doma
     Manager, Payments` would root at `Payments`, which is a worse claim than
     `Manager`. The fall-through fires only when segment 0 contains NO role noun at
     all. 395 corpus titles have the `<role>, <domain>` shape and must be untouched."""
-    assert vocab.decompose_title("Manager, Forward Deployed Engineering")[
-        "title_root"
-    ] == "Manager"
+    assert (
+        vocab.decompose_title("Manager, Forward Deployed Engineering")["title_root"]
+        == "Manager"
+    )
     assert vocab.decompose_title("Engineering Manager, Payments")["title_root"] == (
         "Engineering Manager"
     )
@@ -3652,13 +3761,19 @@ def test_permanent_is_skipped_under_a_key_that_names_a_term():
     usage contrasting with fixed-term, not with part-time. Under a key literally named
     `Contract Type` the employer is answering the term question, which makes that
     flagged failure more likely, not less. 36 rows in the live store."""
-    assert _row(source="gh", source_extra={"Contract Type": "Permanent"})[
-        "employment_type"
-    ] is None
+    assert (
+        _row(source="gh", source_extra={"Contract Type": "Permanent"})[
+            "employment_type"
+        ]
+        is None
+    )
     # ...but the same key still yields every other value it carries.
-    assert _row(source="gh", source_extra={"Contract Type": "Freelance"})[
-        "employment_type"
-    ] == "CONTRACTOR"
+    assert (
+        _row(source="gh", source_extra={"Contract Type": "Freelance"})[
+            "employment_type"
+        ]
+        == "CONTRACTOR"
+    )
 
 
 def test_a_qualified_contract_string_still_normalizes():
@@ -3696,9 +3811,9 @@ def test_seniority_is_never_reranked_onto_an_invented_ladder():
     verbatim, in which `Associate` ranks ABOVE `Entry level`. The one ladder available
     to copy collapses `Associate` to an entry rung — so adopting it would contradict a
     vendor's own published ordering on the source where it fires on 60% of rows."""
-    assert _row(source="smartrecruiters", seniority="Mid-Senior Level")["seniority"] == (
-        "mid-senior level"
-    )
+    assert _row(source="smartrecruiters", seniority="Mid-Senior Level")[
+        "seniority"
+    ] == ("mid-senior level")
     assert _row(source="smartrecruiters", seniority="Associate")["seniority"] == (
         "associate"
     )
@@ -3706,7 +3821,7 @@ def test_seniority_is_never_reranked_onto_an_invented_ladder():
 
 
 def test_a_declined_seniority_is_none_but_keeps_its_raw():
-    """"Not Applicable" and "Any" mean the vendor answered and refused to classify.
+    """ "Not Applicable" and "Any" mean the vendor answered and refused to classify.
     There is no level, so there is no basis for one — and it deliberately does NOT
     fall through to the title, because overriding an explicit refusal with our own
     guess is the opinion this field is kept clear of."""
@@ -3733,3 +3848,92 @@ def test_an_adapter_supplied_seniority_raw_is_not_overwritten():
     r = _row(source="themuse", seniority="senior", seniority_raw="Senior Level")
     assert r["seniority"] == "senior"
     assert r["seniority_raw"] == "Senior Level"
+
+
+def test_a_title_that_contradicts_the_metadata_vetoes_the_fill():
+    """A hand-read of 150 sampled fills found the metadata asserting a type the posting
+    itself contradicts — `Store Lead - Part Time` carrying `Full Time` metadata, and
+    `Clinical Lab Scientist (Contract)` carrying `Full-time`. 163 rows, 1.91% of the
+    live fill, landing in `shortlist.csv` where a CLI user reads them."""
+    r = _row(
+        title="Store Lead - Part Time",
+        source="greenhouse",
+        source_extra={"Time Type": "Full Time"},
+    )
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] is None
+
+
+def test_a_title_that_agrees_does_not_veto():
+    """Corroboration is not contradiction. Only a type the metadata did NOT claim
+    withdraws the claim."""
+    r = _row(
+        title="Part Time Weekend Support Representative",
+        source="greenhouse",
+        source_extra={"Time Type": "Part Time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+
+
+def test_a_title_the_metadata_never_claimed_still_fills_when_silent():
+    """The overwhelmingly common case: the title says nothing about schedule at all,
+    so there is nothing to contradict and the metadata stands."""
+    r = _row(
+        title="Senior Software Engineer, Backend",
+        source="greenhouse",
+        source_extra={"Employment Type": "Full-time"},
+    )
+    assert r["employment_type"] == "FULL_TIME"
+
+
+def test_the_title_is_a_veto_and_never_a_rival_answer():
+    """THE ASYMMETRY IS THE DESIGN. Reading a title as a competing answer was measured
+    and abandoned: three attempts surfaced three false-positive classes, each a
+    NON-TECH role invisible on the 94 tech boards this corpus is built from — `b2b`
+    ("B2B Performance Marketing", a market), `trainee` ("Manager Trainee", a permanent
+    trades role) and `contract` ("Contract Management Lead", a domain noun).
+
+    Under a veto those cost one unfilled row each — `None`, which honestly means "not
+    established" — instead of a wrong assertion. This test pins the DIRECTION of
+    failure on a row that genuinely IS contradicted: the metadata's claim is
+    withdrawn, and the title's reading must never take its place."""
+    r = _row(
+        title="Store Lead - Part Time",
+        source="greenhouse",
+        source_extra={"Time Type": "Full Time"},
+    )
+    assert r["employment_type"] != "PART_TIME", "the title was treated as an answer"
+    assert r["employment_type"] is None  # withdrawn, not replaced
+    assert r["employment_type_raw"] is None
+
+
+def test_the_veto_does_not_fire_on_domain_usage():
+    """THE LEAD'S CONDITION on this change, and it was the right one. An employment
+    word can name what the job is ABOUT (`Contract Management Lead`), a market
+    (`B2B Performance Marketing`) or a training grade (`Manager Trainee`) — all
+    permanent roles. Measured on 8,526 live fills: without this guard, **54 of 163
+    vetoes (33.1%) were these**, each a correct fill thrown away. Every one is a
+    NON-TECH role shape, which is why none appear in the 94-board tech corpus."""
+    for title in (
+        "Contract Management Lead | Supply Chain",
+        "Contractor Special Security Officer",
+        "Senior Associate, B2B Performance Marketing",
+        "Manager Trainee",
+        "Commercial Door Technician Trainee",
+    ):
+        r = _row(
+            title=title, source="greenhouse", source_extra={"Time Type": "Full Time"}
+        )
+        assert r["employment_type"] == "FULL_TIME", f"domain usage vetoed: {title}"
+
+
+def test_a_second_axis_in_the_title_is_not_a_contradiction():
+    """`Customer Operations Intern - Part-time` speaks INTERN *and* PART_TIME while the
+    metadata says INTERN — one axis corroborated and a second added. The veto compares
+    by OVERLAP, not difference, so it fires only when the two share no type at all."""
+    r = _row(
+        title="Customer Operations Intern - Part-time Fall 2026",
+        source="greenhouse",
+        source_extra={"Employment Type": "Intern"},
+    )
+    assert r["employment_type"] == "INTERN"
