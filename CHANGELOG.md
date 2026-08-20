@@ -8,6 +8,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`text_basis`** — a new record field saying what KIND of body `text` is, when it is
+  not an ordinary one. `excerpt` where the SOURCE truncates it (Adzuna caps every
+  description at 500 characters and ends it with an ellipsis: 275 of 275 rows locally,
+  7,146 of 7,150 `[live prod, 2026-08-20]`, and a live probe confirms the API carries no
+  fuller field — it reproduces on a non-tech query too). `synthesized` where there was no
+  prose body at all and the adapter BUILT one from structured fields (Braintrust, 29 of
+  29 rows, ~157 characters). `None` everywhere else.
+
+  **There is deliberately no `full`.** Seventeen adapters would have to claim a
+  completeness nobody has measured, which is exactly the plausible-looking guess
+  `engine._coerce` exists to refuse; `None` — not characterized — is the truth. And
+  `text is None` already carries "the source sent no body" (SmartRecruiters, 250 of 250
+  rows), so that state needs no vocabulary entry. Closed vocabulary in `vocab.TEXT_BASES`
+  beside the other four, enforced by the same source-reading test, and **set in the
+  adapter rather than sniffed** — a `len == 500 and endswith("…")` detector would
+  mislabel the first Greenhouse posting that happened to be that shape. Additive and
+  `None`-defaulted. Without it a 500-character excerpt and a 6,870-character description
+  are indistinguishable in the record, and 10.6% of production rows are excerpts.
+
 - **`seniority_raw`** — a new record field holding the vendor's level string verbatim,
   the partner `employment_type_raw` has had since 0.7.0. `None` on the `title` basis,
   because nobody quoted anything there. Additive and `None`-defaulted.
@@ -24,6 +43,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — worth preserving exactly as it is.
 
 ### Fixed
+
+- **A Braintrust row reports `sections: []`, not `null`, because it has a body.** `null`
+  means "there was no body to read" and `[]` means "a body with no headers"; this adapter
+  emitted `null` while shipping a built body on 29 of 29 rows, which is a false statement
+  about the posting and collapses the exact two-state distinction the field exists to
+  carry. Its synthesized text now goes through the same `clean_with_sections` path as
+  every other body, which yields `[]` because a built sentence has no markup.
 
 - **Lever reads the markup body and promotes its own list headings — `sections` on 488
   of 489 postings, up from 13 of 135.** This adapter read `descriptionPlain` and

@@ -148,6 +148,19 @@ _CONTRACT_FIELDS = (
     "seniority",
     "seniority_raw",  # what the vendor actually said, before case-folding
     "seniority_basis",  # stated | title | None
+    # what KIND of body `text` is, when it is not an ordinary one -- vocab.TEXT_BASES.
+    # `excerpt` = the SOURCE truncates it (Adzuna caps at 500 chars + an ellipsis, 275
+    # of 275 rows). `synthesized` = there was no prose body and the adapter built one
+    # from structured fields (Braintrust, 29 of 29, ~157 chars). `None` = not
+    # characterized, which is the honest value for the other seventeen: there is no
+    # `full`, because nobody has verified completeness for any of them and asserting it
+    # would be exactly the plausible-looking guess `_coerce` exists to refuse.
+    #
+    # `text is None` already says "the source sent no body" (smartrecruiters, 250 of
+    # 250), so that state needs no vocabulary entry. Without this field an excerpt
+    # averaging 500 characters and a real body averaging 6,870 are indistinguishable
+    # in the record, and 10.6% of production rows are excerpts.
+    "text_basis",  # excerpt | synthesized | None -- vocab.TEXT_BASES
     # when
     "posted_basis",  # stated | relative | None
     "expires",

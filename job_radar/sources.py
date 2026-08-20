@@ -2231,6 +2231,14 @@ def search_adzuna(queries):
                         # array beside it has the state; see _adzuna_place.
                         "location": loc.get("display_name", ""),
                         "url": j.get("redirect_url", ""),
+                        # SET HERE, not sniffed downstream: this adapter knows it is
+                        # Adzuna. The API truncates every description at 500 chars and
+                        # ends it with an ellipsis -- 275 of 275 rows locally, 7,146 of
+                        # 7,150 [live prod, 2026-08-20], and a live probe confirms no
+                        # fuller field exists on the result object. Without this the
+                        # record cannot distinguish a 500-char excerpt from a real body
+                        # averaging 6,870.
+                        "text_basis": "excerpt",
                         **posted_from(j.get("created")),
                         "expires": to_date(j.get("deadline")),  # 1 of 20 populated
                         "department": (j.get("category") or {}).get("label", ""),
@@ -2435,6 +2443,14 @@ def search_braintrust(queries):
             text = f"{t}. Skills: {skills}. {j.get('contract_type', '')} contract" + (
                 f", ~{hrs}h/wk." if hrs else "."
             )
+            # ROUTED THROUGH THE SAME PATH AS EVERY OTHER BODY, which yields `[]` here
+            # -- a built sentence has no markup and therefore no headers. It used to
+            # skip this and emit `sections: null`, and the contract says `null` means
+            # "there was no body to read" while `[]` means "a body with no headers".
+            # There IS a body on 29 of 29 rows, so `null` was a false statement about
+            # the posting, and the two states exist precisely so a consumer can tell
+            # a missing body from an unstructured one.
+            text, bt_secs = clean_with_sections(text)
             out.append(
                 {
                     "title": t,
@@ -2443,6 +2459,12 @@ def search_braintrust(queries):
                         " ".join(_names(j.get("locations"))) + " (Remote)"
                     ).strip(),
                     "url": f"https://app.usebraintrust.com/jobs/{j.get('id')}/",
+                    # There is no prose body in this payload; `text` above is BUILT from
+                    # the title and skills, ~157 chars on 29 of 29 rows. A consumer that
+                    # reads it as a description is reading our sentence, not the
+                    # employer's, and nothing else in the record says so.
+                    "sections": bt_secs,
+                    "text_basis": "synthesized",
                     **posted_from(j.get("created")),
                     # `level` was going into `department` -- a seniority filed as a
                     # category, one of the four meanings that made that column

@@ -1368,6 +1368,66 @@ def test_usajobs_employer_is_not_a_category(monkeypatch):
     assert sources._usajobs_place(None)["state"] is None
 
 
+def test_a_truncated_body_says_so_and_a_built_one_says_so(monkeypatch):
+    """Two bodies that are not ordinary bodies, each labelled by the adapter that knows.
+
+    Adzuna caps every description at 500 characters and ends it with an ellipsis -- 275
+    of 275 rows locally, 7,146 of 7,150 [live prod, 2026-08-20], and a live probe
+    confirms no fuller field exists. Braintrust sends no prose at all and its adapter
+    BUILDS a sentence from the title and skills. Without a label both are
+    indistinguishable in the record from a real 6,870-character description.
+
+    There is no `full`: seventeen adapters would have to claim a completeness nobody
+    measured, so `None` -- not characterized -- is the honest value for them.
+    """
+    payload = {
+        "results": [
+            {
+                "title": "AI Engineer",
+                "company": {"display_name": "Acme"},
+                "location": {"display_name": "Louisville, KY", "area": ["US", "KY"]},
+                "redirect_url": "https://www.adzuna.com/details/1",
+                "created": "2026-08-01T00:00:00Z",
+                "description": "Responsibilities: Develop and v" + "x" * 460 + "\u2026",
+            }
+        ]
+    }
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "k")
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *_a, **_k: None)
+    rows = sources.search_adzuna(["ai engineer"])
+    assert rows, "adzuna produced no rows"
+    assert rows[0]["text_basis"] == "excerpt"
+
+
+def test_a_synthesized_braintrust_body_reports_no_headers_not_no_body(monkeypatch):
+    """`sections: null` means "there was no body to read" and `[]` means "a body with no
+    headers". This adapter emitted `null` while shipping a body on 29 of 29 rows, which
+    is a false statement about the posting -- and it collapses the exact two-state
+    distinction the field exists to carry."""
+    payload = {
+        "results": [
+            {
+                "id": 1,
+                "title": "AI Platform Engineer",
+                "employer": {"name": "Acme"},
+                "created": "2026-08-01T00:00:00Z",
+                "contract_type": "long",
+                "expected_hours_per_week": 40,
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *_a, **_k: None)
+    rows = sources.search_braintrust(["ai engineer"])
+    assert rows, "no braintrust rows"
+    row = rows[0]
+    assert row["text"], "the adapter builds a body, so there is one"
+    assert row["sections"] == [], f"a body with no headers is [], not {row['sections']!r}"
+    assert row["text_basis"] == "synthesized"
+
+
 def test_lever_reads_the_html_body_and_promotes_its_own_list_headings(monkeypatch):
     """The Ashby defect, one adapter over, and missed when Ashby's was fixed: this read
     `descriptionPlain`/`additionalPlain`, so `sections` was `[]` on 122 of 135 Lever
@@ -3017,6 +3077,9 @@ def test_no_adapter_emits_a_basis_outside_its_closed_vocabulary():
         ("seniority_basis", _vocab.SENIORITY_BASES),
         ("posted_basis", _vocab.POSTED_BASES),
         ("salary_basis", _vocab.SALARY_BASES),
+        # `text_basis` joins the same enforcement rather than getting its own: the
+        # whole point of a closed vocabulary is that one mechanism polices all of them.
+        ("text_basis", _vocab.TEXT_BASES),
     ):
         used = set(_re.findall(rf'"{field}":\s*"([a-z_]+)"', src))
         used |= set(_re.findall(rf'"{field}":\s*"([a-z_]+)"\s+if', src))

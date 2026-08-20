@@ -122,6 +122,11 @@ def _nested(r: dict) -> dict:
         "url": r.get("url") or None,
         "direct_apply": r.get("direct_apply"),
         "text": r.get("text") or None,
+        # Sits beside `text` on purpose: a consumer reading the body needs to know in
+        # the same breath whether the SOURCE truncated it (`excerpt`) or whether we
+        # built it out of structured fields (`synthesized`). `None` means nobody
+        # characterized it -- there is no `full`, see vocab.TEXT_BASES.
+        "text_basis": r.get("text_basis"),
         # NO `or None`, and that is not an oversight. `[] or None` is `None`, which
         # would collapse "we looked and the body had no headers" into "there was no
         # body" -- the exact two-state distinction this field exists to carry. Every

@@ -1211,6 +1211,30 @@ POSTED_BASES = frozenset({"stated", "relative"})
 # salary_min is always one an employer committed to.
 SALARY_BASES = frozenset({"stated", "parsed"})
 
+# `text_basis` -- what KIND of body this is, when it is not an ordinary one.
+#
+# THERE IS DELIBERATELY NO `full`. Seventeen adapters would have to claim it and nobody
+# has verified completeness for any of them, so `full` would assert something no
+# measurement supports -- the same reason `_coerce` refuses to default an unknown to a
+# plausible value. `None` here means "not characterized", which is the truth.
+#
+# `text is None` already carries "the source sent no body" (smartrecruiters, 250 of 250
+# rows), so that state needs no vocabulary entry of its own.
+#
+# `excerpt` -- the source itself truncates. Adzuna caps every description at 500
+# characters and ends it with an ellipsis: 275 of 275 rows on a local harvest, 7,146 of
+# 7,150 `[live prod, 2026-08-20]`, and `catalog/adzuna.md` has recorded
+# `median_chars: 500` plus "Description truncated" since 2026-08-03. A live probe
+# confirms the API carries no fuller field, and it reproduces on a non-tech query.
+# `synthesized` -- there was no prose body and the adapter BUILT one from structured
+# fields. Braintrust, 29 of 29 rows, ~157 characters of title plus skills.
+#
+# SET IN THE ADAPTER, NEVER SNIFFED. A `len == 500 and endswith("…")` detector would
+# mislabel the first Greenhouse posting that happens to be that shape; the Adzuna
+# adapter already knows it is Adzuna. Same discipline as reading a structured signal
+# instead of re-deriving it from prose.
+TEXT_BASES = frozenset({"excerpt", "synthesized"})
+
 
 def remote_type(raw) -> str | None:
     """Vendor work-arrangement string -> remote | hybrid | onsite | None.
