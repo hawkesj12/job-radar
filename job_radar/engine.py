@@ -778,7 +778,30 @@ def derive_remote(p: dict) -> dict:
     # nothing per-row about remoteness. Only fills gaps: an adapter that sent its own
     # structured list always wins, and `[]` is a real value that must not be overwritten,
     # so this tests `is None` rather than falsiness.
-    if p.get("remote_areas") is None and p.get("remote_regions") is None:
+    #
+    # WHOEVER SUPPLIED THE RAW OWNS THE PARSE. `remote_scope_raw is None` is the adapter
+    # saying "I recorded no boundary evidence", which is the only state in which this
+    # string is ours to read. An adapter that DID set the raw has already decided what its
+    # own words mean -- including deciding they mean nothing -- and re-reading them here
+    # second-guesses it with a prose rule built for a different kind of string.
+    #
+    # `None` alone could not express that. It meant both "unstated" and "derive me", so an
+    # adapter had no way to say "there is no boundary here, do not invent one", and
+    # google_jobs could not stop `Anywhere` from becoming a worldwide claim. That token is
+    # Google's SEARCH MODE under `&ltype=1`, not the posting's words -- it sits on exactly
+    # the 43 rows that carried `[]` and on none of the 9 that name a city, and 11 of the 43
+    # state a US-only bound in their own title, body or URL ("Open-Source Machine Learning
+    # Engineer - US Remote" recorded as stated-worldwide). Through
+    # `scoring._region_allowed`, `[] -> return True` is the one unconditional bypass in the
+    # scoring layer, so every one of them satisfied a filter that excludes them.
+    #
+    # Measured at 781e504: 43 rows lose the `[]`, 348 adapter-supplied boundaries are kept,
+    # and ZERO rows lose a boundary the location legitimately stated.
+    if (
+        p.get("remote_scope_raw") is None
+        and p.get("remote_areas") is None
+        and p.get("remote_regions") is None
+    ):
         areas, regions = vocab.remote_scope(location)
         if areas is not None:
             p["remote_areas"] = areas

@@ -59,6 +59,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
+  that describes the query rather than the posting.** Google's `location` is `Anywhere` on
+  every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city
+  (`Vancouver, BC`, `Surrey, BC`) on the 9 that are not. It varies with the **search mode**,
+  not with the row, so it is not evidence about any posting. `derive_remote` parsed it into
+  `remote_areas = []`, and through `scoring._region_allowed` an empty list is **the one
+  unconditional bypass in the scoring layer** — so each of those rows satisfied every
+  `allowed_scopes` policy a user can set. **11 of the 43 state a US-only bound in their own
+  title, body or URL**, including one titled `Open-Source Machine Learning Engineer - US
+Remote` recorded as open to the world, and another whose body reads "Candidates must live
+  in the United States."
+
+  The mechanism underneath: **`None` meant both "unstated" and "derive me"**, so an adapter
+  had no way to say _there is no boundary here, do not invent one_. It now can —
+  `remote_scope_raw is None` is the adapter declaring it recorded no boundary evidence, and
+  that is the only state in which the location string is the engine's to read. **Whoever
+  supplied the raw owns the parse.** google_jobs records Google's own word as evidence and
+  leaves the boundary unstated; its `remote_type` still comes from `work_from_home`, a real
+  vendor boolean, and is untouched. Measured: 43 rows lose the `[]`, **348 adapter-supplied
+  boundaries are kept, and zero rows lose a boundary the location legitimately stated.**
+
 - **A full week in the office was labelled `hybrid`, and a qualified telework was labelled
   `remote`.** Three defects in `remote_signal`'s body lane, 100 rows, every change from a
   wrong value to a right one:

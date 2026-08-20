@@ -424,7 +424,9 @@ def fetch_ashby(slug: str):
                 "remote_type": remote_type(j.get("workplaceType")),
                 "remote_basis": "stated" if j.get("workplaceType") else None,
                 **_ashby_place(j.get("address")),
-                "locations": _ashby_locations(j, j.get("jobUrl") or j.get("applyUrl", "")),
+                "locations": _ashby_locations(
+                    j, j.get("jobUrl") or j.get("applyUrl", "")
+                ),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
                 **_ashby_salary(comp),
@@ -1171,6 +1173,19 @@ def search_google_jobs(queries):
                         "title": j.get("title", ""),
                         "company": j.get("company_name", ""),
                         "location": j.get("location", ""),
+                        # GOOGLE'S WORD, KEPT AS EVIDENCE AND NOT AS A BOUNDARY. Setting
+                        # this is what tells `engine.derive_remote` the raw is already
+                        # accounted for, so it does not parse the string into
+                        # `remote_areas` -- see the "whoever supplied the raw owns the
+                        # parse" comment there. Under `&ltype=1` this field is the SEARCH
+                        # MODE, not the posting's scope: it is the constant `Anywhere` on
+                        # every work-from-home result (43 of 43 locally) and a real city on
+                        # the rest, so it varies with the QUERY and not with the row. 11 of
+                        # those 43 state a US-only bound in their own title, body or URL,
+                        # and `[]` satisfies every `allowed_scopes` policy unconditionally.
+                        # Google exposes no eligibility field, so the honest boundary is
+                        # unstated.
+                        "remote_scope_raw": j.get("location") or None,
                         "url": (
                             _url := _best_apply_link(
                                 j.get("apply_options"),

@@ -305,6 +305,46 @@ def test_the_record_carries_areas_regions_and_the_raw_string():
     assert (q["city"], q["state"], q["country"]) == ("Atlanta", "GA", "US")
 
 
+def test_an_adapter_that_supplied_the_raw_owns_the_parse():
+    """`remote_scope_raw is None` is the adapter saying "I recorded no boundary evidence",
+    and it is the only state in which the location string is ours to read.
+
+    Before this, `None` meant both "unstated" and "derive me", so an adapter had no way to
+    say "there is no boundary here, do not invent one". google_jobs could not stop
+    `Anywhere` -- which under `&ltype=1` is Google's SEARCH MODE, not the posting's words --
+    from becoming a stated-worldwide claim on 43 of 43 work-from-home rows. 11 of those 43
+    state a US-only bound in their own title, body or URL, and through
+    `scoring._region_allowed` an empty list is the one unconditional bypass in the scoring
+    layer, so each satisfied a filter that excludes it.
+
+    Measured at 781e504: 43 rows lose the `[]`, 348 adapter-supplied boundaries are kept,
+    and ZERO rows lose a boundary the location legitimately stated."""
+    from job_radar import engine
+
+    # google_jobs now records Google's own word and keeps the boundary unstated.
+    g = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/3",
+             "source": "google_jobs", "location": "Anywhere",
+             "remote_scope_raw": "Anywhere",
+             "remote_type": "remote", "remote_basis": "stated"}
+        )
+    )  # fmt: skip
+    assert g["remote_areas"] is None, "a search-mode token is not a stated boundary"
+    assert g["remote_scope_raw"] == "Anywhere", "Google's word survives as evidence"
+    assert g["remote_type"] == "remote", "the vendor's work_from_home flag is untouched"
+
+    # The SAME string, from a source that recorded no raw, still parses as before -- the
+    # rule keys on who spoke, not on the value.
+    d = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/4",
+             "source": "greenhouse", "location": "Anywhere"}
+        )
+    )  # fmt: skip
+    assert d["remote_areas"] == []
+
+
 def test_a_us_town_named_after_a_country_is_not_dropped():
     """Turkey TX, Peru IN, Greece NY, China ME, Italy TX and Egypt TX are real US places,
     and the non-US filter matches country NAMES against raw text. The pipeline already did
