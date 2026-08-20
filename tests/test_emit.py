@@ -112,7 +112,7 @@ def test_a_real_row_survives_the_whole_pipeline_to_json():
     # hybrid is NOT remote, and the feed must be able to say so distinctly from
     # "nobody told us" -- the whole reason the contract separates None from False.
     assert got["remote"]["type"] == "hybrid"
-    assert got["remote"]["is_remote"] is False
+    assert "is_remote" not in got["remote"], "the bool was removed at 0.9.0"
     assert got["text"], "the body is the entire input to the fit score"
 
 

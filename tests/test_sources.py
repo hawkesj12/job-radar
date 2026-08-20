@@ -1322,8 +1322,7 @@ def test_unknown_remote_is_none_not_false(monkeypatch):
 
     r = engine._coerce({"title": "Engineer", "text": "no arrangement stated"})
     assert r["remote_type"] is None
-    assert r["remote"] is None
-    assert r["remote"] is not False
+    assert r["remote_type"] != "onsite"  # "did not say" is not "said on-site"
 
 
 def test_coerce_does_not_stringify_the_typed_fields():
@@ -1334,7 +1333,6 @@ def test_coerce_does_not_stringify_the_typed_fields():
     r = engine._coerce({"title": None, "remote_type": "remote", "tags": ["a", "b"]})
     assert r["title"] == ""  # required field: coerced to str
     assert r["remote_type"] == "remote"  # typed field: untouched
-    assert r["remote"] is True  # derived from remote_type
     assert r["tags"] == ["a", "b"]
     assert engine._coerce({"tags": "solo"})["tags"] == ["solo"]  # scalar -> list
 

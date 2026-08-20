@@ -689,7 +689,7 @@ def test_coerce_records_the_remote_decision_without_overwriting_a_source():
     # it scans the body and 69% of postings are discarded a moment later.
     p = engine.derive_remote(engine._coerce(row))
     assert (p["remote_type"], p["remote_basis"]) == ("remote", "title")
-    assert p["remote"] is True, "the derived bool must reflect a newly-derived type"
+    assert "remote" not in p, "the derived bool was removed at 0.9.0; read remote_type"
     # a source that sent its own structured signal keeps it
     kept = engine.derive_remote(
         engine._coerce(
@@ -3303,10 +3303,13 @@ def test_a_rank_word_that_is_the_job_is_not_stripped():
 
 
 def test_hybrid_is_expressible_and_unknown_is_not_onsite():
+    """THREE states, in one field. A `remote` bool sat beside `remote_type` until
+    0.9.0 and could only express two of them, so every hybrid role read as `false` --
+    true, and indistinguishable from on-site to anything that only checked the flag."""
     r = engine._coerce({"title": "Engineer", "remote_type": "hybrid"})
     assert r["remote_type"] == "hybrid"
-    assert r["remote"] is False  # derived: hybrid is not fully remote
-    assert engine._coerce({"title": "Engineer"})["remote"] is None  # unknown != False
+    assert engine._coerce({"title": "Engineer"})["remote_type"] is None  # != "onsite"
+    assert "remote" not in r and "remote" not in engine._coerce({"title": "E"})
 
 
 def test_absent_optional_text_is_none_not_empty_string():

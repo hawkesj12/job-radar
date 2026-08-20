@@ -130,6 +130,16 @@ _CONTRACT_FIELDS = (
     "city",
     "state",
     "country",
+    # THE ONE FIELD FOR WHETHER THE ROLE IS REMOTE. A `remote` bool sat beside this
+    # until 0.9.0 and was exactly `None if remote_type is None else remote_type ==
+    # "remote"` -- 7,568 of 7,568 rows in a local harvest, no exceptions. Two homes for
+    # one fact, and the bool was the weaker home: it cannot express `hybrid`, so 1,679
+    # hybrid rows carried `remote: false`, which is true and reads as on-site to
+    # anything that only checks the flag. Nothing in the package ever read it --
+    # `scoring.is_remote` reads THIS field and derives its own flag, and says so.
+    #
+    # Derive it, tri-state, and keep the tri-state: collapsing `None` to `False`
+    # asserts "not remote" on every row nobody classified (3,399 of 7,568 here).
     "remote_type",  # remote | hybrid | onsite | None
     # WHERE a remote worker may sit -- the eligibility boundary, which is a different fact
     # from where the work is (that is city/state/country). Three fields because they are
@@ -179,7 +189,6 @@ _CONTRACT_FIELDS = (
     "harvested_at",
     # provenance
     "direct_apply",  # bool -- the url reaches the EMPLOYER, not an aggregator
-    "remote",  # bool | None -- DERIVED from remote_type; see _coerce
     # list[dict] | None -- the posting's own structure: [{type, header, start, end}]
     # where start/end index THIS record's `text`. `None` means there was no body to
     # look at; `[]` means we looked and the body carried no headers. Those are
@@ -503,12 +512,6 @@ def _coerce(p: dict) -> dict:
     elif parsed["seniority"]:
         p["seniority"] = parsed["seniority"]
         p["seniority_basis"] = "title"
-
-    # `remote` is DERIVED from remote_type, not stored beside it. Two homes for one
-    # fact is how a hybrid role ends up reported as `remote: False`, which reads as
-    # on-site to anything that only checks the flag.
-    rt = p.get("remote_type")
-    p["remote"] = None if rt is None else rt == "remote"
 
     # `country` IS ALPHA-2 OR None, enforced here so no adapter can reintroduce a
     # second vocabulary. A live probe across all nineteen sources found three at once
@@ -839,8 +842,6 @@ def derive_remote(p: dict) -> dict:
     if p.get("remote_scope_raw") is None and location:
         p["remote_scope_raw"] = location
 
-    rt = p.get("remote_type")
-    p["remote"] = None if rt is None else rt == "remote"
     return p
 
 
@@ -868,7 +869,7 @@ _READING_ORDER = (
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",
-    "remote", "remote_type", "remote_basis",
+    "remote_type", "remote_basis",
     "remote_areas", "remote_regions", "remote_scope_raw",
     # when
     "posted", "posted_basis", "expires", "harvested_at",

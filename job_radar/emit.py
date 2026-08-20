@@ -125,7 +125,10 @@ def _nested(r: dict, include_text: bool = True) -> dict:
             "all": r.get("locations"),
         },
         "remote": {
-            "is_remote": r.get("remote"),
+            # NO `is_remote`. A bool sat here until 0.9.0 and was exactly
+            # `type == "remote"` with None preserved, so it was a second home for one
+            # fact -- and the weaker home, since it cannot say `hybrid` and reported
+            # 1,679 hybrid rows as `false`. Read `type`; it answers more precisely.
             "type": r.get("remote_type"),
             # WHERE a remote worker may sit. `areas` are ISO codes, `regions` are
             # multi-country tokens, and they are separate because they are different kinds

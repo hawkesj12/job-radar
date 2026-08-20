@@ -87,6 +87,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
+- **The `remote` boolean is gone; use `remote_type`.** It was exactly
+  `None if remote_type is None else remote_type == "remote"` on **7,568 of 7,568 rows**
+  `[local 94-board harvest, 0.9.0]` — two homes for one fact, and the bool was the
+  weaker home. It cannot express `hybrid`, so **1,679 hybrid rows carried
+  `remote: false`**: true, and indistinguishable from on-site to anything that only
+  checked the flag. Nothing in the package ever read it — `scoring.is_remote` reads
+  `remote_type` and derives its own flag, and its comment says why. `emit._nested`'s
+  `remote.is_remote` key goes with it.
+
+  **Migrating:** derive it, and keep the tri-state —
+  `None if remote_type is None else remote_type == "remote"`. Collapsing `None` to
+  `False` asserts "not remote" on every row nobody classified, which is **3,399 of
+  7,568** in that harvest. (An earlier draft of this work proposed the two-term form
+  `remote_type == "remote"` as "100% equivalent"; measured literally it agrees on only
+  4,169 of 7,568 rows, because it turns every unknown into `False`.)
+
 - **`locations[]` entries no longer carry a `url`.** Each entry is now
   `{raw, city, state, country}` — four keys, not five. The key held the posting's own
   apply url on **9,585 of 9,585 entries** in a 7,568-row harvest, with **zero**
