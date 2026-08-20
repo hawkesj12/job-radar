@@ -128,6 +128,24 @@ message read "Comment-only; no behaviour change."
 - **Never `git commit --amend` when HEAD is not your own commit.** It rewrites someone
   else's history. Check `git log -1` first.
 
+**Naming a path on `git add` does not narrow what `git commit` writes.** The index may
+already hold someone else's staged work — or your own from another task — and `commit`
+takes all of it. This happened here: `git add CONTRIBUTING.md && git commit` swept five
+files belonging to a concurrent task into a docs commit. Nothing was lost (`git reset
+--soft`, unstage theirs, recommit, restage theirs), but the message described one file
+and the commit held six.
+
+Two habits that prevent it:
+
+```bash
+git status --short          # BEFORE you stage: is anything already in the index?
+git commit -o <paths>       # --only: commit exactly these paths, whatever else is staged
+```
+
+And read the staged diff **in its own command**, not chained onto the commit. Printing
+`git diff --cached --stat && git commit` shows you the problem *after* the commit
+exists, which is how this one got through despite the rule two paragraphs up.
+
 Two checks worth running on your own staged diff before you commit:
 
 ```bash
