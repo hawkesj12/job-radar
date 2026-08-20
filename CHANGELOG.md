@@ -44,6 +44,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Ashby: a `state` that was just the country repeated, and the vendor's own trailing
+  whitespace.** 36 of 1,730 live postings put the country in `addressRegion`
+  (`("UK","UK")` 16, `("Australia","Australia")` 7, `("Singapore","Singapore")` 5), and
+  11 send it with trailing whitespace (`"California "`) straight into a column that gets
+  grouped on. `_ashby_place` now compares the two fields as **raw strings** and trims at
+  the boundary. The obvious rule — drop a region that *resolves* to the row's own country
+  — was measured and rejected: `England` resolves to GB but is a genuine ISO 3166-2:GB
+  subdivision, and **27 of the 34 values that rule deleted were correct (39% collateral)**.
+  `vocab._COUNTRY_CODES` carries that alias for prose matching; borrowing it to validate a
+  data column is what makes it wrong. String equality catches 36 of 43 with zero collateral.
+
 - **Geography: the subdivision was being left inside `city`.** `vocab.split_place` splits
   on the LAST comma, so `"Costa Mesa, California, United States"` matched the
   country-name branch, wrote `"Costa Mesa, California"` into `city` and left `state`

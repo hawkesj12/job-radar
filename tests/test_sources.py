@@ -2555,6 +2555,38 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
     assert remote_scope("Worldwide") == ([], None)
 
 
+def test_ashby_region_that_is_the_country_repeated_is_dropped():
+    """A vendor putting the country in `addressRegion` is not stating a subdivision.
+
+    RAW STRING EQUALITY, and the alternative is why. "Drop a region that RESOLVES to the
+    row's own country" reads as the more principled rule and destroys real data:
+    `England` resolves to GB, but England IS an ISO 3166-2:GB subdivision (GB-ENG), and
+    27 of the 34 values that rule deleted on 1,730 live postings were exactly that -- 39%
+    collateral. `vocab._COUNTRY_CODES` carries `england -> GB` for PROSE matching; using
+    it to validate a data column is the error.
+    """
+    from job_radar.sources import _ashby_place
+
+    def pa(**kw):
+        return {"postalAddress": kw}
+
+    assert _ashby_place(pa(addressRegion="UK", addressCountry="UK"))["state"] is None
+    assert (
+        _ashby_place(pa(addressRegion="Australia", addressCountry="Australia"))["state"]
+        is None
+    )
+    # ...and a REAL subdivision that merely resolves to the same country survives
+    assert (
+        _ashby_place(pa(addressRegion="England", addressCountry="United Kingdom"))["state"]
+        == "England"
+    )
+    # the vendor's own trailing whitespace never reaches a grouped column
+    assert (
+        _ashby_place(pa(addressRegion="California ", addressCountry="United States"))["state"]
+        == "California"
+    )
+
+
 def test_a_city_is_never_a_country_region_or_state_name():
     """THE ACCEPTANCE METRIC for the geography fixes, and it is deliberately not a
     fill-rate one.

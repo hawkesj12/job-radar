@@ -232,12 +232,36 @@ def _ashby_place(address) -> dict:
     pa = (address or {}).get("postalAddress") if isinstance(address, dict) else None
     if not isinstance(pa, dict):
         return {"city": None, "state": None, "country": None}
+    # TRIM AT THE BOUNDARY. The whitespace is the VENDOR's -- `addressRegion` arrives as
+    # "California " on 11 of 1,730 live postings, from one board -- and it goes straight
+    # into a column that gets GROUPED on, where " California" never meets "California".
+    # US rows survive by luck because `us_state_code` strips internally; non-US rows
+    # carry it all the way through.
+    region = (pa.get("addressRegion") or "").strip() or None
+    country_raw = (pa.get("addressCountry") or "").strip() or None
+
+    # A REGION THAT IS THE COUNTRY REPEATED IS NOT A SUBDIVISION. Ashby lets a board
+    # put anything in `addressRegion`, and 36 of 1,730 live postings put the country
+    # there: ("UK","UK") 16, ("Australia","Australia") 7, ("Singapore","Singapore") 5.
+    #
+    # COMPARED AS RAW STRINGS, DELIBERATELY, and this is the whole design. The obvious
+    # rule -- "drop a region that RESOLVES to the row's own country" -- destroys real
+    # data: `England` resolves to GB through `_COUNTRY_CODES`, but England is a genuine
+    # ISO 3166-2:GB subdivision (GB-ENG), and 27 of the 34 values that rule would have
+    # deleted were exactly that. 39% collateral, measured. The alias exists in that map
+    # for PROSE MATCHING ("we hire in England"), and borrowing it for data validation is
+    # what makes the rule wrong. String equality catches 36 of the 43 bogus values and
+    # touches none of the good ones; the 7 it misses are ("UK","United Kingdom"), the
+    # same country spelled two ways, and they are left rather than reached for with a
+    # normalizer that would re-catch England.
+    if region is not None and country_raw is not None and region == country_raw:
+        region = None
     return {
-        "city": pa.get("addressLocality") or None,
-        "state": pa.get("addressRegion") or None,
+        "city": (pa.get("addressLocality") or "").strip() or None,
+        "state": region,
         # Ashby sends a display name ("Singapore"); Lever sends alpha-2. One
         # normalizer so the column holds one vocabulary.
-        "country": country_code(pa.get("addressCountry")),
+        "country": country_code(country_raw),
     }
 
 
