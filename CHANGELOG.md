@@ -59,6 +59,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An office address was published as a remote-eligibility boundary on 622 rows.**
+  `remote_scope`'s documented rule is stated-only — "a boundary inferred from an office
+  city is not a boundary" — and the only thing enforcing it was `has_city`, a PROXY that
+  reads `split_place(...)["city"]`. A string the address parser merely could not read came
+  back `city=None`, which the gate could not tell from "parsed, and there is no city", so
+  the office country was emitted as an eligibility claim: `US` (109 rows), `United States`
+  (89), `London, UK` (50), `San Mateo, CA United States` (48, no comma before the country),
+  `Singapore` (34), `San Francisco, CA • New York, NY • United States` (23),
+  `Mexico City` (7). 622 rows across 120 distinct locations in a 7,545-row harvest;
+  **4,038 of 10,723 boundary-carrying rows in a 67,481-row production store.**
+
+  A location that names no arrangement now states no AREA — this docstring's own rule,
+  applied one level earlier than the proxy, and a strictly stronger test since a string
+  with no arrangement word cannot be stating a remote bound whatever the address parser
+  makes of it. **Areas only:** a region name is never an office address, and of the
+  no-arrangement locations that yielded a boundary, 622 were areas and **zero** were
+  regions — so gating regions bought nothing and cost `Bengaluru, Karnataka, India, APAC`,
+  which states APAC and says nothing about remoteness. Every change is to `(None, None)`;
+  no value is partially rewritten.
+
+  **This LOWERS the fill rate of `remote_areas` by roughly 30%, and that is the fix, not a
+  regression.** A consumer measuring "how many rows carry a boundary" will read it as one.
+  Note for downstream: jobfitr's US-only intake reads `remote_areas`, so ~2,502 production
+  rows lose a populated boundary and become correctly unstated.
+
+  The narrow predicate that WAS safe on `split_place` itself — a parsed city that is a
+  country name is not a city — shipped separately as `_country_is_not_a_city`. Nulling any
+  comma-bearing city instead was measured at 2,037 rows newly asserting an office address
+  as a boundary, including the `Costa Mesa, California, United States` this module's own
+  test pins, and was not taken.
+
+  **The test that should have caught this was green.**
+  `test_remote_scope_takes_only_STATED_boundaries` exists to enforce exactly this
+  invariant; four of its five strings passed because `has_city` is TRUE on them — the one
+  shape where the proxy works — and the fifth passed through the state-name guard, a
+  different branch. The failure path was never exercised. Its inputs were hand-written and
+  the corpus's are not, and that difference was the bug. It now carries ten real corpus
+  locations with their row counts, and the gate was mutated to confirm they fail without
+  it.
+
 - **Adzuna: the city was taken from the wrong tier of the vendor's hierarchy — or
   thrown away.** `_adzuna_place`'s docstring said "depth 5 shifts city one slot, so
   branch on length rather than indexing blindly"; the code read
@@ -66,8 +106,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is a neighbourhood (`Grand Central`, `Hayes Valley`, `SoMa`), and at depth 3 the `>= 4`
   test **discarded the city entirely** — `'San Francisco, California'` (15 rows) and
   `'New York City, New York'` (8) returned no city while the vendor had supplied a clean
-  one. The city is now pinned to its slot: `area[3]`, falling back to `area[2]` at depth
-  3. **Not a `County`/`Parish`/`Borough` suffix rule** — that is a US-English word list
+  one. The city is now pinned to its slot: `area[3]`, falling back to `area[2]` at depth 3. **Not a `County`/`Parish`/`Borough` suffix rule** — that is a US-English word list
   and Adzuna's UK, Australian and German hierarchies put a district, an LGA and a Kreis
   in that tier. The test that covered this asserted the unshifted value while its own
   docstring described the shift, so it was green and the documented behaviour had never
@@ -75,16 +114,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **This reads the hierarchy correctly; it does not make Adzuna's geography correct.**
   `'Times Square, King County'` resolves to `state='WA'` on 3 rows, and Times Square is
-  not in King County, Washington. *Inferred from source and harvest output — there are no
+  not in King County, Washington. _Inferred from source and harvest output — there are no
   Adzuna API keys in this environment, so unlike the Ashby and Greenhouse findings this
-  one was never confirmed against a live response.*
+  one was never confirmed against a live response._
 
 - **Ashby: a `state` that was just the country repeated, and the vendor's own trailing
   whitespace.** 36 of 1,730 live postings put the country in `addressRegion`
   (`("UK","UK")` 16, `("Australia","Australia")` 7, `("Singapore","Singapore")` 5), and
   11 send it with trailing whitespace (`"California "`) straight into a column that gets
   grouped on. `_ashby_place` now compares the two fields as **raw strings** and trims at
-  the boundary. The obvious rule — drop a region that *resolves* to the row's own country
+  the boundary. The obvious rule — drop a region that _resolves_ to the row's own country
   — was measured and rejected: `England` resolves to GB but is a genuine ISO 3166-2:GB
   subdivision, and **27 of the 34 values that rule deleted were correct (39% collateral)**.
   `vocab._COUNTRY_CODES` carries that alias for prose matching; borrowing it to validate a
@@ -129,8 +168,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`locations[]` and the scalar fields no longer disagree.** The nested branch parsed
   raw while the scalar stripped arrangement words first, so one row carried
   `city="Illinois"` beside `locations[0].city="Remote - Illinois"`. Both read through one
-  helper now: **125 nested entries carrying a separator or the word "remote" in `city` ->
-  0.** Multi-location strings also split on `|` and `•`, not just `;`.
+  helper now: **125 nested entries carrying a separator or the word "remote" in `city` -> 0.** Multi-location strings also split on `|` and `•`, not just `;`.
 
 - **Multi-location splitting no longer manufactures places.** `|` does not mean the same
   thing on every board: Greenhouse uses it for separate offices, **Ashby uses it as a
@@ -159,13 +197,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   yielded `city="Canada"`. Nine rows also gain a correct stated remote boundary as a
   result, because the category error was suppressing it.
 
-
 - **An inline tag no longer leaves a space where it stood — 4,580 → 62 spaces sitting
   before a punctuation mark.** `clean` replaced EVERY tag with a space, which is right
   for a block tag and wrong for a bold or a link: `At <a>Smartsheet</a>, your ideas`
   became `At Smartsheet , your ideas`, on 67.7% of rows with a body, and a tag boundary
   landing mid-word split "the" into "t he". Measured on 2,712 raw bodies `[live fetch, 9
-  boards, 2026-08-20]`; also 5 → on himalayas and 7 on a non-tech Muse sample.
+boards, 2026-08-20]`; also 5 → on himalayas and 7 on a non-tech Muse sample.
 
   **The uppercase guard is the whole rule**, and it is why this is not simply "delete
   inline tags": a word split by a tag always CONTINUES in lower case and two distinct

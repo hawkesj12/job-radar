@@ -771,6 +771,7 @@ def _placeless_head(head: str) -> bool:
 # difference visible instead of accidental.
 LOCATION_SEPARATORS = r"[;|\u2022]"
 
+
 def _country_is_not_a_city(place: dict) -> dict:
     """A parsed `city` that IS a country name is not a city.
 
@@ -983,7 +984,6 @@ def _split_place_inner(raw) -> dict:
     return empty
 
 
-
 def split_place(raw) -> dict:
     """Public entry: the parser above, then the country-is-not-a-city predicate.
 
@@ -1132,6 +1132,17 @@ _REMOTE_STRIP = re.compile(
     re.I,
 )
 
+# A location that NAMES AN ARRANGEMENT. Separate from `_REMOTE_STRIP` -- which is a
+# rewriting pattern and carries `\(\s*\)` for the brackets it leaves behind -- because this
+# one is a QUESTION, and "( )" is not an answer to it. `distributed` and the
+# `_REMOTE_ANYWHERE` words are members here and not there for the same reason: they say
+# what the arrangement is without being noise to strip out of an address.
+_STATES_AN_ARRANGEMENT = re.compile(
+    r"(?<![a-z])(?:remote|hybrid|onsite|on-site|wfh|work from home|telecommute|telework"
+    r"|distributed|anywhere|world[- ]?wide|globally|global|any location)(?![a-z])",
+    re.I,
+)
+
 
 _ARRANGEMENT_COMPOUND = re.compile(
     r"(?<![-\w])(?:remote|hybrid|onsite|on-site|wfh|telecommute)-([A-Za-z]+)", re.I
@@ -1194,6 +1205,26 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
 
     ALL matches, not the longest. "Remote - US & Canada" is two countries, and 13 measured
     rows name several US states; a scalar picked one arbitrarily and dropped the rest.
+
+    A LOCATION THAT NAMES NO ARRANGEMENT STATES NO AREA. `has_city` was carrying that alone
+    and it is a PROXY that fails open: it reads
+    `split_place(...)["city"]`, so a string the parser merely could not read -- "San Mateo,
+    CA United States" (no comma before the country), "London, UK", "US > Arizona > Phoenix"
+    -- came back `city=None` and its office country was published as an eligibility
+    boundary. Measured at 781e504: 509 rows on the prose path, 486 of them not remote at
+    all, plus 4,038 in a 67,481-row production store. The rule is this docstring's own
+    ("STATED ONLY"), applied one level earlier than the proxy, and it is a strictly
+    stronger test -- a string with no arrangement word cannot be stating a remote bound no
+    matter what the address parser makes of it.
+
+    Deliberately NOT a fix to `has_city`: nulling a comma-bearing city instead was measured
+    at 2,037 rows newly asserting an office address as a boundary, including the
+    "Costa Mesa, California, United States" that this module's own test pins. The narrow
+    predicate that WAS safe there now lives in `_country_is_not_a_city`.
+
+    `scoring.remote_signal` is unaffected: it only reaches here inside
+    `if _REMOTE_RE.search(location)`, whose alternation is a subset of this gate's, so the
+    check is a no-op on that path rather than a second opinion that could disagree.
     """
     s = _flatten(raw).strip()
     if not s:
@@ -1257,8 +1288,15 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     # which is the honest answer when the alternative is calling New York a restriction.
     guards = named | {_STATE_NAMES[m.group(0)] for m in _STATE_NAME_RE.finditer(low)}
 
+    # GOVERNS AREAS ONLY, for the reason the city test already governs areas only: a region
+    # name is never an office address, so it needs no arrangement word to be a real
+    # statement. Measured at 781e504 -- of the locations with no arrangement word that still
+    # yielded a boundary, 622 were areas and ZERO were regions, so gating regions too bought
+    # nothing and cost "Bengaluru, Karnataka, India, APAC", which states APAC and says
+    # nothing about remoteness. The suite caught that; the corpus then showed the whole
+    # defect was areas.
     areas: set[str] = set()
-    if not has_city:
+    if not has_city and _STATES_AN_ARRANGEMENT.search(s):
         areas = set(named)
         # A bare US state with no city -- "Remote - TX". `US-TX`, not `TX`: seven codes are
         # both a US state and an ISO country (AR CA CO DE ID IL IN), so a bare code left the

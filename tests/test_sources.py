@@ -1437,7 +1437,9 @@ def test_a_synthesized_braintrust_body_reports_no_headers_not_no_body(monkeypatc
     assert rows, "no braintrust rows"
     row = rows[0]
     assert row["text"], "the adapter builds a body, so there is one"
-    assert row["sections"] == [], f"a body with no headers is [], not {row['sections']!r}"
+    assert row["sections"] == [], (
+        f"a body with no headers is [], not {row['sections']!r}"
+    )
     assert row["text_basis"] == "synthesized"
 
 
@@ -2597,8 +2599,14 @@ def test_ashby_secondary_locations_become_the_locations_list():
             "location": "San Francisco",
             "address": addr("San Francisco", "California", "United States"),
             "secondaryLocations": [
-                {"location": "Toronto", "address": addr("Toronto", "Ontario", "Canada")},
-                {"location": "Seattle", "address": addr("Seattle", "Washington", "United States")},
+                {
+                    "location": "Toronto",
+                    "address": addr("Toronto", "Ontario", "Canada"),
+                },
+                {
+                    "location": "Seattle",
+                    "address": addr("Seattle", "Washington", "United States"),
+                },
             ],
         },
         "u",
@@ -2633,12 +2641,16 @@ def test_ashby_region_that_is_the_country_repeated_is_dropped():
     )
     # ...and a REAL subdivision that merely resolves to the same country survives
     assert (
-        _ashby_place(pa(addressRegion="England", addressCountry="United Kingdom"))["state"]
+        _ashby_place(pa(addressRegion="England", addressCountry="United Kingdom"))[
+            "state"
+        ]
         == "England"
     )
     # the vendor's own trailing whitespace never reaches a grouped column
     assert (
-        _ashby_place(pa(addressRegion="California ", addressCountry="United States"))["state"]
+        _ashby_place(pa(addressRegion="California ", addressCountry="United States"))[
+            "state"
+        ]
         == "California"
     )
 
@@ -2657,7 +2669,12 @@ def test_a_city_is_never_a_country_region_or_state_name():
     ALSO a state or a country, so a blanket "reject a city that is a state name" nulls
     thousands of correct values. A metric that lies is worse than no metric.
     """
-    from job_radar.vocab import _COUNTRY_CODES, _STATE_NAMES, split_place, strip_arrangement
+    from job_radar.vocab import (
+        _COUNTRY_CODES,
+        _STATE_NAMES,
+        split_place,
+        strip_arrangement,
+    )
 
     both_a_city_and_not = {"new york", "washington", "singapore"}
     for raw in (
@@ -2806,7 +2823,17 @@ def test_a_comma_bearing_country_name_survives_the_string_branch():
 def test_remote_scope_takes_only_STATED_boundaries():
     """An office address is not an eligibility boundary. The rule applies to countries and
     subdivisions alike -- scoping it to subdivisions made it a carve-out, and on 6,779
-    area-carrying rows `remote_areas` then meant nothing more than `country`."""
+    area-carrying rows `remote_areas` then meant nothing more than `country`.
+
+    THE FIRST FIVE STRINGS PASSED WHILE THE INVARIANT WAS BROKEN ON 622 CORPUS ROWS, and
+    the reason is the point of the second block: four of them pass because `has_city` is
+    TRUE on them -- the one shape where that proxy works -- and the fifth passes through the
+    state-name guard, a different branch entirely. The failure path was never exercised. The
+    inputs were hand-written; the corpus's are not, and that difference was the bug.
+
+    So the second block is DRAWN FROM THE CORPUS, with its row count at 781e504 beside each
+    string, and it must stay that way. Every one of these returned an office country as a
+    stated remote-eligibility boundary before the arrangement gate."""
     from job_radar.vocab import remote_scope
 
     for office in (
@@ -2817,6 +2844,23 @@ def test_remote_scope_takes_only_STATED_boundaries():
         "New York (Remote)",
     ):
         assert remote_scope(office) == (None, None), office
+
+    # Real locations from a 7,545-row harvest, counts as measured. `has_city` is False on
+    # every one -- these are the strings `split_place` could not read, not the ones it read
+    # as having no city, which is the distinction the proxy cannot make.
+    for office, rows in (
+        ("US", 109),
+        ("United States", 89),
+        ("London, UK", 50),  # split_place does not resolve a bare "UK" tail
+        ("San Mateo, CA United States", 48),  # no comma before the country
+        ("Singapore", 34),
+        ("San Francisco, CA • New York, NY • United States", 23),  # bullet-separated
+        ("Canada", 22),
+        ("Mexico City", 7),  # a CITY whose name ends in a country name
+        ("US > Arizona > Phoenix", 0),  # prod-only shape; 0 in this harvest, 43 in prod
+        ("Cambridge, MA USA", 0),  # prod-only, 82 rows there
+    ):
+        assert remote_scope(office) == (None, None), f"{office!r} ({rows} rows)"
 
 
 def test_remote_scope_does_not_read_new_mexico_as_mexico():
@@ -3423,7 +3467,17 @@ def test_a_continent_inside_a_country_name_is_not_a_stated_region():
     assert remote_scope("Remote - Africa")[1] == ["AFRICA"]
     # And a region that merely sits NEXT TO a country is untouched — only a region whose
     # span falls INSIDE a matched country name is masked.
-    assert remote_scope("Bengaluru, Karnataka, India, APAC") == (["IN"], ["APAC"])
+    #
+    # The REGION half is this test's subject and is unchanged. The areas half used to read
+    # `["IN"]` and that was a wrong value pinned green: "Bengaluru, Karnataka, India" is an
+    # office address, `split_place` cannot read it (city/state/country all None), and the
+    # docstring's own rule — "a country deduced from an office city" is inference, not a
+    # statement — says it must not become a boundary. The incoherence it left: the same
+    # string WITHOUT the region returns (None, None), so appending "APAC" was what promoted
+    # the office country to an eligibility bound. The arrangement gate in `remote_scope`
+    # answers the areas half now; nothing about the span-masking changed.
+    assert remote_scope("Bengaluru, Karnataka, India, APAC") == (None, ["APAC"])
+    assert remote_scope("Bengaluru, Karnataka, India") == (None, None)
 
 
 def test_the_state_name_guard_survives_being_hoisted_to_one_alternation():
