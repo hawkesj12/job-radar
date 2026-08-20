@@ -59,6 +59,51 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A full week in the office was labelled `hybrid`, and a qualified telework was labelled
+  `remote`.** Three defects in `remote_signal`'s body lane, 100 rows, every change from a
+  wrong value to a right one:
+  - `_HYBRID_RE`'s day-count alternatives never looked at the number, so `in office 5 days
+a week` read as a split week. **38 rows** — and **35 are one employer** (Postman, "we
+    are in office 5 days a week for all roles"), 2 Anthropic, 1 OpenAI. A new `_ONSITE_RE`
+    runs **before** the hybrid branch, which is the whole fix: the same string also matches
+    `_HYBRID_RE` via "days in the office", so behind it the branch is unreachable. **Blind
+    spot, stated:** the numeral branch cannot see a spelled-out count above five. 31 corpus
+    bodies write "four days a week in the office", all genuinely hybrid today, so the gap
+    costs nothing measurable — but no metric built on this check can detect that; only
+    reading bodies can.
+  - This is also the **first body path to `onsite`**. The negation branch returns
+    `(None, None)` rather than a verdict, so `onsite` was previously reachable only from a
+    location or title — which is why greenhouse produced 0 of 4,852 and themuse 0 of 216.
+    It recognises one narrow shape and does **not** make onsite generally reachable:
+    flipping the 2,872 greenhouse rows that say nothing would default an unknown to a
+    plausible value.
+  - `_ROLE_REMOTE_RE`'s bare `\btelecommut\w*|\btelework\w*` had no assertion structure,
+    unlike every sibling branch, and nothing claimed the **qualified** phrasings first. All
+    35 telework occurrences across 26 distinct contexts were read: `50% Telecommuting
+Permitted` (9), `Part-time telecommuting is an option` (2), `Telework Type: Part-Time
+Telework` (2), `part-time telework per our global telework policy` (2) all came out
+    `remote`. They are now claimed by `_HYBRID_RE`, which runs first — the documented
+    precedence ("the specific schedule beats the general claim") already resolves them once
+    they are recognised at all. `Telework Type: Full-Time Office/Project` (4 rows) goes to
+    `onsite`, because it says office in its own words. **The bare stems stay:**
+    "Telecommuting is available for this position" is a genuine assertion and a test pins
+    it; the defect was the missing hybrid claim, not the stem.
+  - **A location that IS an arrangement word is now read as one.** `vocab.remote_type` is
+    the exact whole-string normalizer every adapter already uses for `workplaceType`, and
+    `remote_signal` never asked it about the location. **+22 `In-Office` → onsite, +19
+    `Distributed` → remote, 0 flips** — and **all 41 rows are one employer on one source**
+    (Cloudflare). Placed **last**, so it can only fill a `None` and never overturn a
+    verdict; first instead, it breaks the documented "City (Remote)" demotion on 2 rows.
+    Exact-match is the safety property: adding `distributed` to `_REMOTE_RE`, which is
+    applied to the **title**, would stamp remote on 22 unclassified distributed-systems
+    titles to fix 19 location rows.
+
+  `_HYBRID_LITERALS` gains `telecommut` and `telework` — load-bearing exactly as `anywhere`
+  once was, since "Part-time telecommuting is an option" contains neither `hybrid` nor
+  `office` and the cheap gate would short-circuit before the pattern ran. All three fixes
+  ship corpus-verbatim regression tests, and four mutants (each fix disabled in turn, plus
+  the shrunk literal set) were confirmed to fail them.
+
 - **An office address was published as a remote-eligibility boundary on 622 rows.**
   `remote_scope`'s documented rule is stated-only — "a boundary inferred from an office
   city is not a boundary" — and the only thing enforcing it was `has_city`, a PROXY that

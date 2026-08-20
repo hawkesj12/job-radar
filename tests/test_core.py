@@ -441,6 +441,118 @@ def test_the_body_literal_gates_change_no_verdict():
         assert scoring.remote_signal("Engineer", "Austin, TX", body)[0] == want, body
 
 
+def test_a_full_week_in_the_office_is_onsite_not_hybrid():
+    """`_HYBRID_RE`'s day-count alternatives never looked at the number, so "in office 5
+    days a week" -- a plain statement of an ONSITE schedule -- was read as evidence of a
+    split one. 38 rows in a 7,545-row harvest, 34 hybrid and 3 remote.
+
+    CONCENTRATION, because it changes what the number means: 35 of the 38 are Postman, 2
+    Anthropic, 1 OpenAI. Narrow and real, not a broad win.
+
+    BLIND SPOT, stated so a reader finds it: the numeral branch cannot see a spelled-out
+    count above five. 31 corpus bodies write "four days a week in the office" and every one
+    is genuinely hybrid today, so the gap costs nothing measurable -- but this test cannot
+    detect a posting that writes "seven days", and neither can the pattern."""
+    from job_radar import scoring
+
+    # Verbatim from the corpus, with row counts at 781e504.
+    postman = "At Postman we value in person collaboration. We are in office 5 days a week for all roles based out of our offices."  # 35 rows
+    assert scoring.remote_signal("Engineer", "San Francisco", postman) == (
+        "onsite",
+        "text",
+    )
+    # ONSITE must be tested BEFORE hybrid: this same string also matches `_HYBRID_RE` via
+    # "days in the office", so behind hybrid the branch is unreachable.
+    assert scoring._HYBRID_RE.search(postman.lower()) is not None
+
+    for body in (
+        "This role requires working in-office 5 days per week in San Francisco.",  # 1 row
+        "Will be based in San Francisco, CA and be expected in office 5 days per week.",
+    ):
+        assert scoring.remote_signal("Engineer", "San Francisco", body)[0] == "onsite"
+
+    # A genuine split week is untouched.
+    assert (
+        scoring.remote_signal("Engineer", "Austin", "We are in office 3 days a week.")[
+            0
+        ]
+        == "hybrid"
+    )
+
+
+def test_a_qualified_telework_is_hybrid_not_remote():
+    """`_ROLE_REMOTE_RE` carries a bare `\\btelecommut\\w*|\\btelework\\w*`, and nothing
+    claimed the QUALIFIED phrasings before it -- so a percentage or a part-time telework
+    came out `remote`. Every telework/telecommute occurrence in a 7,545-row harvest was
+    read: 35 hits, 26 distinct contexts, and the qualified ones dominate.
+
+    The bare stems are deliberately still there. "Telecommuting is available for this
+    position" IS a role-level assertion and `test_the_body_literal_gates_change_no_verdict`
+    pins it; the defect was the missing hybrid claim, not the stem."""
+    from job_radar import scoring
+
+    # Verbatim corpus shapes, counts at 781e504.
+    for body in (
+        "40 hrs/week 50% Telecommuting Permitted. Multiple Positions Available.",  # 9 rows
+        "Up to 50% telework permitted. Multiple Positions Available.",
+        "Part-time telecommuting is an option. Hybrid work from our office.",  # 2 rows
+        "Telework Type: Part-Time Telework Work Location: Clay, NY",  # 2 rows
+    ):
+        assert scoring.remote_signal("Engineer", "Austin, TX", body) == (
+            "hybrid",
+            "text",
+        ), body
+
+    # ...and one whose own words say office is ONSITE, not merely "not remote". 4 rows.
+    assert scoring.remote_signal(
+        "Engineer",
+        "Ogden, UT",
+        "Telework Type: Full-Time Office/Project Work Location:",
+    ) == ("onsite", "text")
+
+    # The unqualified assertion still reads as remote -- the stem was never the bug.
+    assert (
+        scoring.remote_signal(
+            "Engineer", "Austin, TX", "Full-time telecommuting is an option."
+        )[0]
+        == "remote"
+    )
+
+
+def test_a_location_that_IS_an_arrangement_word_is_read_as_one():
+    """`vocab.remote_type` is the exact whole-string normalizer every adapter already uses
+    for a vendor's `workplaceType`, and `remote_signal` never asked it about the LOCATION --
+    only the loose `_REMOTE_RE`. Cloudflare writes its location as the literal `In-Office`
+    and `Distributed`; both went unclassified. +22 onsite, +19 remote, 0 flips at 781e504.
+
+    ALL 41 ROWS ARE ONE EMPLOYER ON ONE SOURCE. A real per-row fix on a shape only some
+    vendors write, not a general capability.
+
+    Exact-match is the safety property. Adding `distributed` to `_REMOTE_RE` -- which is
+    applied to the TITLE -- would stamp remote on 22 currently-unclassified
+    distributed-systems titles to fix 19 location rows."""
+    from job_radar import scoring
+
+    assert scoring.remote_signal("Engineer", "In-Office", "") == ("onsite", "location")
+    assert scoring.remote_signal("Engineer", "Distributed", "") == (
+        "remote",
+        "location",
+    )
+
+    # The negatives that make it safe -- a substring match would take all four.
+    for title, loc in (
+        ("Senior Distributed Systems Engineer", "Austin, TX"),
+        ("Software Engineer - Distributed Systems", "Austin, TX"),
+    ):
+        assert scoring.remote_signal(title, loc, "") == (None, None), title
+
+    # LAST, not first: a location of exactly "Remote" whose body states a split week stays
+    # hybrid, which is the documented "City (Remote)" demotion. 2 rows.
+    assert scoring.remote_signal(
+        "Engineer", "Remote", "Our hybrid schedule is three days in the office."
+    ) == ("hybrid", "text")
+
+
 def test_remote_signal_records_how_it_decided():
     """`is_remote` called remote_posting, took a bare bool and wrote NOTHING -- so a row
     admitted because its TITLE said remote was byte-identical in the record to a row
