@@ -762,7 +762,40 @@ def _placeless_head(head: str) -> bool:
     return h in _PLACELESS
 
 
-def split_place(raw) -> dict:
+# THE SEPARATORS A VENDOR USES BETWEEN PLACES, in one place because two lists of the
+# same thing is the drift this package has paid for three times (three URL parsers, two
+# remote-vs-place tuples, `_PLACELESS` derived from `_QUAL_NOISE` rather than restated).
+#
+# `dedup.normalize_location` DELIBERATELY DOES NOT USE THIS -- see its docstring. That is
+# a decision, not an oversight, and single-sourcing the constant is what makes the
+# difference visible instead of accidental.
+LOCATION_SEPARATORS = r"[;|\u2022]"
+
+def _country_is_not_a_city(place: dict) -> dict:
+    """A parsed `city` that IS a country name is not a city.
+
+    Replaces an earlier comma-based guard that was measurably worse: nulling any
+    comma-bearing city flipped `remote_scope`'s `has_city` gate and made 9 measured
+    parts publish a list of OFFICE ADDRESSES as a stated remote-eligibility boundary
+    ("Seattle, San Francisco, New York" asserting US-NY). This predicate cannot do
+    that, because a real city is not a country name -- which is precisely the thing
+    split_place was confused about. Every office shape holds: "Austin, Texas, United
+    States", "Costa Mesa, California, United States", "Munich, Germany" and "Waco, TX"
+    all still return (None, None) from remote_scope.
+
+    The nulls it DOES cause flip that gate the right way: "Singapore, Singapore" ->
+    ['SG'] and "Canada, United States (Remote)" -> ['CA','US'] are stated boundaries
+    the country-in-the-city-column error was suppressing. 9 rows gain one, 0 values
+    change. Two-letter values are left alone -- country_code passes any two letters
+    through, and "Waco, TX" must not lose its city to that.
+    """
+    c = place["city"]
+    if c and len(c.strip()) > 2 and country_code(c) is not None:
+        return {**place, "city": None}
+    return place
+
+
+def _split_place_inner(raw) -> dict:
     """A free-text location -> {city, state, country}, or None where it cannot be
     read with confidence.
 
@@ -851,12 +884,41 @@ def split_place(raw) -> dict:
                 "state": state,
                 "country": country,
             }
-    if tail.upper() in _US_STATES:
+    # GEORGIA IS AN ACCEPTED COLLISION, measured rather than waved through. Exactly
+    # four US state/territory NAMES are also ISO 3166-1 country names -- american
+    # samoa, guam, puerto rico and georgia -- and the first three resolve to the SAME
+    # alpha-2 under both registers (AS/GU/PR), so they cannot be read wrong. Only
+    # georgia differs: USPS GA against ISO GE, so "Tbilisi, Georgia" reads as US here.
+    # Vetoing the name was tried and is much worse: 401 rows in the consumer's
+    # production store have ", Georgia" in `location` -- Atlanta 179, Alpharetta 15,
+    # Marietta, Snellville, Lawrenceville -- and none is Georgian. This is the same
+    # trade _COUNTRY_CODES already makes by omitting the name, pinned by a test.
+    # (`jordan` and `chad` are NOT state names and were never at risk on this path.)
+    # `georgia` IS VETOED HERE AND ONLY HERE -- the two-part bare tail, where nothing
+    # in the string corroborates the US. Exactly four US state/territory NAMES are also
+    # ISO 3166-1 country names (american samoa, guam, puerto rico, georgia) and the
+    # first three resolve to the SAME alpha-2 under both registers, so only georgia can
+    # be read wrong: USPS GA against ISO GE.
+    #
+    # SCOPE IS THE WHOLE POINT. Measured on the consumer's 67,481-row store, 401 rows
+    # carry ", Georgia": 283 of them read "..., Georgia, United States" and are decided
+    # by the country branch BELOW, never here, so they keep their state. The 118 that
+    # reach this branch are the ambiguous ones -- 107 US, and 11 the Republic of Georgia
+    # (Tbilisi 10, Adjara 1). A veto placed inside us_state_code() instead would have
+    # broken all 283.
+    #
+    # The trade, stated plainly: 107 rows forgo a gain and return to the all-None they
+    # already have today, to stop 11 rows INVENTING country="US" for Georgian jobs --
+    # which, in a US-only consumer, surfaces them to US seekers. Forgone gains against
+    # invented values is not a symmetric trade. `_coerce`'s country-agreement gate
+    # cannot rescue these: 9 of the 11 carry no adapter country to disagree with.
+    _st = None if tail.lower() == "georgia" else us_state_code(tail)
+    if _st and tail.lower() not in _COUNTRY_CODES:
         # The state is real whether or not the head names a city, so a placeless
         # head loses only the city -- "Remote, TX" is a Texas row with no city.
         return {
             "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
-            "state": tail.upper(),
+            "state": _st,
             "country": "US",
         }
     # A NAME only, never a bare two-letter tail. country_code() passes any two
@@ -866,14 +928,71 @@ def split_place(raw) -> dict:
     # "Paris, FR" to avoid inventing a country for every Canadian city.
     code = country_code(tail) if len(tail) > 2 else None
     if code:
-        # Same as above: the country the string names survives, the invented city
-        # does not -- "Remote, France" is a French row with no city.
+        # SPLIT THE HEAD AGAIN when it still carries a comma, symmetric with the
+        # three-part branch above. "Costa Mesa, California, United States" reaches
+        # here with head="Costa Mesa, California", and returning that head whole
+        # wrote the subdivision into `city` and left `state` null on 1,578 measured
+        # greenhouse rows -- 11,447 of 67,481 rows in the consumer's production
+        # store. The three-part branch already does exactly this; it was simply
+        # gated on len(tail)==2, so a spelled-out country never reached it.
+        place_city = head
+        place_state: str | None = None
+        # A SOLE HEAD THAT NAMES A SUBDIVISION OR A REGION IS NOT A CITY. "Remote -
+        # Illinois, USA" names a state and "LATAM, Brazil" names a region; writing
+        # either into `city` is the category error this module refuses to create, and
+        # re-splitting the head (below) cannot catch it because there is no comma to
+        # split on. Measured on 44 corpus parts, every one a genuine subdivision
+        # ("California, USA, Remote", "Colorado, United States"): zero real cities are
+        # lost, because a "City, ST" string exits at the US-state branch above and
+        # never reaches here, and "New York, New York, United States" keeps its city
+        # via the comma-bearing path below.
+        #
+        # The state is LIFTED rather than discarded -- the string really does state a
+        # boundary, and that is the field for it.
+        if "," not in head:
+            sole = us_state_code(head) if code == "US" else None
+            if sole:
+                return {"city": None, "state": sole, "country": code}
+            if " ".join(head.lower().split()) in set(_REMOTE_REGIONS):
+                return {"city": None, "state": None, "country": code}
+        if "," in head and not _head_is_a_list(head):
+            maybe_city, _, maybe_region = head.rpartition(",")
+            maybe_city, maybe_region = maybe_city.strip(), maybe_region.strip()
+            st = us_state_code(maybe_region) if code == "US" else None
+            # A US region that does not resolve is NOT discarded -- this may only
+            # canonicalize, never lose a value, the same rule engine._coerce holds
+            # for `state`. Outside the US the subdivision has no canonical form and
+            # is dropped, which is what the three-part branch already does.
+            if maybe_city and (st or code != "US"):
+                place_city, place_state = maybe_city, st
+                # The re-split can EXPOSE a region that was hidden inside a compound
+                # head: "Americas, Europe, Israel" leaves "Americas, Europe", and
+                # splitting it yields the single token "Americas". _head_is_a_list
+                # cannot see this -- it counts COUNTRY names and a continent is not
+                # one -- so without this the re-split turns visible junk into
+                # plausible junk, which is the worse of the two.
+                if " ".join(place_city.lower().split()) in set(_REMOTE_REGIONS):
+                    return {"city": None, "state": place_state, "country": code}
         return {
-            "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
-            "state": None,
+            "city": None
+            if _placeless_head(place_city) or _head_is_a_list(place_city)
+            else place_city,
+            "state": place_state,
             "country": code,
         }
     return empty
+
+
+
+def split_place(raw) -> dict:
+    """Public entry: the parser above, then the country-is-not-a-city predicate.
+
+    A wrapper rather than a guard inside each branch, because there are five return
+    points and a rule applied at four of them is the drift this package keeps paying
+    for. It runs AFTER the re-split by construction, which is what keeps its
+    population at the residual instead of every "City, Subdivision, Country" row.
+    """
+    return _country_is_not_a_city(_split_place_inner(raw))
 
 
 # Multi-country regions and timezone bands a remote role can be bounded to. These are NOT
@@ -1014,6 +1133,19 @@ _REMOTE_STRIP = re.compile(
 )
 
 
+_ARRANGEMENT_COMPOUND = re.compile(
+    r"(?<![-\w])(?:remote|hybrid|onsite|on-site|wfh|telecommute)-([A-Za-z]+)", re.I
+)
+
+
+def _compound_fragment_is_a_place(frag: str) -> bool:
+    return bool(
+        (country_code(frag) if len(frag) > 2 else None)
+        or us_state_code(frag)
+        or US_LOCATION_RE.fullmatch(frag)
+    )
+
+
 def strip_arrangement(s: str) -> str:
     """Remove the work-arrangement words and any brackets they leave behind.
 
@@ -1028,6 +1160,9 @@ def strip_arrangement(s: str) -> str:
     Bounded rather than `while True`: this converges in two passes on every real input, and
     an unbounded loop over user-supplied text is a hang waiting for a pathological string.
     """
+    s = _ARRANGEMENT_COMPOUND.sub(
+        lambda m: m.group(0) if _compound_fragment_is_a_place(m.group(1)) else " ", s
+    )
     for _ in range(4):
         out = _REMOTE_STRIP.sub(" ", s)
         if out == s:

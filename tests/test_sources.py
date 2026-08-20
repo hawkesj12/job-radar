@@ -2555,6 +2555,63 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
     assert remote_scope("Worldwide") == ([], None)
 
 
+def test_a_city_is_never_a_country_region_or_state_name():
+    """THE ACCEPTANCE METRIC for the geography fixes, and it is deliberately not a
+    fill-rate one.
+
+    "Rows that gained a `state`" reads IDENTICALLY for the right fix and the wrong one:
+    re-splitting "Americas, Europe, Israel" into city="Americas" scores as a win on that
+    metric while turning visible junk into plausible junk. The number that separates them
+    is how many rows gained a `city` that is not a city at all.
+
+    THE EXEMPTIONS ARE LOAD-BEARING and were found by running the naive version: "New
+    York" (316 corpus parts), "Washington" (124) and "Singapore" are real cities that are
+    ALSO a state or a country, so a blanket "reject a city that is a state name" nulls
+    thousands of correct values. A metric that lies is worse than no metric.
+    """
+    from job_radar.vocab import _COUNTRY_CODES, _STATE_NAMES, split_place, strip_arrangement
+
+    both_a_city_and_not = {"new york", "washington", "singapore"}
+    for raw in (
+        "Americas, Europe, Israel (Remote)",
+        "LATAM,  Brazil (Remote)",
+        "Canada, United States (Remote)",
+        "Remote - Illinois, USA",
+        "Texas, United States",
+        "Singapore, Singapore",
+    ):
+        city = split_place(strip_arrangement(raw))["city"]
+        if city is None:
+            continue
+        low = city.strip().lower()
+        assert low in both_a_city_and_not or (
+            low not in _STATE_NAMES and low not in _COUNTRY_CODES
+        ), f"{raw!r} put a non-city in `city`: {city!r}"
+
+
+def test_a_parsed_city_came_from_the_string_it_was_parsed_from():
+    """The mechanical half of the gate: a `city` must be present in its own input.
+
+    Cheap, total, and it catches manufacture -- a value assembled rather than read.
+    BLIND TO the wrong-token case by construction: a neighborhood picked out of
+    "Grand Central, Manhattan" passes this perfectly, because it really is in the
+    string. That one needs the vendor's hierarchy, not this check.
+    """
+    from job_radar.vocab import split_place, strip_arrangement
+
+    for raw in (
+        "Costa Mesa, California, United States",
+        "Toronto, Ontario, Canada",
+        "New York, New York, United States",
+        "Mountain View, California",
+        "Waco, TX",
+        "London, United Kingdom",
+    ):
+        city = split_place(strip_arrangement(raw))["city"]
+        if city is not None:
+            assert city.lower() in raw.lower(), f"{city!r} is not in {raw!r}"
+
+
 def test_a_list_of_countries_is_not_a_city():
     """`rpartition` leaves an enumeration in the head slot, and writing it as `city` is the
     permanently-wrong row split_place refuses to create. 99 measured locations.
@@ -2571,8 +2628,14 @@ def test_a_list_of_countries_is_not_a_city():
         )["city"]
         is None
     )
-    # ...while an ordinary city+state head survives
-    assert split_place("Austin, Texas, United States")["city"] == "Austin, Texas"
+    # ...while an ordinary city+state head SURVIVES -- still the claim this test makes,
+    # and still true. What changed is the shape, not the guard: split_place now re-splits
+    # a comma-bearing head when the tail is a spelled-out country, so the subdivision
+    # reaches `state` instead of riding along inside `city`. The docstring's trade is
+    # unchanged and is why this is not a comma test; it is narrowed because the head can
+    # now be read, not because it was ever wrong to keep it.
+    assert split_place("Austin, Texas, United States")["city"] == "Austin"
+    assert split_place("Austin, Texas, United States")["state"] == "TX"
     assert split_place("Waco, TX")["city"] == "Waco"
 
 

@@ -44,6 +44,76 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Geography: the subdivision was being left inside `city`.** `vocab.split_place` splits
+  on the LAST comma, so `"Costa Mesa, California, United States"` matched the
+  country-name branch, wrote `"Costa Mesa, California"` into `city` and left `state`
+  null. **11,447 of 67,481 rows `[live prod, 2026-08-20]` — one in six — carry a comma
+  inside `city`**, and 53.7% have no `state` at all. The three-part branch already
+  re-split the head; it was gated on a two-letter tail, so a spelled-out country never
+  reached it. `split_place` now re-splits a comma-bearing head there too, and reads a
+  spelled-out US state as a tail (`"Mountain View, California"`, 449 corpus parts, which
+  previously returned nothing at all).
+
+- **Geography was skipped entirely whenever an adapter set any ONE field.** The fallback
+  in `engine._coerce` was gated on city AND state AND country all being `None`, which is
+  not what the paragraph above it claims ("ONLY fills what the adapter left None … can
+  add, never overwrite"). Lever sets `country` from a real vendor field on 135 of 135
+  rows, so the gate never opened and its own `"New York, NY"` was never read: **0 of 135
+  Lever rows had a city.** Now per-field — and **gated on country agreement**, which is
+  required rather than defensive: SmartRecruiters sends `"bengaluru, in"` with country
+  `IN`, and `split_place` reads that `in` tail as INDIANA. Ungated, the fix wrote a US
+  state onto 60 Indian rows.
+
+- **A work arrangement was being turned into a city.** `_REMOTE_STRIP`'s `(?![a-z])`
+  boundary is satisfied by a hyphen, so `"Remote-Friendly"` became the city `"Friendly"`
+  — a real town in West Virginia, so not even self-evidently wrong downstream. 14 rows
+  `[live prod]`. A hyphen-compound is now one token **unless its fragment resolves as a
+  place**, which is what keeps `"Remote-USA" -> US` working; a blanket hyphen guard was
+  tried first and silently lost it.
+
+- **A subdivision or a region sitting in `city` now goes to the field that fits it.**
+  `"Remote - Illinois, USA"` yielded `city="Illinois"`; it now yields `state="IL"`, and
+  `"LATAM, Brazil"` yields no city rather than the city of LATAM. This one is why the
+  release is worth shipping as a whole: **the other geography fixes alone move the
+  invention class from 51 distinct bad parts to 52**, because re-splitting
+  `"Americas, Europe, Israel"` turns `city="Americas, Europe"` into `city="Americas"` —
+  visible junk into plausible junk, which is strictly worse. With this rule the same
+  count goes **51 -> 22**.
+
+- **`locations[]` and the scalar fields no longer disagree.** The nested branch parsed
+  raw while the scalar stripped arrangement words first, so one row carried
+  `city="Illinois"` beside `locations[0].city="Remote - Illinois"`. Both read through one
+  helper now: **125 nested entries carrying a separator or the word "remote" in `city` ->
+  0.** Multi-location strings also split on `|` and `•`, not just `;`.
+
+- **Multi-location splitting no longer manufactures places.** `|` does not mean the same
+  thing on every board: Greenhouse uses it for separate offices, **Ashby uses it as a
+  hierarchy** (`"US | Illinois | Chicago"` is one office), and some Greenhouse boards
+  append coordinates. A blanket split emits 4,789 `locations[]` entries `[live prod]` of
+  which **2,562, across 1,332 rows, are not a place under any reading** — a latitude
+  receiving a city, a state, a country and an apply url. Parts that cannot be established
+  as places are dropped, and the whole string is kept when none survive (146 rows). The
+  test is structural — a bare number, an unbalanced parenthesis, nothing left after the
+  arrangement words — never a place list, which would be an artifact of a US-heavy tech
+  corpus.
+
+  **`dedup.normalize_location` deliberately keeps `;` only**, and now says so: adopting
+  the wider set changes 1,488 keys — and so 1,488 user-facing job ids — to buy 2 merges.
+
+- **`state` no longer reads a bare `"…, Georgia"` as the US state.** Exactly four US
+  state/territory names are also ISO 3166-1 country names, and three of them
+  (`American Samoa`, `Guam`, `Puerto Rico`) resolve to the same code under both
+  registers. Only `Georgia` conflicts. Scoped to the two-part bare tail: the 283 prod
+  rows reading `"…, Georgia, United States"` are decided by the country branch and keep
+  their state; of the 118 ambiguous ones, **11 are the Republic of Georgia** (Tbilisi 10,
+  Adjara 1). 107 rows forgo a gain — returning to the all-None they already have — so
+  that 11 do not invent `country="US"` for a Georgian job.
+
+- **A `city` that is a country name is now `None`.** `"Canada, United States (Remote)"`
+  yielded `city="Canada"`. Nine rows also gain a correct stated remote boundary as a
+  result, because the category error was suppressing it.
+
+
 - **An inline tag no longer leaves a space where it stood — 4,580 → 62 spaces sitting
   before a punctuation mark.** `clean` replaced EVERY tag with a space, which is right
   for a block tag and wrong for a bold or a link: `At <a>Smartsheet</a>, your ideas`

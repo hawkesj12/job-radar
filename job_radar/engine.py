@@ -338,6 +338,73 @@ def _employment_from_extra(p: dict) -> None:
     p["employment_type_raw"] = " | ".join(sorted(found))
 
 
+_SEP = re.compile(rf"\s*{vocab.LOCATION_SEPARATORS}\s*")
+
+
+_BARE_NUMBER = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
+
+
+def _usable_part(part: str) -> bool:
+    """True when a split PART can be established as a place.
+
+    THE SEPARATOR DOES NOT MEAN THE SAME THING ON EVERY BOARD, which is why splitting
+    is not enough on its own. Greenhouse uses `|` for separate offices ("San Francisco,
+    CA | New York City, NY"); Ashby uses it as a HIERARCHY, coarsest-to-finest ("US |
+    Illinois | Chicago" -- one office, 17 rows), and 139 rows in the consumer's store
+    lead with a country for that reason. Some Greenhouse boards append COORDINATES
+    ("Pennsauken, NJ 08109 | 39.950866919 | -75.048664024").
+
+    Measured on that 67,481-row store: a blanket `[;|\u2022]` split emits 4,789
+    `locations[]` entries of which 2,562, across 1,332 rows, are not a place under any
+    reading -- a latitude receiving a `city`, a `state`, a `country` and an apply url,
+    and becoming a place a job is offered in. That is manufacture, not truncation, in
+    the field a consumer trusts most.
+
+    So: split, then DROP what cannot be established, and fall back to the whole string
+    when nothing survives (146 rows). Filtered, the same corpus emits 2,008 entries and
+    2,781 junk ones are never created. The test is STRUCTURAL -- a bare number, an
+    unbalanced parenthesis (splitting "Remote (United States | Canada)" leaves both
+    halves broken, 31 rows), or nothing left after the arrangement words come out --
+    with no place list, which would be an artifact of this US-heavy tech corpus.
+
+    Same discipline as `util.clean_with_sections`, which emits NO span for a section it
+    cannot locate rather than a guessed one: the failed lookup IS the self-check.
+    """
+    p = part.strip()
+    if not p or _BARE_NUMBER.match(p):
+        return False
+    if p.count("(") != p.count(")"):
+        return False
+    if not vocab.strip_arrangement(p):
+        return False
+    return any(_read_place(p).values()) or "," in p
+
+
+def _location_parts(raw: str) -> list[str]:
+    """A vendor location string -> the places it names, junk parts dropped."""
+    parts = [x.strip() for x in _SEP.split(raw or "") if x.strip()]
+    if len(parts) < 2:
+        return parts
+    keep = [p for p in parts if _usable_part(p)]
+    return keep or [raw.strip()]
+
+
+def _read_place(part: str) -> dict:
+    """One location PART -> {city, state, country}, arrangement words removed first.
+
+    Lives here so the scalar fallback and the `locations[]` entries below read the
+    same string through the same pipeline. They did not: the nested branch called
+    `split_place` raw while the scalar stripped first, so one row carried
+    city="Illinois" and locations[0].city="Remote - Illinois" -- the same field,
+    two answers, 125 measured entries.
+    """
+    bare = vocab.strip_arrangement(part)
+    place = vocab.split_place(bare)
+    if not any(place.values()):
+        place = vocab.split_place(part)
+    return place
+
+
 def _coerce(p: dict) -> dict:
     """Enforce the record contract at the one boundary every posting crosses.
 
@@ -479,14 +546,25 @@ def _coerce(p: dict) -> dict:
     # tail is a US state and the head is placeless, and stripping leaves a bare "TX" with no
     # comma, which split_place cannot read. Those are exactly the stated bare-state rows the
     # boundary field exists to carry, so losing them would be the worst possible trade.
-    if p.get("city") is None and p.get("state") is None and p.get("country") is None:
-        first = (p.get("location") or "").split(";")[0]
-        bare = vocab.strip_arrangement(first)
-        place = vocab.split_place(bare)
-        if not any(place.values()):
-            place = vocab.split_place(first)
+    place = _read_place(next(iter(_location_parts(p.get("location") or "")), ""))
+    # PER-FIELD, not all-or-nothing. This gate used to require all three to be None,
+    # which is not what the paragraph above claims it does: lever sets `country` from
+    # a real vendor field on 135 of 135 rows, so the gate never fired and its own
+    # "New York, NY" was never read -- 0 of 135 lever rows carry a city. Measured
+    # gain on a 7,545-row harvest: +1,966 state, +430 city, +333 country, 0 values
+    # lost, verified again on 360 live lever postings (66 gain a city, 0 rejected).
+    #
+    # GATED ON COUNTRY AGREEMENT, and the gate is required rather than defensive:
+    # smartrecruiters sends "bengaluru, in" with country IN, and split_place reads
+    # the "in" tail as INDIANA. Ungated, that writes a US state onto 60 Indian rows.
+    # A parse that contradicts the vendor's own country field is rejected whole.
+    if (
+        place["country"] is None
+        or p.get("country") is None
+        or place["country"] == p["country"]
+    ):
         for k, v in place.items():
-            if v is not None:
+            if v is not None and p.get(k) is None:
                 p[k] = v
 
     # `locations` -- every place ONE posting names. Greenhouse separates them with
@@ -495,7 +573,7 @@ def _coerce(p: dict) -> dict:
     # ride here instead of forcing a split. An adapter that already built a
     # structured list (usajobs PositionLocation[], rippling workLocations[]) keeps it.
     if p.get("locations") is None:
-        parts = [x.strip() for x in (p.get("location") or "").split(";") if x.strip()]
+        parts = _location_parts(p.get("location") or "")
         if len(parts) > 1:
             # SAME KEYS as the single-place branch below. This used to emit only
             # {raw, url}, so 644 of 3,153 live elements had no city/state/country
@@ -503,7 +581,7 @@ def _coerce(p: dict) -> dict:
             # list. The parsed values are per-place, so each is read from its own
             # string rather than copied from the row's first place.
             p["locations"] = [
-                {"raw": x, **vocab.split_place(x), "url": p.get("url")} for x in parts
+                {"raw": x, **_read_place(x), "url": p.get("url")} for x in parts
             ]
         elif parts:
             p["locations"] = [
