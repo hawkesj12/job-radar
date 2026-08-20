@@ -741,11 +741,21 @@ SAMPLES = {
                 "name": "AI Engineer",
                 "contents": "<p>Build RAG and agentic LLM systems.</p>",
                 "publication_date": "2026-07-10T00:00:00Z",
-                "type": "Full Time",
+                # `type` IS NOT AN EMPLOYMENT TYPE, and this fixture used to say
+                # "Full Time", which is a value the API has never sent. That is why
+                # the adapter read it for so long: the fixture made a provenance flag
+                # look like a legitimate type, so the parser test agreed with the bug.
+                # Probed live 2026-08-20 -- `type` is the literal string "external" on
+                # 20 of 20 rows, with `model_type` beside it. A fixture is a CAPTURE,
+                # not an assumption; catalog/themuse.md records employment_type: null.
+                "type": "external",
+                "model_type": "external",
                 "company": {"name": "Acme"},
                 "locations": [{"name": "Austin, TX"}],
                 "categories": [{"name": "Data Science"}],
-                "levels": [{"name": "Senior Level"}],
+                # Both forms ship in the same object -- the canonical token and the
+                # display string. The adapter reads short_name; name becomes the raw.
+                "levels": [{"name": "Senior Level", "short_name": "senior"}],
                 "refs": {
                     "landing_page": "https://www.themuse.com/jobs/acme/ai-engineer"
                 },
@@ -777,6 +787,11 @@ SAMPLES = {
                 "locations": [{"name": "Anywhere"}],
                 "created": "2026-07-10T00:00:00Z",
                 "contract_type": "hourly",
+                # Braintrust mixes opaque numeric ids into both skill arrays -- 164 of
+                # its 227 tag tokens corpus-wide. Captured here because the fixture
+                # carried none, so nothing could catch them reaching `tags` or `text`.
+                "main_skills": [{"name": "Python"}, {"name": "122059"}],
+                "job_skills": [{"name": "AI/ML"}, {"name": "122060"}],
             }
         ]
     },
@@ -1196,6 +1211,69 @@ def test_themuse_dedups_a_job_that_spans_two_categories(monkeypatch):
     assert len(out) == 1, f"same job emitted {len(out)} times across slices"
 
 
+def test_themuse_reads_the_canonical_level_token_not_the_display_string(monkeypatch):
+    """The Muse ships {'name': 'Mid Level', 'short_name': 'mid'} in one object and the
+    adapter kept only `name`, throwing the vendor's own canonical token away -- the
+    same class of defect as reading a plain-text field when the structured one is
+    beside it. `short_name` needs no interpretation from us and is already the form a
+    consumer can filter on, so it is the value; `name` is what the vendor displays, so
+    it is the raw. Worth 87 rows on a `seniority='senior'` filter."""
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
+    out = sources.search_themuse([])
+    assert out[0]["seniority"] == "senior"
+    assert out[0]["seniority_raw"] == "Senior Level"
+
+
+def test_themuse_states_no_employment_type_because_the_api_has_none(monkeypatch):
+    """It read `type`, which is The Muse's posting-PROVENANCE flag -- the literal
+    string "external" on 20/20 rows probed live -- so 216 of 216 rows normalized to
+    OTHER, the single largest contributor to that bucket. catalog/themuse.md has
+    recorded `employment_type: null` for this API since it was written; the code was
+    reading a field the profile says does not exist. The key stays present (every
+    adapter owes its caller that) and empty, which the boundary turns into None."""
+    from job_radar import engine
+
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
+    out = sources.search_themuse([])
+    assert "employment_type" in out[0], "the contract requires the key"
+    r = engine._coerce(out[0])
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] is None
+
+
+def test_braintrust_keeps_its_opaque_ids_out_of_both_tags_and_the_body(monkeypatch):
+    """A five-digit integer is not a skill, and the contract calls `tags` "skills the
+    source itself extracted". The ids reached TWO fields: `tags`, and `text`, where
+    they were interpolated under the label "Skills:" and then read by relevant() and
+    score_and_signals() -- 42 live rows carried them in the scored, searchable body.
+    Filtering `tags` alone would have fixed half the defect while reporting it done."""
+    from job_radar import engine
+
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES["braintrust"])
+    r = engine._coerce(sources.search_braintrust(["ai"])[0])
+    assert r["tags"] == ["Python", "AI/ML"]
+    for opaque in ("122059", "122060"):
+        assert opaque not in r["text"], f"{opaque} is still in the scored body"
+
+
+def test_braintrust_contract_type_survives_its_own_qualifier(monkeypatch):
+    """The adapter builds `f"contract ({contract_type})"`, so the normalizer saw
+    "contract long" and returned OTHER on 29 of 29 rows while bare "contract" maps to
+    CONTRACTOR. The raw keeps the qualifier, because that is what was sent."""
+    from job_radar import engine
+
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES["braintrust"])
+    r = engine._coerce(sources.search_braintrust(["ai"])[0])
+    assert r["employment_type"] == "CONTRACTOR"
+    assert r["employment_type_raw"] == "contract (hourly)"
+
+
 def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
     """`levels` is a real seniority string. It was withheld while `seniority` was a
     contract key no adapter filled; the contract exists now."""
@@ -1550,9 +1628,19 @@ def test_hn_reads_two_threads_not_one(monkeypatch):
 def test_department_is_byte_identical_to_0_6_0(monkeypatch):
     """THE COMPATIBILITY GATE. If this goes red, the release breaks a consumer.
 
-    `department` is deprecated but still emitted, because jobfitr pins a released
-    job-radar and reads that column today (as `category`). Removing or changing it
-    before 1.0 would break a shipped consumer at a MINOR version.
+    `department` is deprecated but still emitted. This docstring used to say jobfitr
+    reads it; verified 2026-08-20, **it does not** — the column is absent from that
+    consumer's production schema and its store reads it zero times. The gate is kept
+    anyway, because it costs 0.07s and an unreleased or third-party consumer may pin a
+    version that does read it, and removing the column before 1.0 would break them at a
+    MINOR version. Keep the gate; do not repeat the claim that justified it.
+
+    KNOW WHAT THIS GATE CANNOT SEE. It calls the adapters DIRECTLY and never imports
+    `engine`, so it compares raw adapter output. A change to `department` made in the
+    adapter turns it red, correctly — but the same change made after the adapter, at
+    the engine boundary, leaves it green while every consumer's value changes. Anything
+    touching this field must therefore touch it in the adapter, or extend this gate to
+    compare post-engine records.
 
     This is an equivalence test against history, not a self-consistent pin: it loads
     0.6.0's sources.py out of git, runs both versions against the SAME fixtures, and

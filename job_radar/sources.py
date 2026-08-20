@@ -2394,9 +2394,22 @@ def search_braintrust(queries):
             t = j.get("title") or ""
             if _BT_LABEL.search(t):
                 continue
-            skills = " ".join(
-                _names(j.get("main_skills")) + _names(j.get("job_skills"))
-            )
+            # A five-digit integer is not a skill. Braintrust mixes opaque numeric
+            # ids into both skill arrays -- 164 of its 227 tag tokens corpus-wide,
+            # and every purely-numeric tag in the whole corpus is this source. They
+            # were reaching TWO fields: `tags`, whose contract says "skills the
+            # source itself extracted", and `text`, where they were interpolated
+            # under the label "Skills:" and then read by relevant() and
+            # score_and_signals(). Filtering here, ONCE and upstream of both, is why
+            # this is a local rather than two separate guards -- cleaning `tags`
+            # alone would have left the ids in the scored, searchable body on 42
+            # live rows while reporting the defect fixed.
+            skill_names = [
+                s
+                for s in _names(j.get("main_skills")) + _names(j.get("job_skills"))
+                if not s.isdigit()
+            ]
+            skills = " ".join(skill_names)
             hrs = j.get("expected_hours_per_week")
             emp = j.get("employer") or {}
             text = f"{t}. Skills: {skills}. {j.get('contract_type', '')} contract" + (
@@ -2427,8 +2440,7 @@ def search_braintrust(queries):
                     # here is remote because that is what this board is. Collapsing the two
                     # into one label is what the basis field exists to prevent.
                     "remote_basis": "board",
-                    "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
-                    or None,
+                    "tags": skill_names or None,  # numerics already dropped, above
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
                     "salary": _bt_rate(j),
                     # `payment_type` is annual|hourly|per_task (probed), and the
@@ -2866,9 +2878,17 @@ def _themuse_rows(results, seen: set, out: list) -> None:
             for x in (j.get("categories") or [])
             if isinstance(x, dict)
         ]
-        levels = [
-            x.get("name", "") for x in (j.get("levels") or []) if isinstance(x, dict)
-        ]
+        # The Muse ships BOTH forms of the level in the same object --
+        # {'name': 'Mid Level', 'short_name': 'mid'} -- and this read only `name`,
+        # the display string, throwing the vendor's own canonical token away. That
+        # is the same class of defect as reading a description's plain-text field
+        # when the structured one is right beside it. `short_name` is what goes in
+        # `seniority` (it needs no interpretation from us and is already the form a
+        # consumer can filter on); `name` is what the vendor displays, so it is the
+        # raw. Falls back to `name` if a row ever omits the token.
+        levels = [x for x in (j.get("levels") or []) if isinstance(x, dict)]
+        level_tokens = [x.get("short_name") or x.get("name") or "" for x in levels]
+        level_names = [x.get("name") or "" for x in levels]
         text, secs = clean_with_sections(j.get("contents", ""))
         out.append(
             {
@@ -2889,8 +2909,22 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 # `levels` is a real seniority string ("Senior Level"). It was held
                 # back while `seniority` was a strand-B key not yet on any adapter;
                 # the contract exists now, so it ships.
-                "seniority": "; ".join(x for x in levels if x) or None,
-                "employment_type": j.get("type", ""),
+                "seniority": "; ".join(x for x in level_tokens if x) or None,
+                "seniority_raw": "; ".join(x for x in level_names if x) or None,
+                # DELIBERATELY EMPTY, not removed: `_assert_contract` requires every
+                # adapter to emit the key, and `_NULLABLE_TEXT` turns "" into None at
+                # the boundary, so this is how an adapter says "this API has no such
+                # field". Before, it read `type`, which is
+                # The Muse's posting-PROVENANCE flag: it is the literal string
+                # "external" on 20 of 20 rows probed live 2026-08-20 (with a sibling
+                # `model_type` beside it), so every Muse row normalized to OTHER --
+                # 216 of 216 in the last harvest, and the single largest contributor
+                # to that bucket. catalog/themuse.md records `employment_type: null`
+                # for this API and has been right since it was written; the code was
+                # reading a field the profile says does not exist. Emitting nothing is
+                # the honest answer, and it is the second time in this repo that the
+                # catalog was correct while an adapter was not.
+                "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
                 "sections": secs,

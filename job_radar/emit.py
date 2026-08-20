@@ -77,6 +77,7 @@ def _nested(r: dict) -> dict:
         "category": r.get("category"),
         "team": r.get("team"),
         "seniority": r.get("seniority"),
+        "seniority_raw": r.get("seniority_raw"),
         "seniority_basis": r.get("seniority_basis"),
         "tags": r.get("tags"),
         "location": {

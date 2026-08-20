@@ -86,11 +86,33 @@ _CONTRACT_FIELDS = (
     "title_root",  # the matchable role, decoration stripped -- vocab.decompose_title
     "title_level",  # I | II | III | IV
     "title_qualifiers",  # list[str] | None -- domain/geo decoration
-    "category",  # the job family. NOT an O*NET-SOC code; free text from the source.
+    # `category` is the catalog's `function` -- the JOB FAMILY ("Data Science"), free
+    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` (and its
+    # deprecated alias `department`) is the catalog's `org_unit` -- the EMPLOYER'S OWN
+    # group name ("Field Engineering"). `catalog/_SCHEMA.md` splits `function` /
+    # `org_unit` / `employer_org` precisely because five adapters were pouring all
+    # three into one column, and it records the cost: 5,050 distinct values including
+    # employer names.
+    #
+    # SO A SOURCE THAT SHIPS ONLY AN ORG UNIT CORRECTLY LEAVES `category` None. That
+    # is not an unfinished mapping, and it is worth stating because it has been filed
+    # as a bug: greenhouse, ashby and lever send `departments[0].name` / `team`, which
+    # are org units, so their `category` is None on 100% of rows -- while
+    # smartrecruiters, an ATS on the same lane, fills it 100% because it ships a real
+    # `function.label`. The dividing line is whether the VENDOR publishes a job
+    # family, never whether the source is an ATS or an aggregator.
+    #
+    # Deriving `category` from `department` was tried downstream and reverted: it
+    # looked like +17.7% coverage and its single largest effect was filing 895 rows of
+    # "Senior Software Engineer, Backend" under Science and Engineering, because that
+    # employer's org unit is called "Engineering". Normalizing these onto a taxonomy
+    # is a consumer's judgment (`catalog/_SCHEMA.md`: "Fidelity, not opinion"), and
+    # this library does not make it.
+    "category",
     "tags",  # list[str] | None -- skills the source itself extracted
     # who
     "parent_company",  # umbrella org, when the source distinguishes one
-    "team",  # the group inside the company
+    "team",  # the employer's own group -- the catalog's `org_unit`, see `category`
     # where
     "locations",  # list[dict] | None -- every place, each with its own apply url
     "city",
@@ -124,6 +146,7 @@ _CONTRACT_FIELDS = (
     # terms
     "employment_type_raw",  # what the vendor actually said
     "seniority",
+    "seniority_raw",  # what the vendor actually said, before case-folding
     "seniority_basis",  # stated | title | None
     # when
     "posted_basis",  # stated | relative | None
@@ -165,6 +188,70 @@ _CONTRACT_FIELDS = (
 _NULLABLE_TEXT = (
     "posted", "salary", "text", "location", "department", "employment_type",
 )  # fmt: skip
+
+
+# Keys whose name asks "what TERM?" rather than "how many HOURS?". `permanent` is
+# the one entry in vocab._EMPLOYMENT_MAP flagged by its own comment as most likely
+# to be wrong -- it is UK/EU usage contrasting with fixed-term, not with part-time,
+# so a permanent PART-time role lands wrong. Under a key literally named `Duration`
+# or `Contract Type` the employer is answering the term question, which makes that
+# flagged failure more likely rather than less. 36 rows in the live store; skipped
+# rather than guessed. Every other value under those keys is still read.
+_TERM_KEY = re.compile(r"duration|contract type|employee class|employment term", re.I)
+
+
+def _employment_from_extra(p: dict) -> None:
+    """Fill a missing `employment_type` from any vendor metadata value in source_extra.
+
+    WHY THIS IS KEY-AGNOSTIC, which is the whole design. Greenhouse metadata keys are
+    EMPLOYER-authored free text, so an alias list of key names cannot be written once
+    and stay right: measured across the live store, **61 distinct keys** carry a value
+    that resolves, including `Employment Classification (UKG)`, `TH: Employment Type`
+    and `Full-Time/Part-Time Status`. No hand-written list reaches those. Meanwhile
+    two of the four most obvious key names (`Job Type`, `Worker Type`) resolve to
+    nothing at all -- their values are `Standard` and `Employee`. The KEY never
+    carried the meaning; the VALUE does, so the value is what gets tested, against a
+    vocabulary this module already owns.
+
+    Measured effect: 1,569 of 4,852 greenhouse rows gain a type, 0 rows on any other
+    source (they either already state one or ship no metadata bag). FILL-ONLY -- the
+    caller checks, and a vendor's own field is always better evidence than its
+    metadata bag. `Regular` (151 rows) and `Standard` (124) resolve to nothing and
+    are correctly left alone; only a real map hit is accepted, never the OTHER
+    fallback, because OTHER here would mean "some string existed", not "a type was
+    stated".
+
+    TWO DISAGREEING FIELDS ARE NOT A TYPE. 11 rows carry two different resolvable
+    values at once (`Employment Type=Contractor` with `Time Type=Part Time`;
+    `Time Type=Full Time` with `Worker Sub-Type=Temporary`) -- two forms filled
+    inconsistently, so nobody stated one coherent fact and the answer is `None`. This
+    is the same rule the hn parser needs for a posting whose location text states two
+    arrangements, and it is deliberately ONE rule: a single field stating a span is a
+    range, but two fields disagreeing is an absence. Both raws are kept so the
+    disagreement is auditable rather than erased.
+    """
+    extra = p.get("source_extra")
+    if not isinstance(extra, dict):
+        return
+    found: dict[str, str] = {}
+    for key, value in extra.items():
+        if isinstance(value, (list, tuple)):
+            value = value[0] if len(value) == 1 else None
+        if not isinstance(value, str) or not value.strip():
+            continue
+        norm, raw = vocab.employment_type(value)
+        if norm is None or norm == "OTHER":
+            continue
+        if norm == "FULL_TIME" and _TERM_KEY.search(str(key)):
+            continue
+        found[raw or value] = norm
+    if not found:
+        return
+    types = set(found.values())
+    p["employment_type"] = types.pop() if len(types) == 1 else None
+    # Sorted so a conflicting pair records identically on every run -- a raw that
+    # reorders between harvests would look like a changed value to a diffing consumer.
+    p["employment_type_raw"] = " | ".join(sorted(found))
 
 
 def _coerce(p: dict) -> dict:
@@ -220,9 +307,36 @@ def _coerce(p: dict) -> dict:
     p["title_level"] = p.get("title_level") or parsed["title_level"]
     p["title_qualifiers"] = p.get("title_qualifiers") or parsed["title_qualifiers"]
     # A STATED seniority always wins; the title is the fallback, and says so.
+    #
+    # The stated value is CASE-FOLDED here, once, for the same reason employment_type
+    # is normalized here: one column was holding five vendor dialects at once, and a
+    # facet a consumer cannot filter on is not a facet. Measured on a 7,545-row
+    # harvest, `seniority='senior'` returned 2,229 rows and silently missed 319 more
+    # spelled `Senior`, `Senior Level` or `Mid-Senior Level` -- 179 of those for
+    # letter case alone. Case-folding is mechanical and fixes exactly those 179.
+    #
+    # IT DOES NOT MAP RUNGS, and vocab.seniority explains at length why not: there is
+    # no published seniority enumeration to normalize toward, so an ordering would be
+    # this library's opinion, and `catalog/_SCHEMA.md` leaves that to the consumer.
+    # `Mid-Senior Level` therefore survives as `mid-senior level`, not as `senior`.
+    #
+    # `seniority_raw` mirrors `employment_type_raw` and is subject to the same rule:
+    # it means "what the VENDOR said", so the title-derived branch below must never
+    # set it -- nobody quoted anything there. An adapter that already supplied a raw
+    # (themuse sends a canonical token AND a display string) keeps its own.
     if p.get("seniority"):
         p.setdefault("seniority_basis", "stated")
         p["seniority_basis"] = p["seniority_basis"] or "stated"
+        folded, raw_sen = vocab.seniority(p["seniority"])
+        p["seniority"] = folded
+        if p.get("seniority_raw") is None:
+            p["seniority_raw"] = raw_sen
+        if folded is None:
+            # "Not Applicable" / "Any": the vendor answered and declined to classify.
+            # There is no level, so there is no basis for one. Deliberately does NOT
+            # fall through to the title -- overriding an explicit refusal with our own
+            # guess is the opinion this field is being kept clear of.
+            p["seniority_basis"] = None
     elif parsed["seniority"]:
         p["seniority"] = parsed["seniority"]
         p["seniority_basis"] = "title"
@@ -341,6 +455,8 @@ def _coerce(p: dict) -> dict:
         p["employment_type_raw"] = (
             None if str(incoming or "") in vocab.EMPLOYMENT_TYPES else raw
         )
+    if p.get("employment_type") is None:
+        _employment_from_extra(p)
 
     # `direct_apply` -- does this url reach the EMPLOYER, or an aggregator that will
     # bounce you onward? It is the product's whole differentiator, and _src_pref has
@@ -368,7 +484,9 @@ _PERIOD_WORD = re.compile(
 # $135,575 - $175,450 USD` (the code trails the range) and narrow enough that the
 # NEXT pay band in a multi-city posting does not bleed in -- measured ambiguity at
 # this width is 8 rows in 3,500, all of them genuinely two-currency postings.
-_HYPHEN_QTY = re.compile(r"\d+\s*-\s*(?:hour|hr|week|wk|month|mo|year|yr|day)s?\b", re.I)
+_HYPHEN_QTY = re.compile(
+    r"\d+\s*-\s*(?:hour|hr|week|wk|month|mo|year|yr|day)s?\b", re.I
+)
 _ADJ_WINDOW = 90
 
 
@@ -401,7 +519,9 @@ def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
     # "90-day waiting period" / "4-day work week" / "12-month vesting" are not
     # pay periods. Dropping a digit-hyphen prefix removes the actual source of
     # the 55 bogus `day` assignments rather than only catching them downstream.
-    periods = {vocab.salary_period(x) for x in _PERIOD_WORD.findall(_HYPHEN_QTY.sub(" ", w))}
+    periods = {
+        vocab.salary_period(x) for x in _PERIOD_WORD.findall(_HYPHEN_QTY.sub(" ", w))
+    }
     periods.discard(None)
     return currency, (periods.pop() if len(periods) == 1 else None)
 

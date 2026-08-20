@@ -6,6 +6,85 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`seniority_raw`** — a new record field holding the vendor's level string verbatim,
+  the partner `employment_type_raw` has had since 0.7.0. `None` on the `title` basis,
+  because nobody quoted anything there. Additive and `None`-defaulted.
+
+### Fixed
+
+- **`employment_type` is read from vendor metadata by VALUE, not by key name — 1,558
+  rows filled, all Greenhouse.** It was `None` on 100% of Greenhouse rows while a third
+  of them carried an unambiguous type string in `source_extra`. The fix ignores key
+  names entirely and tests every metadata _value_ against `vocab._EMPLOYMENT_MAP`,
+  accepting only a real map hit. Key names could never have worked: measured `[live
+prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including
+  `Employment Classification (UKG)`, `TH: Employment Type` and
+  `Full-Time/Part-Time Status` — while two of the four most obvious names (`Job Type`,
+  `Worker Type`) resolve to nothing at all, because their values are `Standard` and
+  `Employee`. Fill-only; `Regular` (151 rows) and `Standard` (124) are correctly left
+  alone. `permanent` is skipped under a key naming a _term_ (`Contract Type`,
+  `Duration`) — `vocab` already flags that entry as its shakiest, and such a key makes
+  the flagged failure more likely, not less.
+- **Two disagreeing metadata fields now yield `None`, not an arbitrary pick.** 11 rows
+  state two different types at once (`Employment Type=Contractor` with
+  `Time Type=Part Time`). A source that said two things has not said one; both raws are
+  kept, joined and sorted, so the disagreement stays auditable.
+- **A qualified contract string normalizes again — 29 of 29 Braintrust rows.** The
+  adapter builds `f"contract ({contract_type})"`, which flattened to `contract long`,
+  missed the map and became `OTHER`, while bare `contract` maps to `CONTRACTOR`. The
+  adapter was defeating its own normalizer. A trailing parenthetical is now stripped
+  **only after a direct lookup misses**, so no already-resolved value can change.
+- **The Muse no longer reports an employment type it never had — 216 of 216 rows.** The
+  adapter read `type`, which is that API's posting-_provenance_ flag: the literal
+  string `"external"` on 20/20 rows probed live 2026-08-20. Every Muse row became
+  `OTHER`, the single largest contributor to that bucket. `catalog/themuse.md` has
+  recorded `employment_type: null` since it was written — the code was reading a field
+  the profile says does not exist, the second time in this repo the catalog was right
+  and an adapter was not. **The captured fixture said `"Full Time"`, a value the API
+  has never sent, which is why the parser test agreed with the bug; it is now a real
+  capture.** Together with the two fixes above, `employment_type='OTHER'` drops from
+  247 rows to 2.
+- **The Muse's canonical level token is no longer discarded.** It ships
+  `{"name": "Mid Level", "short_name": "mid"}` in one object and the adapter kept only
+  the display string. `short_name` now becomes `seniority` and `name` the raw — worth
+  87 rows on a `seniority='senior'` filter.
+- **A stated `seniority` is case-folded — 788 rows.** One column held five vendor
+  dialects at once, so `seniority='senior'` returned 2,229 rows and silently missed 319
+  more spelled `Senior`, `Senior Level` or `Mid-Senior Level`; 179 of those differed by
+  letter case alone. **Rungs are deliberately NOT mapped.** Every other vocabulary here
+  normalizes onto one someone else published, and none exists for seniority — so
+  ordering would be this library's opinion, which `catalog/_SCHEMA.md` ("Fidelity, not
+  opinion") leaves to the consumer. Probed live: SmartRecruiters ships LinkedIn's
+  published enumeration verbatim, in which `Associate` ranks **above** `Entry level`,
+  so the one ladder available to copy would have contradicted a vendor's own published
+  ordering on the source where it fires on 60% of rows. `Mid-Senior Level` therefore
+  stays `mid-senior level`. `"Not Applicable"` and `"Any"` become `None` with the raw
+  preserved — the vendor answered and declined to classify, and that is not a level.
+- **Braintrust's opaque numeric ids are out of `tags` _and_ the scored body** — 164 of
+  its 227 tag tokens corpus-wide, and every purely-numeric tag in the corpus is this
+  source. They reached two fields: `tags`, whose contract says "skills the source
+  itself extracted", and `text`, where they were interpolated under the label
+  `Skills:` and then read by `relevant()` and `score_and_signals()` on 42 live rows.
+  Filtered once upstream of both — cleaning `tags` alone would have fixed half the
+  defect while reporting it done.
+
+### Documentation
+
+- `category` and `team` now carry the `catalog/_SCHEMA.md` vocabulary in the contract
+  itself: `category` is the catalog's **`function`** (job family), `team` and its
+  deprecated alias `department` are **`org_unit`** (the employer's own group). A source
+  that publishes only an org unit therefore leaves `category` `None` **correctly** —
+  this has been filed as a bug more than once, and deriving one from the other was
+  tried downstream and reverted after it filed 895 backend engineers under Science and
+  Engineering.
+- Corrected three claims that had gone stale: `CLAUDE.md` and
+  `tests/test_sources.py` both stated that the downstream consumer reads `department`
+  (it does not — the column is absent from its production schema and its code reads it
+  zero times), and `catalog/_SCHEMA.md` described a Braintrust `level` mapping that was
+  already removed. The `department` byte-identity gate is unchanged and still green.
+
 ## [0.9.0] - 2026-08-20
 
 ### Fixed

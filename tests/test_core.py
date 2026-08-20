@@ -3576,3 +3576,160 @@ def test_decomposition_invents_nothing_and_destroys_nothing():
         root_toks = {w.lower() for w in vocab._WORD_RE.findall(d["title_root"])}
         assert root_toks <= title_toks, f"fabricated a token: {title}"
         assert d["title_root"].strip(), f"empty root: {title}"
+
+
+# ── 0.9.0: classification — employment_type from vendor metadata ────────────
+def _row(**kw):
+    """A minimal record that passes the boundary, plus whatever the test is about."""
+    return engine._coerce(
+        {"title": "Engineer", "company": "Acme", "url": "https://x/1", **kw}
+    )
+
+
+def test_employment_type_is_read_from_any_metadata_key_by_value_not_by_name():
+    """Greenhouse metadata keys are EMPLOYER-authored, so a key alias list cannot be
+    written once and stay right: 61 distinct keys carry a resolvable value in the live
+    store, including `Employment Classification (UKG)` and `Full-Time/Part-Time
+    Status`. Meanwhile `Job Type` and `Worker Type` — two of the four most obvious
+    names — resolve to nothing, because their values are `Standard` and `Employee`.
+    The value carries the meaning; the key never did."""
+    for key in ("Employment Type", "Full-Time/Part-Time Status", "TH: Employment Type"):
+        r = _row(source="greenhouse", source_extra={key: "Full-time"})
+        assert r["employment_type"] == "FULL_TIME", f"{key} was not read"
+        assert r["employment_type_raw"] == "Full-time"
+
+
+def test_an_unresolvable_metadata_value_is_left_alone():
+    """`Regular` (151 rows) and `Standard` (124) are not employment types. Only a real
+    map hit is accepted — never the OTHER fallback, which would mean "some string
+    existed", not "a type was stated"."""
+    for value in ("Regular", "Standard", "Employee", "Pipeline"):
+        r = _row(source="greenhouse", source_extra={"Job Type": value})
+        assert r["employment_type"] is None, f"{value!r} was accepted as a type"
+
+
+def test_a_vendors_own_field_beats_its_metadata_bag():
+    """FILL-ONLY. The metadata scan must never overwrite a type the source stated
+    outright, because a dedicated field is better evidence than a custom column."""
+    r = _row(
+        source="greenhouse",
+        employment_type="Part Time",
+        source_extra={"Employment Type": "Full-time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+    assert r["employment_type_raw"] == "Part Time"
+
+
+def test_two_disagreeing_metadata_fields_are_not_a_type():
+    """11 rows carry two different resolvable values at once — two forms filled
+    inconsistently, so nobody stated one coherent fact. `None` is the only answer
+    consistent with "null means the source did not say": a source that said two
+    things has not said one. Both raws are kept so the disagreement is auditable.
+
+    Deliberately the SAME rule the hn parser needs for a posting whose location text
+    states two arrangements — one field stating a span is a range, but two fields
+    disagreeing is an absence."""
+    r = _row(
+        source="greenhouse",
+        source_extra={"Employment Type": "Contractor", "Time Type": "Part Time"},
+    )
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] == "Contractor | Part Time"
+
+
+def test_two_metadata_fields_that_agree_are_still_a_type():
+    """Agreement is not conflict. Two keys spelling the same answer differently is
+    the common case, not the ambiguous one."""
+    r = _row(
+        source="greenhouse",
+        source_extra={"Employment Type": "Full-time", "Time Type": "Full Time"},
+    )
+    assert r["employment_type"] == "FULL_TIME"
+
+
+def test_permanent_is_skipped_under_a_key_that_names_a_term():
+    """`permanent` is flagged by vocab's own comment as the map's shakiest entry — UK/EU
+    usage contrasting with fixed-term, not with part-time. Under a key literally named
+    `Contract Type` the employer is answering the term question, which makes that
+    flagged failure more likely, not less. 36 rows in the live store."""
+    assert _row(source="gh", source_extra={"Contract Type": "Permanent"})[
+        "employment_type"
+    ] is None
+    # ...but the same key still yields every other value it carries.
+    assert _row(source="gh", source_extra={"Contract Type": "Freelance"})[
+        "employment_type"
+    ] == "CONTRACTOR"
+
+
+def test_a_qualified_contract_string_still_normalizes():
+    """braintrust's adapter builds `f"contract ({contract_type})"`, so `_PUNCT`
+    flattened it to "contract long" and 29 of 29 rows became OTHER while bare
+    "contract" mapped to CONTRACTOR — the adapter defeating its own normalizer. The
+    qualifier survives in the raw, because that is what the vendor sent."""
+    assert vocab.employment_type("contract (long)") == ("CONTRACTOR", "contract (long)")
+    assert vocab.employment_type("contract (short)") == (
+        "CONTRACTOR",
+        "contract (short)",
+    )
+    # A trailing parenthetical is only tried after a DIRECT lookup misses, so it can
+    # never rewrite a value that already resolved.
+    assert vocab.employment_type("Full-time (Remote)")[0] == "FULL_TIME"
+
+
+# ── 0.9.0: classification — seniority ───────────────────────────────────────
+def test_stated_seniority_is_case_folded():
+    """One column held five vendor dialects at once: `seniority='senior'` returned
+    2,229 rows and missed 319 more spelled `Senior` or `Senior Level`, 179 of them for
+    letter case alone."""
+    r = _row(source="himalayas", seniority="Senior")
+    assert r["seniority"] == "senior"
+    assert r["seniority_raw"] == "Senior"
+    assert r["seniority_basis"] == "stated"
+
+
+def test_seniority_is_never_reranked_onto_an_invented_ladder():
+    """THE LINE THIS FIELD IS HELD TO. Every other normalizer here maps onto a
+    vocabulary someone else published; there is no such enumeration for seniority, so
+    a rung order would be this library's opinion.
+
+    Probed live 2026-08-20: SmartRecruiters ships LinkedIn's published enumeration
+    verbatim, in which `Associate` ranks ABOVE `Entry level`. The one ladder available
+    to copy collapses `Associate` to an entry rung — so adopting it would contradict a
+    vendor's own published ordering on the source where it fires on 60% of rows."""
+    assert _row(source="smartrecruiters", seniority="Mid-Senior Level")["seniority"] == (
+        "mid-senior level"
+    )
+    assert _row(source="smartrecruiters", seniority="Associate")["seniority"] == (
+        "associate"
+    )
+    assert _row(source="themuse", seniority="Mid Level")["seniority"] == "mid level"
+
+
+def test_a_declined_seniority_is_none_but_keeps_its_raw():
+    """"Not Applicable" and "Any" mean the vendor answered and refused to classify.
+    There is no level, so there is no basis for one — and it deliberately does NOT
+    fall through to the title, because overriding an explicit refusal with our own
+    guess is the opinion this field is kept clear of."""
+    for value in ("Not Applicable", "Any"):
+        r = _row(source="smartrecruiters", title="Senior Engineer", seniority=value)
+        assert r["seniority"] is None, value
+        assert r["seniority_basis"] is None, value
+        assert r["seniority_raw"] == value
+
+
+def test_seniority_raw_is_never_invented_for_a_title_derived_level():
+    """Same rule as `employment_type_raw`: it means "what the VENDOR said". Nobody
+    quoted anything on the title branch, so a raw there would be a fabricated
+    quotation — the one thing a provenance field cannot do."""
+    r = _row(source="greenhouse", title="Senior Software Engineer")
+    assert r["seniority"] == "senior"
+    assert r["seniority_basis"] == "title"
+    assert r["seniority_raw"] is None
+
+
+def test_an_adapter_supplied_seniority_raw_is_not_overwritten():
+    """themuse sends the canonical token AND the display string; the adapter maps them
+    to `seniority` and `seniority_raw` itself, and the boundary must leave both."""
+    r = _row(source="themuse", seniority="senior", seniority_raw="Senior Level")
+    assert r["seniority"] == "senior"
+    assert r["seniority_raw"] == "Senior Level"

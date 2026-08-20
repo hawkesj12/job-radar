@@ -364,10 +364,12 @@ pours them into a single column gets 5,050 distinct values including employer na
 | greenhouse | `departments[0].name`                               | an org unit       |
 | ashby      | `team` / `department`                               | an org unit       |
 
-The braintrust row carries a second lesson. `sources.py:1048` still reads `j.get("level", "")`,
-and `level` appears in **0 of 20** rows returned today — the union of keys across the whole feed
-does not contain it. So that mapping silently yields an empty string on every row: the adapter is
-not mis-classifying a field any more, it is reading one that no longer exists. **A field table
+The braintrust row carries a second lesson. That adapter read `j.get("level", "")` while `level`
+appeared in **0 of 20** rows returned — the union of keys across the whole feed did not contain
+it. So the mapping silently yielded an empty string on every row: the adapter was not
+mis-classifying a field any more, it was reading one that no longer existed. **(Fixed since; the
+read is gone and `sources.py` records why. This paragraph described the live bug for longer than
+the bug existed, which is the same drift it is warning about.)** **A field table
 written from a captured response goes stale the same way code does**, which is why every profile
 records `measured_at` and why `## A real record` must be a real capture rather than a copy of the
 table.

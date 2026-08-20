@@ -77,6 +77,16 @@ _EMPLOYMENT_MAP = {
 
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
 
+# A trailing parenthetical QUALIFIES a type; it does not change it. Braintrust's
+# adapter builds `f"contract ({contract_type})"` (sources.py), so the string that
+# arrives here is "contract (long)" -- `_PUNCT` flattens it to "contract long",
+# which is not in the map, so 29 of 29 braintrust rows normalized to OTHER while
+# bare "contract" three lines up maps to CONTRACTOR. The adapter was defeating its
+# own normalizer. Applied ONLY after a direct lookup misses, so it can never change
+# a value that already resolved: measured over the corpus, 29 rows rescued, 0
+# changed. The raw keeps the qualifier -- "contract (long)" is the truth.
+_PAREN_TAIL = re.compile(r"\s*\([^)]*\)\s*$")
+
 
 def _flatten(v) -> str:
     """Vendor values arrive as a string OR a list of them (jobicy, arbeitnow).
@@ -98,7 +108,55 @@ def employment_type(raw) -> tuple[str | None, str | None]:
         return None, None
     key = _PUNCT.sub(" ", raw_s.lower())
     key = " ".join(key.split())
-    return _EMPLOYMENT_MAP.get(key, "OTHER"), raw_s
+    hit = _EMPLOYMENT_MAP.get(key)
+    if hit is None:
+        # Retry once with a trailing parenthetical removed -- see _PAREN_TAIL. Only
+        # on a miss, so a value that already resolved cannot be altered here.
+        stripped = _PAREN_TAIL.sub("", raw_s).strip()
+        if stripped != raw_s:
+            key = " ".join(_PUNCT.sub(" ", stripped.lower()).split())
+            hit = _EMPLOYMENT_MAP.get(key)
+    return hit or "OTHER", raw_s
+
+
+# ── seniority ───────────────────────────────────────────────────────────────
+# THERE IS NO CLOSED VOCABULARY HERE, AND THAT IS DELIBERATE. Every other
+# normalizer in this module maps onto a vocabulary someone else published --
+# `employment_type` onto schema.org's `employmentType`, `salary_period` onto its
+# `unitText` (see the module docstring: "Not invented"). No such enumeration exists
+# for seniority, so a closed set of rungs would be an OPINION about how levels
+# order, and `catalog/_SCHEMA.md` ("Fidelity, not opinion ... whether a consumer
+# maps a category is that consumer's business") governs this field exactly as it
+# governs `category`.
+#
+# The concrete harm that settled it, probed live 2026-08-20: SmartRecruiters'
+# `experienceLevel` ships LinkedIn's published enumeration verbatim -- Internship,
+# Entry level, Associate, Mid-Senior level, Director, Executive -- in which
+# `Associate` ranks ABOVE `Entry level`. The one ladder available to copy collapses
+# `Associate` to an entry rung, so adopting it would have contradicted a vendor's
+# own published ordering on the source where it fires on 60% of rows.
+#
+# So this does exactly two mechanical things and no judgment:
+#   - CASE-FOLDS. `Senior` and `senior` are the same word. Measured: a
+#     `seniority='senior'` filter missed 319 rows, 179 of them for case alone.
+#   - NULLS the two values that explicitly decline to classify.
+# `Mid-Senior Level` stays `mid-senior level`, NOT `senior`. `Associate` stays
+# `associate`, NOT `entry`. Those are the ladder, and the ladder belongs downstream.
+_SENIORITY_DECLINED = frozenset({"not applicable", "any", "n/a"})
+
+
+def seniority(raw) -> tuple[str | None, str | None]:
+    """Vendor level string -> (case-folded, raw). `None` means no level was stated.
+
+    Case-folding only -- see the block comment above for why there is no rung map.
+    A vendor that answered "Not Applicable" DID answer, so the value is `None` (we
+    have no level) while the raw preserves that they responded at all.
+    """
+    raw_s = _flatten(raw).strip()
+    if not raw_s:
+        return None, None
+    folded = " ".join(raw_s.lower().split())
+    return (None if folded in _SENIORITY_DECLINED else folded), raw_s
 
 
 # ── salary period ───────────────────────────────────────────────────────────
