@@ -916,7 +916,7 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
     "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
 )
 def test_every_adapter_emits_sections_or_honestly_omits_them(name, monkeypatch):
-    """0.9.1 wired `sections` at eighteen body sites across FOUR different call shapes
+    """0.9.0 wired `sections` at eighteen body sites across FOUR different call shapes
     -- a plain assignment, two helpers that return the value, a mutator writing into a
     caller's dict, and one where the local is a parsing intermediate. A site missed in
     any of them fails SILENTLY: that source simply carries no structure, forever, and
@@ -1006,7 +1006,7 @@ def test_rippling_detail_fills_what_the_list_omits(monkeypatch):
 
 def test_rippling_string_shaped_description_also_carries_sections(monkeypatch):
     """`description` arrives as EITHER a dict of two HTML blocks or a bare string, and
-    the two are separate assignments in `_rippling_detail`. An earlier draft of 0.9.1
+    the two are separate assignments in `_rippling_detail`. An earlier draft of 0.9.0
     wired only the dict-shaped one, which would have left every string-shaped response
     with a body and no structure -- silently, for that response shape alone."""
     listing = [{"uuid": "u1", "name": "AI Engineer", "url": "u", "workLocation": {}}]
@@ -2838,7 +2838,7 @@ def test_ashby_falls_back_to_plain_when_the_vendor_sends_no_html(monkeypatch):
 def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
     """Lever and USAJOBS both put a tenth of the posting in the obvious field and the
     rest in siblings, so reading the obvious one fed the scorer a fragment."""
-    # Both helpers return (text, sections) as of 0.9.1 -- the body still has to carry
+    # Both helpers return (text, sections) as of 0.9.0 -- the body still has to carry
     # every field, which is what this test is about.
     lever, _ = sources._lever_text(
         {
