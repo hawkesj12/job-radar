@@ -6,6 +6,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-20
+
+### Fixed
+
+- **`clean()` stripped HTML tags before decoding HTML entities, which is backwards for any
+  source that sends HTML-ESCAPED HTML.** The strip found no `<...>` to remove and the decode
+  then turned `&lt;div&gt;` into `<div>` — the function whose job is to remove markup was the
+  one creating it. Greenhouse escapes **every** body (2,697 of 2,697 measured across nine
+  employers; 116,214 live tags left behind on one board alone) and is roughly 65% of a typical
+  harvest, so `text` changes on about two thirds of harvested rows. The Muse, Arbeitnow, HN,
+  Workday and Remotive each do it on a minority of postings, which is why this is fixed in the
+  one shared helper rather than in the Greenhouse adapter.
+
+  Two consequences worth planning around:
+
+  - **Greenhouse salaries parse for the first time.** `salary_from_text` matched **0 of 809**
+    postings on one board before and **424 of 809** after — the pay figures sat inside tags.
+    Expect `salary` and `salary_basis: "parsed"` fill to jump on Greenhouse rows.
+  - **Fit scores rise on Greenhouse specifically.** 655 of 809 postings moved, every delta
+    positive (median +1, max +9), from a 21.6% shorter body and keywords that tags had split.
+    That is a systematic uplift of one source relative to the other eighteen, so it shifts the
+    cross-source mix of a shortlist and where `min_score` cuts, not just individual numbers.
+
+  Three smaller decisions came with it. The tag pattern is now `</?[A-Za-z][^>]*>` rather than
+  `<[^>]+>` — **insurance, not a live fix**: the two produce byte-identical output on all 2,697
+  bodies today. What earns the change is that 12 of them carry an inner literal `<` once entities
+  are decoded (`travel as needed (<25%) ... to hit the goals`) and none happens to carry a `>`
+  after it; the day one does, the loose pattern deletes the clause between them. A block-level
+  closer (`</li>`, `</p>`, `</h*>`, `<br>`) now becomes a line break rather than a space —
+  verified neutral for score, salary and remote verdict either way. And whitespace collapse uses
+  `[^\S\n]+`, so a non-breaking space still collapses as it did before this release; an earlier
+  draft of the fix left a literal U+00A0 on two thirds of bodies.
+
+  `clean()` had no test at all, which is how this shipped; it has six now.
+
+  **Not verified:** Adzuna, Google-for-Jobs and USAJOBS need credentials and were not probed,
+  so their bodies are unmeasured either way.
+
+
 ## [0.8.2] - 2026-08-15
 
 ### Changed

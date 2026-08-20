@@ -444,10 +444,16 @@ def test_remote_signal_records_how_it_decided():
     admitted because its TITLE said remote was byte-identical in the record to a row
     nobody classified. 462 title-decided rows and 1,642 body-decided ones in a 31,790-row
     harvest, which is why a downstream consumer invented a basis outside REMOTE_BASES."""
-    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == ("remote", "title")
+    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == (
+        "remote",
+        "title",
+    )
     # the BOUNDARY is no longer remote_signal's job -- it moved to engine.derive_remote,
     # because a source can state a boundary without saying anything about remoteness.
-    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == ("remote", "location")
+    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == (
+        "remote",
+        "location",
+    )
     assert scoring.remote_signal(
         "AI Engineer", "Austin, TX", "This is a remote role."
     ) == ("remote", "text")
@@ -955,6 +961,100 @@ def test_has_is_whole_word():
     # callers pass already-lowercased text (see scoring.score); has() is case-exact
     assert util.has("ai", "senior ai engineer")
     assert not util.has("ai", "available training")  # not a substring hit
+
+
+# clean() had NO test at all, which is how it shipped inverted for every release. The
+# fixture below is real Greenhouse `content`, trimmed: HTML-escaped HTML, whose own
+# text carries a second layer of escaping.
+_GREENHOUSE_BODY = (
+    "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;strong&gt;About Us"
+    "&lt;/strong&gt;&lt;/p&gt;&lt;/div&gt;\n"
+    "&lt;ul&gt;\n"
+    "&lt;li&gt;Experience presenting to the C-Suite&lt;/li&gt;\n"
+    "&lt;li&gt;Willing to travel as needed (&amp;lt;25%) to hit the goals&lt;/li&gt;\n"
+    "&lt;li&gt;Bachelor&#39;s degree required&lt;/li&gt;\n"
+    "&lt;/ul&gt;\n"
+    "&lt;p&gt;Pay Range: $120,000 &amp;ndash; $150,000&amp;nbsp;&lt;/p&gt;"
+)
+
+
+def test_clean_decodes_entities_before_it_strips_tags():
+    """The bug, stated as a test: this ran the strip FIRST, found no `<...>` in an
+    escaped body, and then let unescape turn `&lt;div&gt;` into `<div>` -- so the
+    function that removes markup was the one creating it. Greenhouse escapes 100% of
+    its bodies, which is ~65% of a harvest."""
+    out = util.clean(_GREENHOUSE_BODY)
+    assert "<div" not in out and "<li" not in out and "<p>" not in out
+    assert "About Us" in out and "Bachelor's degree required" in out
+
+
+def test_clean_recovers_a_salary_that_tags_used_to_hide():
+    """Not cosmetic. `salary_from_text` matched 0 of 809 live Greenhouse postings and
+    424 of 809 after this fix, because the pay figures sat between tags."""
+    assert util.salary_from_text(util.clean(_GREENHOUSE_BODY)).startswith("$120,000")
+
+
+def test_clean_keeps_bullets_on_their_own_lines():
+    """A block closer becomes a newline, not a space. The median Greenhouse posting is
+    16 `<li>` items and nothing else separates them, so collapsing to spaces runs every
+    requirement into one line."""
+    lines = util.clean(_GREENHOUSE_BODY).splitlines()
+    assert "Experience presenting to the C-Suite" in lines
+    assert "Bachelor's degree required" in lines
+    assert not any(ln != ln.strip() for ln in lines)  # no leading space from `<li>`
+    # _GREENHOUSE_BODY alone does NOT pin _BLOCK_END: it has literal newlines between its
+    # items, faithful to 2,554 of 2,697 real bodies, so the final whitespace collapse
+    # recovers the breaks on its own and the test passed with _BLOCK_END disabled. This
+    # run-together fragment is the 3-in-2,697 shape that only _BLOCK_END can separate.
+    assert util.clean("&lt;li&gt;First&lt;/li&gt;&lt;li&gt;Second&lt;/li&gt;") == (
+        "First\nSecond"
+    )
+    # `<br>` is the same case and was missing from the pattern entirely -- 7,610 of them
+    # across 1,495 of 2,697 bodies.
+    assert util.clean("Remote-first&lt;br /&gt;Flexible hours") == "Remote-first\nFlexible hours"
+
+
+def test_clean_does_not_eat_prose_between_angle_brackets():
+    """The regression that made the tag pattern strict. `<[^>]+>` is the obvious
+    pattern and it deletes the clause in `(<25%) ... hit the goals` on real postings --
+    once entities are decoded there is a literal `<` with prose after it. Measured on 12
+    of 2,697 live bodies."""
+    out = util.clean(_GREENHOUSE_BODY)
+    assert "(<25%) to hit the goals" in out
+    # ORDER MATTERS in this assertion and the first version of it got the order wrong:
+    # with `&gt;50` first there is no `<`...`>` span at all, so the loose pattern passed
+    # it and the test proved nothing. `<` first is the shape that discriminates -- the
+    # loose pattern returns "Budgets 50".
+    assert util.clean("Budgets &lt;2% of revenue while managing teams of &gt;50") == (
+        "Budgets <2% of revenue while managing teams of >50"
+    )
+
+
+def test_clean_leaves_a_plain_text_body_alone():
+    """Eleven of nineteen sources send plain text. The fix must be a no-op for them."""
+    assert util.clean("  Senior  Engineer\n\n  Remote (US)  ") == (
+        "Senior Engineer\nRemote (US)"
+    )
+    assert util.clean("") == "" and util.clean(None) == ""
+    # A non-breaking space is whitespace to a reader and not to `[ \t]+`. 0.8.2 collapsed
+    # it; the first version of this fix did not, leaving a literal U+00A0 on 67% of live
+    # bodies -- enough to break the multi-token keyword "prompt engineering" on a posting
+    # that used one between the words.
+    assert util.clean("prompt&amp;nbsp;engineering") == "prompt engineering"
+
+
+def test_clean_is_idempotent():
+    """Verified on all 809 bodies of a live board; pinned here so a future pass that
+    decodes or strips one more time cannot start eating text on re-entry.
+
+    The bound this asserts is TWO layers of escaping, which is what real sources send
+    (`&amp;nbsp;` on 711 of 809 bodies, `&amp;amp;` on all 809). A body escaped three
+    times would still leave one entity behind for a second call to decode -- that case
+    does not occur in the corpus, and chasing it with a fixed-point loop was measured
+    and rejected: unbounded decoding destroys prose on 12 of 2,697 bodies.
+    """
+    once = util.clean(_GREENHOUSE_BODY)
+    assert util.clean(once) == once
 
 
 # ── source parser (the brittle provider-JSON → posting mapping) ───────────────

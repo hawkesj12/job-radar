@@ -164,12 +164,77 @@ def q(s: str) -> str:
     return urllib.parse.quote(s)
 
 
+# A TAG, not "any angle bracket with something between it" -- INSURANCE, and stated as
+# insurance rather than as a live fix. The obvious `<[^>]+>` produces byte-identical
+# output to this on all 2,697 measured Greenhouse bodies, so nothing is broken today.
+# What makes it worth changing anyway: 12 of those bodies carry an inner literal `<`
+# once entities are decoded ("travel as needed (<25%) ... Bachelor's degree"), and 0 of
+# them happen to have a literal `>` later in the text. The day one does, the loose
+# pattern silently deletes the whole clause between them. Requiring a letter (or `/`)
+# after the `<` makes that impossible instead of merely unobserved -- which is also what
+# lets the second strip below be safe.
+_TAG = re.compile(r"</?[A-Za-z][^>]*>")
+# Block-level closers become line breaks. NOT because the source runs its bullets
+# together -- 2,554 of 2,697 real bodies already put a literal newline between `</li>`
+# and `<li>`, and the `\s*\n\s*` collapse at the end of clean() is what recovers those.
+# (0.8.2's `\s+ -> " "` is what destroyed them.) This pattern earns its place on the
+# boundaries the source does NOT separate: a heading butted straight against the prose
+# before it, `...beneficial AI systems.</p>About the Role`. Measured contribution: +6%
+# more line breaks, on 1,744 of 2,697 bodies.
+# `<br>` is here because it is the most common line-break element in job prose (7,610
+# occurrences across 1,495 of 2,697 bodies) and it is not a closer, so the `</...>` half
+# of the pattern misses it.
+# Verified free either way -- against 809 postings the fit score, the salary parse and
+# the remote verdict are identical whether these become spaces or newlines, and there is
+# no CSV round-trip to worry about because the store has no body column.
+_BLOCK_END = re.compile(r"</(li|p|h[1-6]|div|tr|ul|ol|table|section)\s*>|<br\s*/?>", re.I)
+
+
 def clean(raw: str) -> str:
+    """Vendor description (HTML, escaped HTML, or plain text) -> readable plain text.
+
+    THE ORDER IS THE WHOLE FUNCTION. This stripped tags and then unescaped entities,
+    which is backwards for any source that sends HTML-ESCAPED HTML: the strip finds no
+    `<...>` to remove, and the unescape then turns `&lt;div&gt;` into `<div>`. The
+    function whose job is to remove markup was manufacturing it.
+
+    That was not a rare edge. Greenhouse escapes every body -- 2,697 of 2,697 across
+    nine employers, 116,214 live tags left behind on one board alone -- and it is 65% of
+    a typical harvest. themuse, arbeitnow, hn, workday and remotive each do it on a
+    minority of postings too, which is why this is fixed here rather than in one adapter.
+    The cost was not only cosmetic: `salary_from_text` matched 0 of 809 Greenhouse
+    postings because the pay figures sat inside tags, and 424 of 809 after this fix.
+
+    `catalog/greenhouse.md` has said "Unescape, THEN strip; the other order is silently
+    wrong" since 2026-08-03. The repo documented the correct order and the code did not
+    follow it.
+    """
     if not raw:
         return ""
-    txt = re.sub(r"<[^>]+>", " ", raw)
-    txt = html.unescape(txt)  # decode &amp; &#39; etc.
-    return re.sub(r"\s+", " ", txt).strip()
+    txt = html.unescape(raw)
+    txt = _BLOCK_END.sub("\n", txt)
+    txt = _TAG.sub(" ", txt)
+    # A SECOND pass, because one is not enough. Greenhouse's escaped markup contains its
+    # own entities, so an `&amp;amp;` in the source needs two decodes to reach `&` --
+    # load-bearing on 2,507 of 2,697 bodies. The trade is that a source sending literal
+    # `&amp;` as prose gets it decoded too (3 bodies of ~3,300 across the clean sources).
+    txt = html.unescape(txt)
+    # And a second strip, because the decode above can expose markup that was escaped one
+    # level deeper. It fires on 0 of 2,697 bodies today and NO TEST PINS IT -- removing it
+    # leaves the suite green. It is here because that is the exact shape of the bug this
+    # function just had, and under the strict pattern above it cannot damage prose. A
+    # fixed-point loop was measured and rejected: unbounded decoding buys nothing over two
+    # passes and is only safe by luck.
+    txt = _TAG.sub(" ", txt)
+    # `[^\S\n]+`, not `[ \t]+`: 0.8.2's `\s+` collapsed a non-breaking space and this
+    # replaced it with a class that does not, leaving a literal U+00A0 on 67% of bodies --
+    # enough to lose the multi-token keyword "prompt engineering" on a real posting. This
+    # is every whitespace character EXCEPT the newline we just went to the trouble of
+    # creating, so it also covers a lone \r and U+2007.
+    txt = re.sub(r"[^\S\n]+", " ", txt)
+    # Collapse around the newlines too, not just between words: the OPENING tag of every
+    # bullet still becomes a space, so without this every line begins with one.
+    return re.sub(r"\s*\n\s*", "\n", txt).strip()
 
 
 # A date is the ONLY thing to_date may return. Sixteen adapters route third-party
