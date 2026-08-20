@@ -6,6 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`remote_areas` is populated on far fewer rows, and that is the fix.** Two changes below
+  under **Fixed** stop the field asserting a boundary nobody stated — an office address the
+  location parser could not read, and a search-mode token from google_jobs. Together they
+  move **665 rows** from a populated `remote_areas` to `null` in a 7,545-row local harvest,
+  and **~2,502 rows** in a 67,481-row production store — roughly a **30% drop in fill rate**.
+
+  It is filed here rather than only under Fixed because it **changes which rows reach a
+  user**, not just what a column says. A consumer filtering on `remote_areas` — jobfitr's
+  US-only intake reads exactly this field — will see rows it used to admit become correctly
+  unstated, and any dashboard measuring "how many rows carry a boundary" will read the
+  correction as a regression. **The old values were not conservative, they were wrong in the
+  permissive direction:** through `scoring._region_allowed` an empty list satisfies every
+  policy unconditionally, so a posting reading "Candidates must live in the United States"
+  was admitted into a Germany-only filter.
+
+  **Nothing reaches a downstream consumer without a deliberate act.** jobfitr pins
+  `job-radar>=0.8,<0.9`, so this cannot arrive through a `git pull` on its box — someone has
+  to edit the pin. That quarantine is why a contract change can ship at all.
+
 ### Added
 
 - **`text_basis`** — a new record field saying what KIND of body `text` is, when it is
@@ -183,9 +204,8 @@ Telework` (2), `part-time telework per our global telework policy` (2) all came 
   no value is partially rewritten.
 
   **This LOWERS the fill rate of `remote_areas` by roughly 30%, and that is the fix, not a
-  regression.** A consumer measuring "how many rows carry a boundary" will read it as one.
-  Note for downstream: jobfitr's US-only intake reads `remote_areas`, so ~2,502 production
-  rows lose a populated boundary and become correctly unstated.
+  regression** — filed under **Changed — BREAKING** above, because it changes which rows
+  reach a user and not merely what a column says.
 
   The narrow predicate that WAS safe on `split_place` itself — a parsed city that is a
   country name is not a city — shipped separately as `_country_is_not_a_city`. Nulling any
