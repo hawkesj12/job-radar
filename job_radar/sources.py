@@ -2325,7 +2325,7 @@ def _himalayas_rows(jobs, out, seen=None):
 
 
 def _adzuna_pay(j: dict) -> dict:
-    """Adzuna salary -> the commitment columns OR the estimate columns, never both.
+    """Adzuna salary -> the commitment columns, or nothing at all.
 
     OWNS THE DISPLAY STRING TOO, and that is the point of the function. The split was
     enforced on the numeric columns and the caller built `salary` one line earlier from
@@ -2340,25 +2340,31 @@ def _adzuna_pay(j: dict) -> dict:
     not the same as removing the COMMITMENT appearance, and the bare figure kept it.
 
     NOTHING IS EMITTED FOR A PREDICTED ROW AS OF 0.9.0, and the figures ARE lost. The
-    salary_estimated_* pair that used to carry them was removed: measured on the live
-    consumer's store, all 6,633 rows holding an estimate also rendered it as a `salary`
-    string and 0 had a commitment figure, so the columns bought false assurance rather
-    than separation -- and nothing downstream ever read them. `salary` staying empty is
-    now the whole protection: `engine.derive_salary` returns at its display-string check
-    and can never parse the figure into `salary_min`.
+    salary_estimated_* pair that used to carry them was removed.
+
+    WHY THEY WERE REMOVABLE, stated carefully because the obvious argument is wrong.
+    The columns existed so a model's guess could never sit beside a commitment, and on
+    the last release that shipped them the separation leaked anyway: all 6,633 rows
+    holding an estimate also rendered it as `$129,584-$129,584`, a point estimate shaped
+    like a posted range, with 0 of them carrying a commitment figure
+    `[live prod, engine 0.8.2]`. But `fa0cee3` and `9907e55` closed that leak EARLIER IN
+    0.9.0 -- by the commit that removed the columns, a predicted row already emitted no
+    display string and the quarantine was intact. So the leak is the HISTORY of why the
+    pair existed, not the reason it went. The reason it went is that nothing downstream
+    ever read it: the one known consumer writes both columns into its own schema and
+    reads them back nowhere.
+
+    `salary` staying empty is now the protection: `engine.derive_salary` returns at its
+    display-string check and can never parse the figure into `salary_min`. (Belt and
+    braces, and worth knowing: `vocab.salary_from_display` also returns all-None for
+    both "" and None, so the parser refuses independently of that early return.)
     """
     lo, hi = j.get("salary_min"), j.get("salary_max")
     if str(j.get("salary_is_predicted")) == "1":
 
-        # NOTHING IS EMITTED FOR A PREDICTED ROW. The estimate columns this used to
-        # write were removed at 0.9.0 -- empty on 102,799 of 102,799 rows of a harvest
-        # whose source mix excludes the one adapter that filled them, and the record
-        # already refuses to put a model's guess anywhere a commitment could be read.
-        # The prediction is DISCARDED, deliberately: `salary` stays empty so
-        # `engine.derive_salary` returns at its display-string check and can never
-        # parse the figure back into salary_min. That is the same protection the
-        # estimate columns bought, carried by the empty string instead of by a column
-        # nobody could fill.
+        # The prediction is DISCARDED. See the docstring for why the estimate columns
+        # went; the short version is that nothing read them, not that nothing filled
+        # them -- Adzuna fills them on 92.8% of its rows in the live consumer's store.
         return {"salary": ""}
     return {
         "salary": salary_range(lo, hi),

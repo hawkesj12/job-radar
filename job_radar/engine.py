@@ -748,11 +748,13 @@ def derive_salary(p: dict) -> dict:
     # a row whose 109106.69 was a model output -- caught by measuring, not by review.
     # The fix at the time was a pair of salary_estimated_* columns plus an early return
     # here when they were set. Those columns were removed at 0.9.0, and the reason is
-    # worth keeping: measured on the live consumer's store, all 6,633 rows carrying an
-    # estimate ALSO rendered it as a `salary` string -- "$129,584-$129,584", a point
-    # estimate shaped like a posted range -- and 0 of them had a commitment figure. The
-    # separation the columns existed to enforce was defeated at the display layer on
-    # 100% of rows, so they bought false assurance rather than safety.
+    # worth keeping, and stating carefully. On the last release that SHIPPED those
+    # columns the separation leaked: all 6,633 rows carrying an estimate also rendered
+    # it as "$129,584-$129,584" with 0 carrying a commitment figure
+    # `[live prod, engine 0.8.2]`. That is the HISTORY, not the reason they went --
+    # `fa0cee3` and `9907e55` closed the leak earlier in 0.9.0, so by the removal the
+    # quarantine was already intact. They went because nothing downstream ever read
+    # them.
     #
     # `_adzuna_pay` now emits NO salary at all for a predicted row, so the guard is the
     # `not display` return below: there is no string to parse and no column to leak

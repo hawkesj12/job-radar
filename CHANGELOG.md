@@ -216,13 +216,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own `salary_estimated_*` columns sees them go permanently NULL on upgrade rather than
   error.
 
-  **Why discarding beats separating, measured.** The pair existed so a model's guess
-  could never sit beside a commitment. In the live consumer's store, **all 6,633 rows
-  carrying an estimate also rendered it as a `salary` display string** —
-  `"$129,584–$129,584"`, a point estimate shaped like a posted range — and **0 of them
-  had a commitment figure**. The separation was defeated at the display layer on 100% of
-  rows, so the columns bought false assurance rather than safety, while nothing
-  downstream ever read them.
+  **Why they were removable, stated carefully — the obvious argument is wrong.** The
+  pair existed so a model's guess could never sit beside a commitment, and on the last
+  release that *shipped* them the separation leaked anyway: **all 6,633 rows carrying an
+  estimate also rendered it as `"$129,584–$129,584"`**, a point estimate shaped like a
+  posted range, with **0** carrying a commitment figure `[live prod, engine 0.8.2]`.
+  **But that leak was closed earlier in this same release** — by the display-string
+  quarantine and the point-value fix listed under Fixed — so by the commit that removed
+  the columns a predicted row already emitted no string and the separation was intact.
+  The leak is the *history* of why the pair existed. **The reason it went is that
+  nothing downstream ever read it:** the one known consumer writes both columns into its
+  own schema and reads them back nowhere.
 
   **One migration path broke and it is called out above:** the `department`
   deprecation note recommended `parent_company` as the recovery on USAJOBS, because that

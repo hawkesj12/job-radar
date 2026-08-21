@@ -1382,8 +1382,10 @@ POSTED_BASES = frozenset({"stated", "relative"})
 # hour"); `stated` = the vendor sent real numeric fields. `estimated` is deliberately
 # absent -- a model's guess is DISCARDED rather than given a column, so a figure in
 # salary_min is always one an employer committed to. The salary_estimated_* pair that
-# used to carry them was removed at 0.9.0: it was empty on 102,799 of 102,799 rows and
-# the protection now rides on the adapter emitting no display string at all.
+# used to carry them was removed at 0.9.0 -- NOT because it was empty (it read 0 of
+# 102,799 only on a harvest whose source mix excluded the one adapter that fills it;
+# the live consumer's store holds 6,633), but because nothing downstream ever read it.
+# The protection now rides on the adapter emitting no display string at all.
 SALARY_BASES = frozenset({"stated", "parsed"})
 
 # `text_basis` -- what KIND of body this is, when it is not an ordinary one.

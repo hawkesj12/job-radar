@@ -3745,8 +3745,10 @@ def test_a_model_prediction_is_never_written_into_the_commitment_columns():
 
     THE MECHANISM CHANGED AT 0.9.0 AND THE PROTECTION DID NOT. It used to rest on the
     salary_estimated_* columns: `_adzuna_pay` put a prediction there, and
-    `derive_salary` returned early when it saw one. Those columns were removed -- empty
-    on 102,799 of 102,799 rows -- so the guard is now the EMPTY DISPLAY STRING. A
+    `derive_salary` returned early when it saw one. Those columns were removed because
+    nothing downstream ever read them -- NOT for being empty; they read 0 of 102,799
+    only on a harvest with no Adzuna keys, while the live consumer's store holds 6,633.
+    So the guard is now the EMPTY DISPLAY STRING. A
     predicted row carries `salary: ""`, and `derive_salary` returns at its display
     check before it can parse anything. Same property, one fewer column, and this test
     exists to keep it true however it is implemented."""
