@@ -4696,6 +4696,46 @@ def test_salary_kind_never_infers_base_from_an_absent_label():
     assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
 
 
+def test_salary_kind_ignores_a_cue_in_the_prior_sentence():
+    """THE ROWS THIS RULE EXISTS FOR HAVE NO NEAR-SIDE CUE AT ALL.
+
+    That is the thing three of us missed. The argument for deleting this rule was that
+    once bare quantity words became `base` labels, a cue sits on the near side of the
+    break and wins on proximity anyway. True of the corpus as a whole; false of the rows
+    the rule actually touches, which carry a bare location or nothing:
+
+        "...is just one component of <co>'s total compensation package. New York City:"
+        "Additional compensation such as Bonus, Commission, Equity ... may also apply."
+        "...eligible to be considered for an annual bonus. The range for Chicago is"
+
+    Proximity cannot rescue a row with nothing to be proximate to. Labelled exhaustively
+    and blind, 81 of 86 suppressed rows (94.2%) are genuinely `base` -- so without this
+    rule those 81 assert `bonus` or `total_comp` on a base salary.
+
+    These are real corpus shapes. Do not "simplify" them into something with a near-side
+    cue; the ABSENCE of one is the whole test.
+    """
+    k = engine.salary_kind
+    for text, sal in [
+        ("Your salary is just one component of Betterment's total compensation "
+         "package for employees. New York City: $155,000-$185,000", "$155,000-$185,000"),
+        ("Additional compensation such as Bonus, Commission, Equity and other "
+         "benefits may also apply. $140,000-$220,000", "$140,000-$220,000"),
+        ("You are eligible to be considered for an annual bonus. The range for the "
+         "Chicago metro area is $111,000 - $131,000", "$111,000 - $131,000"),
+    ]:
+        assert k(text, sal) == "unspecified", text[:60]
+
+    # THE COST, kept visible: a genuine governing label in the prior sentence is
+    # discarded too -- about half of such rows on a hand-labelled sample. Precision over
+    # recall; a refusal costs nothing where a wrong assertion is the defect.
+    assert k(
+        "The base pay ranges for a successful candidate are listed below. "
+        "CA, NY, CT, NJ $245,000-$258,500",
+        "$245,000-$258,500",
+    ) == "unspecified"
+
+
 def test_salary_kind_window_snaps_to_word_boundaries():
     """A FIXED-OFFSET SLICE CAN MANUFACTURE A `\b` THAT WAS NOT THERE.
 

@@ -1405,7 +1405,7 @@ SALARY_BASES = frozenset({"stated", "parsed"})
 # insufficiently specific, and never a guess. A bare `Salary Range` / `Pay Range` IS a
 # label; a figure with nothing near it is not. Inferring `base` from absence is the
 # "default an unknown to a plausible value" the contract forbids everywhere else.
-# 40.1% of rows with a salary display [102,799-row harvest, 2026-08-20], and the honest
+# 41.8% of rows with a salary display [102,799-row harvest, 2026-08-20], and the honest
 # floor under that is a SEPARATE fact: 28.0% cannot locate their display string inside
 # their own body at all, so there is no window to read. Those two were conflated in an
 # earlier version of this comment, which cited 86.0% -- a figure measured before the cue

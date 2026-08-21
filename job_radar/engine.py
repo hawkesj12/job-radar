@@ -795,33 +795,53 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.I)),
 )
 
-# THERE IS DELIBERATELY NO SENTENCE-BOUNDARY TRUNCATION HERE, AND THAT IS A DECISION
-# THAT WAS BUILT AND REMOVED -- so read this before re-deriving it, because the
-# reasoning behind it is sound and only the CONFIGURATION made it unnecessary.
+# THE LABEL IS THE PHRASE INTRODUCING THE FIGURE, not the last cue word before it, and
+# a sentence boundary is where that stops being true. Everything before the last full
+# stop is prose about benefits, and a cue in it is a BENEFIT BEING DESCRIBED rather than
+# a label. This is structural -- it is how job posts are written -- not a heuristic
+# tuned to a handful of rows.
 #
-# The rule was: read only the sentence the figure lives in, because a cue in the prior
-# sentence is a benefit being described rather than a label -- `"eligible for additional
-# bonus opportunities. Salary Range $53,560-$67,000"` is a base row whose nearest cue is
-# `bonus`, with no negation anywhere, so the exclusion strip could not reach it. That is
-# a real class and the rule really did fix it.
+# THIS RULE WAS REMOVED AND RESTORED, and the reason it came back is the only part worth
+# reading. It was dropped on an argument three of us made independently and all of us
+# got wrong: once the cue table accepts a bare `Salary Range` as a `base` label, a cue
+# sits on the NEAR side of the break, wins on proximity, and the truncation is redundant.
+# Corpus-wide that looked right -- the widening absorbed most of what the rule did -- and
+# on 150 blind-labelled rows the two configurations produced identical wrong assertions.
 #
-# IT WAS MEASURED AGAINST A NARROWER CUE TABLE. When the table grew to accept a bare
-# `Salary Range` / `Pay Range` as a `base` label, a cue appeared on the NEAR side of the
-# break for exactly these rows, and proximity already suppressed the prose:
+# THE ROWS THE RULE ACTUALLY SUPPRESSES HAVE NO NEAR-SIDE CUE AT ALL. That is what
+# nobody checked. They carry a bare location, or nothing:
 #
-#     narrow cues -- truncation removed  equity +77  bonus +521   (598 assertions)
-#     grown cues  -- truncation removed  equity  +0  bonus  +64   ( 64 assertions)
+#   "...is just one component of <co>'s total compensation package. New York City:
+#    $155,000-$185,000"
+#   "Additional compensation such as Bonus, Commission, Equity and other benefits may
+#    also apply. $140,000-$220,000"
+#   "...eligible to be considered for an annual bonus. The range for Chicago metro area
+#    is $111,000 - $131,000"
 #
-# The widening absorbed 91% of what the truncation was doing. What it had left to do was
-# discard GENUINE prior-sentence labels -- `"the base pay ranges ... are listed below"` --
-# measured at 20 of 40 such rows on a hand-labelled sample, and 637 `base` labels
-# corpus-wide. On 150 blind-labelled rows the two configurations produced IDENTICAL
-# wrong assertions (21 each, same four classes); the only difference was 5 rows of
-# refusal-turned-correct in favour of leaving it out.
+# Proximity cannot rescue a row with nothing to be proximate to. Labelled exhaustively
+# and blind, 81 of 86 suppressed rows (94.2%) are genuinely `base` -- so without this
+# rule those 81 carry a wrong `bonus` or `total_comp` label on a base salary, which is
+# the precise defect this field exists to prevent. The rule creates exactly one wrong
+# assertion of its own.
 #
-# So: measured cost, no measured benefit, and one fewer stacked rule. If a future change
-# narrows the cue table again, this becomes correct again -- but re-measure it against
-# the table you actually have rather than against this comment.
+# THE COST IS REAL AND IS NOT HIDDEN: ~570 rows return `unspecified` instead of `base`,
+# and on a hand-labelled sample about half of the prior-sentence rows carried a genuine
+# governing label. Under this field's precision-over-recall ruling a refusal costs
+# nothing and a wrong assertion does, so the trade is taken deliberately.
+#
+# AND THE DEFENCE IS NARROWER THAN THE COUNT SUGGESTS: those 86 rows come from 13
+# employers, 48 of them one employer's repeated boilerplate and 19 more a second's. This
+# guards a small number of SHAPES, not 86 independent decisions. Disclosed because a
+# comment claiming ~80 independent saves would be overstating it.
+_SENTENCE_END = ".!?"
+
+
+def _last_sentence(window: str, before: int) -> str:
+    """Blank everything up to the last sentence end preceding the figure."""
+    cut = max(window.rfind(c, 0, before) for c in _SENTENCE_END)
+    return " " * (cut + 1) + window[cut + 1 :] if cut >= 0 else window
+
+
 def _snap(text: str, lo: int, hi: int) -> tuple[int, int]:
     """Widen a window to word boundaries.
 
@@ -898,7 +918,7 @@ def salary_kind(text: str, needle: str) -> str:
         return "unspecified"  # no window exists; 28.0% of rows with a display string
     lo, hi = _snap(text, max(0, i - _ADJ_WINDOW), i + len(needle) + _ADJ_WINDOW)
     a_lo, a_hi = i - lo, i - lo + len(needle)
-    window = _neutralize(text[lo:hi])
+    window = _last_sentence(_neutralize(text[lo:hi]), a_lo)
     best: str | None = None
     best_d: int | None = None
     best_n = best_start = best_end = 0

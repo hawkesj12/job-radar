@@ -44,22 +44,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in 150) but a recall collapse, because the rule and the rubric were measuring different
   things.
 
-  **A SENTENCE-BOUNDARY RULE WAS BUILT AND REMOVED, and the removal is the finding.**
-  It read only the sentence the figure lives in, because a cue in the prior sentence is a
-  benefit being described. That fixed a real class — and it was measured against the
-  NARROWER cue table. Once bare quantity words became labels, a cue appeared on the near
-  side of the break for exactly those rows and proximity already suppressed the prose:
-  the truncation removed **598 assertions under the narrow table and 64 under the grown
-  one — the widening absorbed 91% of it.** What it had left to do was discard genuine
-  prior-sentence labels: 20 of 40 such rows on a hand-labelled sample, 637 `base` labels
-  corpus-wide. On 150 blind-labelled rows both configurations produced **identical wrong
-  assertions** (21 each, same four classes). Measured cost, no measured benefit.
+  **A THIRD RULE: only the sentence the figure lives in is read.** A cue in the prior
+  sentence is a benefit being described, not a label. **This rule was removed and
+  restored, and the restoration is the finding.** It was dropped on an argument three
+  independent readers made and all got wrong: once bare quantity words became `base`
+  labels, a cue sits on the near side of the break and wins on proximity, so the
+  truncation is redundant. That is true of the corpus as a whole — and **false of the
+  rows the rule actually touches, which have no near-side cue at all**, only a bare
+  location or nothing:
 
-  **An earlier version of this entry justified that rule with "1,088 false assertions
-  removed against 792 lost."** Those figures were measured with a different detector's
-  word lists against the narrow cue table, and were carried across the widening without
-  re-measurement. They described no configuration this project has shipped. Named rather
-  than silently swapped, because a wrong number in a changelog is a bug here.
+  > *"...is just one component of \<co\>'s total compensation package. New York City:
+  > \$155,000–\$185,000"*
+
+  **Labelled exhaustively and blind, 81 of 86 suppressed rows (94.2%) are genuinely
+  `base`.** Without the rule those rows assert `bonus` or `total_comp` on a base salary —
+  the precise defect this field exists to prevent. Under this project's cue table the rule
+  suppresses **116 non-base assertions at a cost of 637 `base` rows returning
+  `unspecified`**; at the measured 94.2% that is **~109 wrong assertions prevented for 637
+  refusals**, and under precision-over-recall a refusal costs nothing. It creates exactly
+  one wrong assertion of its own.
+
+  **The defence is narrower than the count suggests, and that is disclosed rather than
+  buried:** those 86 rows come from **13 employers, 48 of them one employer's repeated
+  boilerplate** and 19 more a second's. It guards a small number of *shapes*, not 86
+  independent decisions.
+
+  **The figures that previously justified this rule — "1,088 removed against 792 lost" —
+  described no configuration this project has shipped.** They were measured with a
+  different detector's word lists against a narrower cue table and carried across the
+  widening without re-derivation. Named rather than silently swapped, because a wrong
+  number in a changelog is a bug here.
 
   **The window snaps to word boundaries**, because a fixed-offset slice can cut a word in
   half and manufacture a `\b` that was not there — `remote` becomes `ote`, and `OTE` is a
@@ -92,12 +106,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are discounted: blanking them all would destroy the label on exactly these rows.
 
   Distribution `[102,799-row harvest, 2026-08-20]` over the 42,072 rows with a salary
-  display: `base` 22,442 · `unspecified` 16,851 · `bonus` 1,351 · `ote` 768 ·
-  `total_comp` 579 · `equity` 81. **`equity` false positives fell 293 → 81 and `bonus`
-  2,407 → 1,351** — the widened cue list improved precision as well as recall, which was
+  display: `base` 21,805 · `unspecified` 17,603 · `bonus` 1,274 · `ote` 768 ·
+  `total_comp` 541 · `equity` 81. **`equity` false positives fell 293 → 81 and `bonus`
+  2,407 → 1,274** — the widened cue list improved precision as well as recall, which was
   not the expected direction: a bare cue on the near side is the right answer, and having
-  one is what suppressed the eligibility-prose class. **`base` is 89.5% of labelled rows,
-  and that is the field working** — its job is to stop the other 2,779 being read as base
+  one is what suppressed the eligibility-prose class. **`base` is 89.1% of labelled rows,
+  and that is the field working** — its job is to stop the other 2,664 being read as base
   pay, and one of them is a \$32,000–\$48,000 equity grant.
 
   **It is deliberately NOT a `shortlist.csv` column.** The CSV is a curated human subset —
