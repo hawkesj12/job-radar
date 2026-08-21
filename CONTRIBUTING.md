@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Nine ways a check comes back clean for the wrong reason
+## Thirteen ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -204,11 +204,23 @@ Every one of these produced a confident, wrong number in this repo:
 | 7 | a threshold that passed for the wrong reason | 10-under-12 passed while 9 of the 10 were wrong |
 | 8 | **a zero accepted because it came with an explanation** | an explained zero reads as *more* rigorous than a bare number. It is not. |
 | 9 | **a correct explanation applied outside the scope it was derived in** | true of every row measured, false for a class that was not |
+| 14 | **an approval invalidated by a later change to its shared input** | a rule was approved on a measurement against the NARROW cue list. Widening the list was a separate, correct change — and against the wider list the same rule cost 5 rows net and moved every stratum it touched the wrong way. Nobody re-opened the approval, because the edit was to a different object |
 
-Forms 8, 9 and 11 are the dangerous ones, because all three look like good work — a
-real measurement is involved in each.
+Forms 8, 9, 11 and 14 are the dangerous ones, because all four look like good work —
+a real measurement is involved in each. (There is no form 10; the numbering is
+append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
+
+- **When you change a shared input, re-read every approval that input supported.** An
+  approval is attached to the configuration it was measured in, and nothing warns you when
+  a later edit moves that configuration out from under it. The instance: three rules were
+  approved one at a time against the narrow cue list; widening the list made the first of
+  them a net negative, and it was two rounds from being built before anyone re-measured it.
+  **The tell is that the invalidating edit is to a DIFFERENT object** — a cue table, a
+  threshold, a vocabulary — so nobody thinks to re-open the decision it silently governs.
+  This is form 11's sibling: there, a true number was read against the wrong tree; here, a
+  true approval is carried into the wrong configuration.
 
 - **A grep count is never a membership test.** For "is X in collection Y", the only
   valid checks are runtime membership (`X in module.Y`) or reading the literal. Grep
