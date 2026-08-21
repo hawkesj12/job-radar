@@ -122,6 +122,71 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A vendor-STATED salary figure now passes the same magnitude check a parsed one
+  does.** The implied-annual veto lived inside `salary_from_display`, so it guarded the
+  parsed lane and nothing else — a figure an adapter read out of a structured vendor
+  field reached the record having passed no sanity check at all. It now lives in
+  `vocab.salary()`, the chokepoint all nineteen adapters reach. **50 rows change in a
+  102,799-row harvest** — 3 where a monthly period sat on an annual magnitude
+  (`$115,900–$139,300 per month`), and 47 where an hourly or monthly band was filed as
+  `year` (`$19–$48`, `CA$20`, `SGD 1–SGD 2`). The figures are always kept; only the
+  period is refused, which is disbelieving a witness rather than inventing one.
+
+- **Both magnitude thresholds are scaled by currency, and the two obvious ways to do
+  that are wrong in opposite directions.** Left unscaled, the ceiling fired on 27 stated
+  rows of which **24 were correct monthly salaries in weak currencies** — `COP
+  17,500,000 per month`, `HUF 1.8M per month`, `PHP 90K per month`. *Gating* it to USD
+  instead was measured on a full shipped-pipeline run of 29,712 parsed rows and **broke
+  6 rows to fix 1**: five CAD annual salaries had taken `week` from a weekly lunch
+  stipend, an office-days policy and `40h/week`, which the ceiling correctly kills and a
+  gate would republish as `CAD 160,000 per week`. `vocab._USD_SCALE` is a **plausibility
+  ceiling, not an accounting conversion** — nothing is converted, displayed or summed,
+  and an unknown currency falls back to 1.0, the old USD-only behaviour.
+
+  **The slack is not the same on both thresholds.** The nearest spared row sits 12.8×
+  clear of the *ceiling*, but only **1.07× clear of the `year` floor** — a PHP posting
+  at a USD-equivalent of 5,357 against a floor of 5,000. **Scaling the floor also
+  creates a defect the unscaled version could not have:** a genuine low-wage *annual*
+  salary in a weak currency now falls under it. The Philippine statutory minimum is
+  about PHP 158,600 a year against a scaled floor of PHP 280,000. Zero such rows in this
+  corpus — and this corpus is 11 of 19 sources on one day, which is exactly the
+  population it under-samples.
+
+- **A salary is rendered in its own currency.** `util.salary_range` hard-coded a dollar
+  sign and took no currency, so a Toronto role read `$168,000–$231,000` for CAD and a
+  Warsaw one `$25,200` for PLN — about a quarter of a real salary. **46 rows**, not the
+  1,147 that show a non-USD figure behind a bare `$`: three of the four callers pass a
+  currency that is USD by construction, and only `_himalayas_rows` had a real vendor
+  currency it was giving to `vocab.salary` and not to this function. **The other ~1,101
+  are left alone on purpose** — those are Greenhouse and Lever strings where the
+  *employer* typed the dollar sign into their own pay text, several of which already
+  name their currency (`$115,000–$130,000 CAD`), and `salary_currency` is correct on all
+  of them. Formatting our own output is ours; rewriting a vendor's verbatim string is
+  not.
+
+- **`seniority` reads an accented rank word.** `vocab._SENIORITY` is ASCII-keyed, so the
+  Portuguese spelling of `senior` was not a member and `Sênior Software Engineer` got
+  `seniority: None` — **not** the same defect as 0.9.0's `_WORD_RE` fix, which stopped
+  the *root* being manufactured as `S nior`; repairing the token still leaves it outside
+  the table. The lookup is folded, the position is not moved. **3 rows** lead their
+  title this way; 24 contain such a token at all, and the other 17 sit mid-title and
+  stay unread, because moving *where* a rank may be read is a different change with its
+  own failure mode (`Member of the Technical Staff`, `Tech Lead` — a rank word that IS
+  the role). Zero reverse risk, measured: across 102,799 titles the only tokens that
+  fold into a `_SENIORITY` key without already being members are the accented spellings
+  of `senior` and `junior`.
+
+- **`util._INLINE_RUN`'s comment claimed a zero it never measured.** It read "4,580 → 62
+  space-before-punctuation with **zero words glued**", and that zero came from a
+  camel-case proxy which *cannot see* the failure — a glue between two capitalised words
+  is itself camel-case. Labelled against each posting's own vocabulary, the same 445
+  joins contain at least **4 confirmed glues** (`About you` → `Aboutyou`, `Apply button`
+  → `Applybutton`, `ICF cleared` → `ICFcleared`) against 166 header corruptions the
+  guard repairs. **The behaviour is unchanged** — 166-to-4 says the direction is right,
+  and the larger class is unmeasurable here because the same glue lands in `text` on
+  rows with no header at all. Comment corrected; redesign filed.
+
+
 - **`title` and `location` shipped with the vendor's edge whitespace on them.**
   `engine._coerce` forced every text field to `str` and never stripped one, so
   **9,874 titles (9.6%) and 1,894 locations** carried leading or trailing whitespace

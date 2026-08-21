@@ -3834,6 +3834,26 @@ def test_a_point_value_is_not_rendered_as_a_range():
     assert salary_range(165000, 225000) == "$165,000–$225,000"
 
 
+def test_a_salary_string_is_rendered_in_its_own_currency():
+    """P6. This function hard-coded a dollar sign, so a Toronto role rendered
+    `$168,000-$231,000` for CAD and a Warsaw one `$25,200` for PLN -- about a quarter
+    of a real salary. It could not be fixed at a call site: there was no way to tell
+    it what the money was.
+
+    46 rows, NOT the 1,147 that show a non-USD figure behind a bare `$`. Three of the
+    four callers pass a currency that is USD by construction; only `_himalayas_rows`
+    has a real vendor currency, and it was handing it to `vocab.salary` while giving
+    this function nothing. The rest are greenhouse and lever strings where the
+    EMPLOYER typed the dollar sign -- not this function's output."""
+    from job_radar.util import salary_range
+
+    assert salary_range(168000, 231000, "CAD") == "CAD 168,000–CAD 231,000"
+    assert salary_range(25200, None, "pln") == "PLN 25,200"
+    # USD and unknown keep the bare `$`, so no existing US row moves.
+    assert salary_range(165000, 225000, "USD") == "$165,000–$225,000"
+    assert salary_range(165000, 225000, None) == "$165,000–$225,000"
+
+
 def test_a_hyphenated_quantity_is_not_a_pay_period():
     """FOUND BY HAND-READING OUTPUT, not by review: a real Greenhouse body reads
     '$186,400 — $233,000 USD PLEASE NOTE: our policy requires a 90-day waiting
@@ -3875,6 +3895,77 @@ def test_an_absurd_implied_annual_vetoes_the_period_whatever_the_unit():
     # A genuinely large ANNUAL package is not vetoed for being large.
     big = vocab.salary_from_display("$1,400,000 - $1,900,000", period="year")
     assert big["salary_period"] == "year"
+
+
+def test_a_vendor_stated_period_is_checked_at_all():
+    """P7: the magnitude veto lived inside `salary_from_display`, so it guarded the
+    PARSED lane and nothing else -- a vendor-STATED figure reached the record having
+    passed no sanity check whatever. `salary()` is the chokepoint all nineteen
+    adapters reach, so the veto lives there now.
+
+    Real rows from a 102,799-row harvest: an ashby posting sends 19-48 with the
+    interval `year`, and a lever one sends 1-1. 29 of 29 rows the floor catches are
+    hourly rates labelled `year`."""
+    got = vocab.salary(19, 48, currency="USD", period="year")
+    assert got["salary_min"] == 19.0, "the figures are kept; only the period is refused"
+    assert got["salary_period"] is None, "an annual salary of $48 was believed"
+    assert vocab.salary(115_900, 139_300, currency="USD", period="month")["salary_period"] is None
+
+
+def test_a_weak_currency_keeps_the_period_its_vendor_stated():
+    """THE CEILING IS DENOMINATED IN USD, SO IT MAY ONLY BE APPLIED TO USD when it is
+    checking a vendor's own field. Ungated it fired on 27 stated rows and 24 of them
+    were CORRECT monthly salaries in weak currencies -- a single run of that guard
+    would have deleted the period from every Philippine, Hungarian, Colombian and
+    Czech row in the corpus.
+
+    A weak currency INFLATES the raw number, which is why the gate is on the ceiling
+    and not on the `year` floor: inflation cannot trip a floor."""
+    for cur, lo, hi in (
+        ("PHP", 90_000, 120_000),
+        ("HUF", 1_800_000, 2_400_000),
+        ("COP", 17_500_000, 21_175_000),
+        ("CZK", 150_000, 300_000),
+    ):
+        got = vocab.salary(lo, hi, currency=cur, period="month")
+        assert got["salary_period"] == "month", f"{cur} monthly salary lost its period"
+    # ...and the floor still fires on a weak currency, because it cannot false-positive.
+    assert vocab.salary(1, 2, currency="SGD", period="year")["salary_period"] is None
+
+
+def test_a_monthly_band_labelled_year_loses_the_label():
+    """The `year` floor is scaled too, and that was expected to over-fire and measured
+    the opposite: 29 stated rows unscaled, 47 scaled, and all 18 newly caught are one
+    defect -- a MONTHLY band filed as `year`.
+
+    THE EVIDENCE IS NOT UNIFORM ACROSS THOSE 18 and this test only pins the two that
+    need no scale table to believe. The HUF pair is the strongest row in the set: one
+    employer, one title, one band, filed once as `year` and twice as `month`."""
+    got = vocab.salary(1_045_000, 1_567_500, currency="HUF", period="year")
+    assert got["salary_min"] == 1_045_000.0, "the figures are kept"
+    assert got["salary_period"] is None, "a monthly HUF band was believed as annual"
+    assert vocab.salary(70_000, 95_000, currency="PHP", period="year")["salary_period"] is None
+    # ...and a real US low-wage ANNUAL row keeps whatever it has: scaling by 1.0 is
+    # the old behaviour, so nothing USD moves that did not move before.
+    assert vocab.salary(31_000, 38_000, currency="USD", period="year")["salary_period"] == "year"
+
+
+def test_a_scraped_period_is_still_vetoed_in_a_strong_currency():
+    """THE ROW THAT KILLED THE FIRST TWO DESIGNS, pinned so it cannot come back.
+
+    In the parsed lane the period was scraped out of nearby prose by
+    `engine._adjacent_evidence`, so the ceiling is really a STRAY-WORD detector: five
+    CAD annual salaries in the corpus took `week` from a weekly lunch stipend, an
+    office-days policy and `40h/week`.
+
+    GATING the ceiling on `currency in (None, "USD")` republishes all five as
+    `CAD 160,000 per week` -- measured at 7 parsed rows changed, 6 of them broken.
+    SCALING it does not, because CAD is USD-scale: 160,000 x 52 / 1.37 is $6.1M
+    implied, still absurd. If this test ever fails, the scale table has been edited
+    into a gate."""
+    got = vocab.salary_from_display("CAD $160,000–$245,000", period="week", currency="CAD")
+    assert got["salary_min"] == 160_000.0
+    assert got["salary_period"] is None, "a stray `week` was believed on a CAD salary"
 
 
 def test_the_period_is_read_from_slash_notation_too():
@@ -3971,9 +4062,13 @@ def test_title_root_never_manufactures_a_word_no_employer_wrote():
     bug, so the fix arrived with no coverage at all and these assertions are the first
     thing that would notice it coming back.
     """
-    # the bug itself, in four scripts an employer actually used
+    # the bug itself, in four scripts an employer actually used. `Sênior` now loses
+    # its rank word to P4b's fold -- exactly as the ASCII spelling always has -- so the
+    # assertion here is that the LETTERS survive, which is what this test is about. An
+    # earlier version expected the whole title back, because the accented rank was not
+    # a `_SENIORITY` member yet and so was never stripped.
     for title, root in [
-        ("Sênior Security Engineer", "Sênior Security Engineer"),
+        ("Sênior Security Engineer", "Security Engineer"),
         ("Développeur Full Stack", "Développeur Full Stack"),
         ("Ingénieur DevOps", "Ingénieur DevOps"),
         ("Müşteri Temsilcisi", "Müşteri Temsilcisi"),
@@ -3987,7 +4082,7 @@ def test_title_root_never_manufactures_a_word_no_employer_wrote():
 
     nfd = unicodedata.normalize("NFD", "Sênior Security Engineer")
     assert nfd != "Sênior Security Engineer"  # the fixture really is decomposed
-    assert vocab.decompose_title(nfd)["title_root"] == nfd
+    assert vocab.decompose_title(nfd)["title_root"] == "Security Engineer"
 
     # LATIN ONLY, ON PURPOSE. A bilingual title must still root at its English half:
     # the ASCII-only class was accidentally an English extractor, and widening to a
@@ -4005,9 +4100,11 @@ def test_title_root_never_manufactures_a_word_no_employer_wrote():
     assert vocab._WORD_RE.findall("data_engineer") == ["data", "engineer"]
     assert vocab._WORD_RE.findall("3 × 4 ÷ 2") == ["3", "4", "2"]
 
-    # HONEST LIMIT: this fixes the manufactured string, NOT the seniority. `_SENIORITY`
-    # is keyed on ASCII, so `sênior` is still not a member.
-    assert vocab.decompose_title("Sênior Security Engineer")["seniority"] is None
+    # THE HONEST LIMIT THIS ONCE RECORDED IS CLOSED. It read: "this fixes the
+    # manufactured string, NOT the seniority -- `_SENIORITY` is keyed on ASCII, so
+    # `sênior` is still not a member." P4b folds the lookup, so both spellings now
+    # reach the same rung. See `test_seniority_survives_a_diacritic`.
+    assert vocab.decompose_title("Sênior Security Engineer")["seniority"] == "senior"
     assert vocab.decompose_title("Senior Security Engineer")["seniority"] == "senior"
 
 
@@ -4196,6 +4293,37 @@ def test_a_qualified_contract_string_still_normalizes():
 
 
 # ── 0.9.0: classification — seniority ───────────────────────────────────────
+def test_seniority_survives_a_diacritic(): 
+    """P4b. `_SENIORITY` is ASCII-keyed, so the accented spelling of `senior` was not
+    a member and `Senior Software Engineer` written the Portuguese way got
+    `seniority: None`. P4 was the neighbouring defect -- `_WORD_RE` deleted the
+    accented letter, so the ROOT came back as a word no employer wrote -- and fixing
+    it does not fix this one: a repaired token is still outside the table.
+
+    3 rows in a 102,799-row harvest lead their title this way; the other 17 sit
+    mid-title and are deliberately still unread, because moving WHERE a rank may be
+    read is a different change with its own failure mode."""
+    got = vocab.decompose_title("S\u00eanior Software Engineer Fullstack")
+    assert got["seniority"] == "senior"
+    assert got["title_root"] == "Software Engineer Fullstack"
+    assert vocab.decompose_title("J\u00fanior Developer")["seniority"] == "junior"
+    # The positional rule is untouched: a head noun is still the role.
+    assert vocab.decompose_title("Director of Engineering")["seniority"] is None
+
+
+def test_folding_never_invents_a_rank():
+    """The reverse risk, and it is the reason folding is safe rather than merely
+    convenient: across all 102,799 titles the ONLY tokens that fold into a
+    `_SENIORITY` key without already being members are the accented spellings of
+    `senior` and `junior`. Nothing else collides -- so the fold cannot promote an
+    ordinary word into a rank."""
+    for word in ("engineer", "designer", "d\u00e9veloppeur", "t\u00e9cnico", "s\u00e9nior"):
+        key = vocab._rank_key(word)
+        assert (key in vocab._SENIORITY) == (word.strip("\u00e9") in ("s\u00e9nior",) or key in ("senior",))
+    assert vocab._rank_key("S\u00caNIOR") == "senior"
+    assert vocab._rank_key("Engineer") == "engineer"
+
+
 def test_stated_seniority_is_case_folded():
     """One column held five vendor dialects at once: `seniority='senior'` returned
     2,229 rows and missed 319 more spelled `Senior` or `Senior Level`, 179 of them for

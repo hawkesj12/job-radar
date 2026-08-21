@@ -21,6 +21,7 @@ keeps its raw; it is never dropped and never guessed at.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .dedup import _QUAL_NOISE, _QUAL_RE, _TITLE_NOISE
 
@@ -221,6 +222,102 @@ def salary_period(raw) -> str | None:
     return _PERIOD_MAP.get(" ".join(s.split()))
 
 
+# Periods per year, for the implied-annual check in _period_is_contradicted.
+_ANNUALIZE = {"hour": 2080, "day": 260, "week": 52, "month": 12, "year": 1}
+
+# ORDER-OF-MAGNITUDE UNITS PER USD. A PLAUSIBILITY CEILING, NOT AN ACCOUNTING
+# CONVERSION -- nothing here is displayed, stored or summed, and no figure is ever
+# converted. The only question asked of this table is "is this number absurd for a
+# salary", and that question has roughly a decade of slack in it.
+#
+# WHY IT EXISTS: both magnitude thresholds are denominated in USD, and applying a USD
+# ceiling to a weak currency deletes correct data. Ungated, the implied-annual ceiling
+# fired on 27 stated rows in a 102,799-row harvest [corpus tree 515521d] of which 24
+# were CORRECT monthly salaries -- `COP 17,500,000 per month`, `HUF 1.8M per month`,
+# `PHP 90K per month`, `CZK 150K per month`.
+#
+# HOW MUCH SLACK THERE ACTUALLY IS, AND IT IS NOT THE SAME ON BOTH THRESHOLDS. The
+# 12.8x margin quoted for this table was measured on the implied-annual CEILING, where
+# the nearest spared row sits an order of magnitude clear and no rate here has moved
+# 10x in decades. Re-derived on the `year` FLOOR it is 1.07x: the nearest spared row
+# is a PHP posting at a USD-equivalent of 5,357 against a floor of 5,000. A 7% error
+# in one rate moves that row. The floor is therefore the fragile half of this table --
+# quote 12.8x only of the ceiling, and re-measure both if an entry is ever edited.
+#
+# All 27 currencies the corpus contains have an entry; an unknown one falls back to
+# 1.0, which is the old USD-only behaviour and the conservative direction.
+_USD_SCALE = {
+    "USD": 1, "EUR": 0.92, "GBP": 0.79, "CHF": 0.88, "CAD": 1.37, "AUD": 1.52,
+    "NZD": 1.65, "SGD": 1.34, "AED": 3.67, "BRL": 5.4, "MYR": 4.7, "PLN": 4.0,
+    "RON": 4.6, "HKD": 7.8, "CNY": 7.2, "SEK": 10.5, "MXN": 17, "ZAR": 18.5,
+    "CZK": 23, "TWD": 32, "PHP": 56, "INR": 83, "ALL": 92, "JPY": 150,
+    "HUF": 360, "KRW": 1330, "COP": 4100,
+}  # fmt: skip
+
+
+def _period_is_contradicted(lo, hi, period, currency) -> bool:
+    """Does the figure's own magnitude disprove the period stated beside it?
+
+    Disbelieving a witness, never inventing one -- the caller nulls the period and
+    keeps the numbers, which is the only direction `salary_period` allows.
+
+    THIS LIVED INSIDE `salary_from_display`, SO IT GUARDED ONLY THE PARSED LANE, and
+    that is the whole of P7: a vendor-STATED figure reached the record having passed
+    no sanity check at all. Measured on a 102,799-row harvest [corpus tree 515521d,
+    one day, 11 of 19 sources]: 15 stated rows exceed a hi/lo ratio of 5, 9 exceed 50.
+    The tempting comparison -- "the worst ratio among `parsed` is 5.0" -- is CIRCULAR
+    and is written here only to be corrected: 5.0 is `_D_MAX_RATIO`'s own output,
+    because every wider parse was refused and is all-None. It is evidence about the
+    guard, not about the data.
+
+    BOTH THRESHOLDS ARE SCALED BY CURRENCY (`_USD_SCALE`), AND THE FIRST TWO ATTEMPTS
+    AT THAT WERE WRONG IN OPPOSITE DIRECTIONS. Applying the USD ceiling unscaled
+    deletes correct data: it fired on 27 stated rows of which 24 were correct monthly
+    salaries in weak currencies. GATING it on `currency in (None, "USD")` instead was
+    measured on a full shipped-pipeline run of 29,712 parsed rows and BREAKS 6 rows to
+    fix 1 -- five CAD annual salaries where `week` had been scraped out of a weekly
+    lunch stipend, an office-days policy and `40h/week`, which the ceiling correctly
+    kills and a gate republishes as `CAD 160,000 per week`. Scaling satisfies both:
+    CAD 160,000/week is still $6.1M implied and still vetoed, while PHP 90,000/month
+    is $19,286 and is not.
+
+    SCALING THE `year` FLOOR TOO WAS EXPECTED TO OVER-FIRE AND MEASURED THE OPPOSITE:
+    29 stated rows unscaled, 47 scaled, and all 18 newly caught are one defect -- a
+    MONTHLY band labelled `year`. THE EVIDENCE FOR THOSE 18 IS NOT UNIFORM AND MUST
+    NOT BE READ AS 18 VERIFIED ROWS: one is confirmed by its own body ("Php 70,000 -
+    Php 95,000 per month" against a structured `year`), one is confirmed with NO FX
+    rate involved (one employer, one title, one band -- `HUF 1,045,000 - 1,567,500` --
+    filed once as `year` and twice as `month`), and the other 16 rest on the scale
+    table alone.
+
+    THE RESIDUAL ON THE FLOOR, named because scaling created it and this corpus cannot
+    see it: a genuine low-wage ANNUAL salary in a weak currency now falls under the
+    scaled floor. The Philippine statutory minimum is about PHP 158,600 a year against
+    a scaled floor of PHP 280,000, so a real minimum-wage annual posting WOULD lose its
+    period. Zero such rows here -- but this corpus is 11 of 19 sources on one day, and
+    that is exactly the population it under-samples. The unscaled floor could not do
+    this. It is the one place this change can make a row worse.
+
+    NOT PORTED to the stated lane at all, each a decision with a measurement behind
+    it: `_D_MAX_RATIO` (refusing a wide range outright) would have this lane DELETE
+    the shape `_distribute_multiplier` REPAIRS in the parsed lane -- one input, two
+    opposite verdicts -- and its population is bimodal with nothing between 17.5x and
+    994.7x, so a single threshold describes neither cluster (`$141K - $930K` is a real
+    research band). `lo < 1000 and no period` would delete 15 real figures (`$22-$26`
+    on a Support Specialist, `$64.10` on an RN) whose only defect is a vendor interval
+    this codebase does not map -- our parsing gap, not their error.
+    """
+    # BOTH thresholds are USD-denominated, so both are divided by the currency's
+    # scale before comparison. An unknown currency scales by 1.0 -- the old USD-only
+    # behaviour, and the conservative direction.
+    scale = _USD_SCALE.get(currency or "USD", 1.0)
+    if period == "year":
+        return hi is not None and hi / scale < 5_000
+    if not period or lo is None:
+        return False
+    return lo * _ANNUALIZE.get(period, 0) / scale > 1_000_000
+
+
 def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict:
     """Structured salary -> the five record fields. Returns all-None when there is
     no real figure.
@@ -249,11 +346,20 @@ def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict
             "salary_min": None, "salary_max": None, "salary_currency": None,
             "salary_period": None, "salary_basis": None,
         }  # fmt: skip
+    hi = hi if hi is not None else lo
+    cur = str(currency).upper() if currency else None
+    per = salary_period(period)
+    # EVERY LANE, NOT JUST THE PARSED ONE -- this is the chokepoint all nineteen
+    # adapters reach, which is why the magnitude veto lives here rather than in
+    # `salary_from_display`, where it guarded 0 stated rows. See
+    # `_period_is_contradicted` for the measurement and for what was NOT ported.
+    if per and _period_is_contradicted(lo, hi, per, cur):
+        per = None
     return {
         "salary_min": lo,
-        "salary_max": hi if hi is not None else lo,
-        "salary_currency": (str(currency).upper() if currency else None),
-        "salary_period": salary_period(period),
+        "salary_max": hi,
+        "salary_currency": cur,
+        "salary_period": per,
         "salary_basis": basis,
     }
 
@@ -287,8 +393,6 @@ _G_SALARY = re.compile(
     re.I,
 )
 _MULT = {"k": 1_000, "m": 1_000_000}
-# Periods per year, for the implied-annual sanity check in salary_from_display.
-_ANNUALIZE = {"hour": 2080, "day": 260, "week": 52, "month": 12, "year": 1}
 
 
 def _distribute_multiplier(lo_n, lo_mul, hi_n, hi_mul):
@@ -387,9 +491,10 @@ def salary_from_display(raw, period=None, currency=None) -> dict:
     # with period=None would manufacture exactly the unusable rows this is fixing.
     if lo < 1000 and not period:
         return salary()
-    # MAGNITUDE VETO on a STATED period -- refusing to believe a witness, which is a
-    # different act from inventing one. Two real failures, both found by hand-reading
-    # output rather than by review:
+    # THE MAGNITUDE VETO MOVED INTO `salary()` and is no longer applied here -- see
+    # `_period_is_contradicted`. It had guarded this lane alone, which was P7. Two
+    # real failures are why it exists at all, both found by hand-reading output
+    # rather than by review:
     #
     #   "Estimated Hourly Pay Range $140,000 - $220,000"  -- the employer's own label,
     #   and believing it writes `hour` on a six-figure salary.
@@ -402,12 +507,8 @@ def salary_from_display(raw, period=None, currency=None) -> dict:
     #
     # Implied-annual is the general form; per-unit thresholds only ever cover the
     # units someone thought of. The ceiling applies to SUB-annual periods only, so a
-    # genuine $1.5M/yr package is not vetoed for being large.
-    implied = lo * _ANNUALIZE.get(period or "", 0)
-    if period and period != "year" and implied > 1_000_000:
-        period = None
-    elif period == "year" and hi < 5_000:
-        period = None
+    # genuine $1.5M/yr package is not vetoed for being large. Behaviour in THIS lane
+    # is unchanged by the move: measured byte-exact on 29,712 parsed rows.
     return salary(lo, hi, currency=currency, period=period, basis="parsed")
 
 
@@ -1463,6 +1564,35 @@ def remote_type(raw) -> str | None:
 # The seniority words that can DECORATE a title. Every one of them can also BE a
 # job -- "Director of Engineering", "Team Lead", "Chief of Staff" -- which is what
 # the positional rule in decompose_title exists to protect.
+def _rank_key(word: str) -> str:
+    """A title word, folded to the ASCII key `_SENIORITY` is written in.
+
+    `_SENIORITY` is ASCII-keyed, so `senior` is a member and `senior` with a
+    circumflex is not, and `Senior Software Engineer` got a seniority while
+    `Senior Software Engineer` spelled the Portuguese way got `None`. P4 fixed the
+    neighbouring defect -- `_WORD_RE` was deleting the accented letter outright, so
+    the ROOT came back as a word no employer wrote -- and its register implied this
+    was the same bug. It is not: repairing the token still leaves it outside the
+    table, which is why this is a separate change.
+
+    24 rows in a 102,799-row harvest [corpus tree 515521d] contain a token that folds
+    into a `_SENIORITY` key -- `senior` accented 20, `junior` accented 4 -- and THREE
+    of them lead the title, which is the only position this table is consulted from.
+    The other 17 sit mid-title and are unreachable without also moving WHERE a rank
+    may be read, a much larger change with its own failure mode (`Member of the
+    Technical Staff`, `Tech Lead` -- a rank word that IS the role). A count of 20 was
+    circulated for this fix; it silently included that rule change. Fold the lookup,
+    do not move the position.
+
+    ZERO REVERSE RISK, measured rather than assumed: across all 102,799 titles the
+    only tokens that fold INTO a `_SENIORITY` key and are not already members are
+    those two words. Nothing else in the corpus collides.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFD", word.lower()) if not unicodedata.combining(c)
+    )
+
+
 _SENIORITY = {
     "jr": "junior", "junior": "junior", "sr": "senior", "senior": "senior",
     "staff": "staff", "principal": "principal", "lead": "lead",
@@ -1906,11 +2036,12 @@ def decompose_title(title: str) -> dict:
 
     seniority = level = None
     i = 0
-    while i < len(toks) - 1 and toks[i].lower() in _SENIORITY:
+    # `_rank_key`, not `.lower()` -- the table is ASCII and the corpus is not.
+    while i < len(toks) - 1 and _rank_key(toks[i]) in _SENIORITY:
         if toks[i + 1].lower() == "of":
             break  # head noun -- "Director of Engineering" IS a Director
         if seniority is None:
-            seniority = _SENIORITY[toks[i].lower()]
+            seniority = _SENIORITY[_rank_key(toks[i])]
         i += 1
 
     root_words: list[str] = []
