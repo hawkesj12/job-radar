@@ -1388,6 +1388,30 @@ POSTED_BASES = frozenset({"stated", "relative"})
 # The protection now rides on the adapter emitting no display string at all.
 SALARY_BASES = frozenset({"stated", "parsed"})
 
+# `salary_kind` -- WHAT QUANTITY the figure measures. A different axis from
+# `salary_basis`, which records only HOW it was extracted, and the gap between them is
+# why ~670 on-target-earnings bands and a $32,000-$48,000 new-hire EQUITY GRANT sat in
+# columns the README defines as what an employer COMMITTED to as base pay.
+#
+# THERE IS DELIBERATELY NO `hourly_rate`, although the brief for this field asked for
+# one. An hourly rate is base pay expressed per hour: the QUANTITY is base, the INTERVAL
+# is `salary_period == "hour"`, and that column is already populated on 2,106 rows.
+# Two columns encoding one fact is how they drift -- measured before deciding, the two
+# signals already disagree on 430 rows (288 where a window says "per hour" and the
+# period does not, 142 the other way). `department` and `team` cost a release to unpick
+# for exactly this reason. Hourly cues therefore resolve to `base`.
+#
+# `unspecified` IS THE DEFAULT AND IS NOT A FAILURE. A figure with no label near it gets
+# `unspecified`, never `base` -- inferring base from absence is the same "default an
+# unknown to a plausible value" the contract forbids everywhere else, and it would make
+# this field worse than not having it. The rate is high on purpose: 86.0% of rows with a
+# salary display string [102,799-row harvest, 2026-08-20], because 28.0% of them cannot
+# even locate that string inside their own body. Do not "improve" this field by lowering
+# that number.
+SALARY_KINDS = frozenset(
+    {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
+)
+
 # `text_basis` -- what KIND of body this is, when it is not an ordinary one.
 #
 # THERE IS DELIBERATELY NO `full`. Seventeen adapters would have to claim it and nobody

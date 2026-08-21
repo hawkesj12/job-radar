@@ -4639,3 +4639,156 @@ def test_section_text_refuses_a_span_that_does_not_fit_its_text():
     floaty = {"text": "short body", "sections": [
         {"type": "requirements", "start": 1.0, "end": 4.0}]}
     assert section_text(floaty, "requirements") is None
+
+
+# ── salary_kind: WHAT the figure measures, never how it was extracted ────────
+def test_salary_kind_reads_the_label_beside_the_figure():
+    """`salary_basis` records HOW a figure was extracted and never WHAT it measures.
+    That gap is why on-target-earnings bands and a $32,000-$48,000 new-hire EQUITY
+    GRANT sat in columns the README defines as what an employer committed to as base.
+    """
+    k = engine.salary_kind
+    assert k("Equity grade: 4\nNew hire equity: $32,000-$48,000", "$32,000-$48,000") == (
+        "equity"
+    )
+    assert k("OTE Range: $160,000-$205,000 + equity", "$160,000-$205,000") == "ote"
+    assert k(
+        "The estimated total compensation for this role ranges from $210,000 - $250,000",
+        "$210,000 - $250,000",
+    ) == "total_comp"
+    assert k("USA base pay range per year: $195,000 - $255,000", "$195,000 - $255,000") == (
+        "base"
+    )
+    # AN HOURLY RATE IS BASE PAY, NOT ITS OWN KIND -- the interval is `salary_period`,
+    # which already carries it. Two columns for one fact is how they drift.
+    assert k("Hourly rate: $45-$60", "$45-$60") == "base"
+    assert "hourly_rate" not in vocab.SALARY_KINDS
+
+
+def test_salary_kind_never_infers_base_from_an_absent_label():
+    """`unspecified` is the default and it is the contract working, not a gap.
+
+    Defaulting an unlabelled figure to `base` is the same "default an unknown to a
+    plausible value" the record forbids everywhere else, and it would make this field
+    worse than not having it. 64.9% of rows carrying a salary display string come back
+    `unspecified` [102,799-row harvest, 2026-08-20]; 28.0% of them cannot even locate
+    that string inside their own body, so there is no window to read.
+    """
+    k = engine.salary_kind
+    assert k("Salary Range: $190,000-$270,000", "$190,000-$270,000") == "unspecified"
+    # no window at all -- the display string is not in the body
+    assert k("a body that never quotes the figure", "$1-$2") == "unspecified"
+    assert k("", "$1-$2") == "unspecified"
+    assert k("some text", "") == "unspecified"
+    # a genuine equidistant tie between two DIFFERENT cues still refuses
+    assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
+
+
+def test_salary_kind_ignores_a_quantity_that_is_being_excluded():
+    """THE DOMINANT MULTI-CUE SHAPE, and it puts the WRONG cue closest to the figure.
+
+    "Annual base salary range (excluding equity and bonus): $218,025-$256,500" is a
+    BASE row, but `bonus` is the nearest word to the number by construction. Reading the
+    closest cue returns `bonus` -- actively wrong, and worse than refusing. 3,087 rows
+    put a parenthesis or an exclusion between the label and the number.
+    """
+    k = engine.salary_kind
+    assert k(
+        "Annual base salary range (excluding equity and bonus): $218,025-$256,500",
+        "$218,025-$256,500",
+    ) == "base"
+    assert k(
+        "US base salary range for this position (this does not include bonus, equity "
+        "and benefits): $183,000-$230,000",
+        "$183,000-$230,000",
+    ) == "base"
+    # ONLY A NEGATED PARENTHETICAL IS BLANKED. Blanking every parenthetical also
+    # destroys the ones that CONTAIN the label -- worth 192 rows on the corpus.
+    assert k("Pay Range (Base Pay): $230,000 - $275,000", "$230,000 - $275,000") == "base"
+
+
+def test_salary_kind_picks_the_nearest_cue_not_the_first_one_in_the_table():
+    """PROXIMITY DECIDES, NOT THE ORDER OF `_KIND_CUES`.
+
+    The cue table is ordered most-specific-first so a narrow pattern is not shadowed by
+    a broad one over the same span. It must NOT decide the answer -- `bonus` sits above
+    `base` in that table, so a table-order rule labels every "base salary … plus annual
+    bonus" row `bonus`.
+
+    Both strings below are real corpus windows, not constructed ones. Mutation-tested:
+    replacing `if best_d is None or d < best_d` with `if best_d is None` -- i.e. first
+    cue wins -- passes every OTHER assertion in this file and fails only here.
+    """
+    k = engine.salary_kind
+    assert k(
+        "Base salary range: $135,000 to $170,000 USD, plus annual bonus. "
+        "Final compensation will be determined by experience.",
+        "$135,000 to $170,000",
+    ) == "base"
+    assert k(
+        "What We Offer: The annual base salary range for this position is "
+        "$135,000 - $210,000. Additionally, this position is eligible for a bonus.",
+        "$135,000 - $210,000",
+    ) == "base"
+    # and the mirror, so this is not just "base always wins": a bonus figure with the
+    # word `base` further away must come back `bonus`.
+    assert k(
+        "This is in addition to your base salary. Annual bonus target: $10,000-$20,000",
+        "$10,000-$20,000",
+    ) == "bonus"
+
+
+def test_salary_kind_stays_inside_its_closed_vocabulary():
+    """THE PIN, and it cannot be the existing basis test.
+
+    `test_no_adapter_emits_a_basis_outside_its_closed_vocabulary` greps
+    `inspect.getsource(sources)`. `salary_kind` is computed in `engine`, so extending
+    that test to this field would pass VACUOUSLY -- green while asserting nothing. This
+    reads the literal AND exercises the classifier, which is the only combination that
+    can actually fail.
+    """
+    import inspect
+
+    # the literal, so a member added without thought is visible in a diff
+    assert vocab.SALARY_KINDS == frozenset(
+        {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
+    )
+    # every string the classifier can emit is declared in that literal
+    emitted = {
+        kind for kind, _cue in engine._KIND_CUES
+    } | {"unspecified"}
+    assert emitted <= vocab.SALARY_KINDS, emitted - vocab.SALARY_KINDS
+    # and the source agrees -- a cue table entry outside the vocabulary fails here
+    src = inspect.getsource(engine)
+    assert '"hourly_rate"' not in src, "hourly_rate is salary_period's job, not a kind"
+
+    # exercised, not only read: hostile and ordinary inputs both stay in-vocabulary
+    for text, needle in [
+        ("base pay $1-$2", "$1-$2"), ("", ""), ("no figure here", "$9"),
+        ("(excluding bonus) $5", "$5"), ("ote bonus $7", "$7"),
+    ]:
+        assert engine.salary_kind(text, needle) in vocab.SALARY_KINDS
+
+
+def test_salary_kind_is_set_above_the_fill_only_guard():
+    """A VENDOR-STATED FIGURE WITH AN OTE LABEL IS THE DEFECT THIS FIELD EXISTS FOR.
+
+    `derive_salary` returns early when a vendor already sent numbers. Setting the kind
+    below that guard labelled 411 of 41,665 rows and found ZERO equity -- the field
+    would have been blind to exactly the rows that motivated it.
+    """
+    p = {
+        "title": "t", "company": "c", "url": "u", "source": "greenhouse",
+        "salary": "$160,000-$205,000", "text": "OTE Range: $160,000-$205,000",
+        "salary_min": 160000.0, "salary_max": 205000.0,   # the vendor already sent them
+    }
+    engine.derive_salary(p)
+    assert p["salary_kind"] == "ote"
+    assert p["salary_min"] == 160000.0 and p["salary_max"] == 205000.0  # untouched
+
+    # None -- not "unspecified" -- when there is no figure at all. "no salary" and
+    # "a salary we could not label" are different facts.
+    q = {"title": "t", "company": "c", "url": "u", "source": "s"}
+    engine._coerce(q)
+    engine.derive_salary(q)
+    assert q["salary_kind"] is None

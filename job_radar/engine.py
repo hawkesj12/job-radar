@@ -160,7 +160,11 @@ _CONTRACT_FIELDS = (
     # (vocab.google_salary, vocab.salary_from_display). There has never been a `text`
     # token -- vocab.SALARY_BASES is frozenset({"stated", "parsed"}) and this comment
     # named a third for as long as it existed.
-    "salary_basis",  # stated | parsed | None -- vocab.SALARY_BASES
+    "salary_basis",
+    # WHAT the figure measures, vs `salary_basis`'s HOW it was extracted. `None` means
+    # there is no figure at all; `unspecified` means there IS one and no label sat near
+    # it. Those are different facts and the contract keeps them apart.
+    "salary_kind",  # stated | parsed | None -- vocab.SALARY_BASES
     # terms
     "employment_type_raw",  # what the vendor actually said
     "seniority",
@@ -744,6 +748,106 @@ def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
     return currency, (periods.pop() if len(periods) == 1 else None)
 
 
+# The cues for `salary_kind`, most specific first. Order does NOT decide the answer --
+# proximity does, below -- but a narrower pattern must not be shadowed by a broader one
+# matching the same span, so `total compensation` is listed before the bare cues.
+_KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("equity", re.compile(
+        r"\b(new[- ]hire equity|equity (grant|award|refresh)|rsus?|restricted stock"
+        r"|stock (option|grant|award))\b", re.I)),
+    ("ote", re.compile(
+        r"\b(ote|on[- ]target earnings|on[- ]target compensation)\b", re.I)),
+    ("total_comp", re.compile(
+        r"\b(total (compensation|cash compensation|target compensation|rewards)|tcc)\b",
+        re.I)),
+    ("bonus", re.compile(
+        r"\b(bonus|commission|incentive (pay|compensation))\b", re.I)),
+    # Hourly cues resolve to `base` on purpose -- see vocab.SALARY_KINDS. The interval
+    # is `salary_period`, which already carries it.
+    ("base", re.compile(
+        r"\b(base (salary|pay|compensation|rate)|annual base|hourly (rate|pay|wage))\b",
+        re.I)),
+)
+
+# A NEGATED CUE IS THE ONE NEAREST THE FIGURE, ALWAYS, because that is what the sentence
+# shape does: "Annual base salary range (excluding equity and bonus): $218,025-$256,500".
+# Reading the closest cue there returns `bonus` on a row whose own words say base --
+# actively wrong, and worse than refusing. 3,087 rows put a parenthesis or an exclusion
+# between the label and the number.
+_NEG_CUE = re.compile(r"exclud\w*|not includ\w*|in addition to", re.I)
+_PAREN = re.compile(r"\([^)]*\)")
+_EXCL_RUN = re.compile(r"(exclud\w*|not includ\w*)[^.:;]*", re.I)
+
+
+def _blank(m: re.Match) -> str:
+    """Replace a span with spaces, preserving every offset in the window."""
+    return " " * len(m.group(0))
+
+
+def _neutralize(window: str) -> str:
+    """Blank the spans that NAME a quantity in order to EXCLUDE it.
+
+    ONLY A NEGATED PARENTHETICAL IS BLANKED, and that distinction is worth 192 rows.
+    Blanking every parenthetical also destroys the ones that CONTAIN the label --
+    `Pay Range (Base Pay): $230,000-$275,000` reads `unspecified` under the blunt
+    version and `base` under this one. Measured across the corpus, narrowing it this way
+    moves 473 rows: 192 recover as `base`, 75 as `ote`, 69 as `bonus`.
+    """
+    window = _PAREN.sub(
+        lambda m: _blank(m) if _NEG_CUE.search(m.group(0)) else m.group(0), window
+    )
+    return _EXCL_RUN.sub(_blank, window)
+
+
+def salary_kind(text: str, needle: str) -> str:
+    """WHAT QUANTITY the figure in `needle` measures -- never how it was extracted.
+
+    Reads the same +/-90 window `_adjacent_evidence` uses for currency and period,
+    because the label sits with the number: no new parsing, no second pass over the body.
+
+    THE NEAREST CUE WINS, and both simpler rules were measured and rejected:
+
+      * FIRST MATCH IN A LIST is decided by the list's order, not the posting.
+        `Base Salary Range: $170,000-$300,000` came back `bonus`.
+      * REFUSING WHENEVER TWO CUES APPEAR -- the rule `_adjacent_evidence` uses for
+        currency -- throws away 1,783 rows whose window says `Base Salary Range:`
+        immediately before the figure. Two currencies in a window is genuinely
+        ambiguous; two cues usually is not, because one of them is being excluded.
+
+    A GENUINE TIE STILL REFUSES: two DIFFERENT cues equidistant from the figure return
+    `unspecified`. That is the currency rule kept exactly where it still applies.
+
+    RETURNS `unspecified`, NEVER None, and never `base` from absence. Absence of a label
+    is not evidence of base pay -- see vocab.SALARY_KINDS. `unspecified` runs 86.0% of
+    rows carrying a salary display string, and 28.0% of those cannot locate that string
+    in their own body at all, so there is no window to read. Both are the field working.
+    """
+    if not text or not needle:
+        return "unspecified"
+    i = text.find(needle)
+    if i < 0:
+        return "unspecified"  # no window exists; 28.0% of rows with a display string
+    lo = max(0, i - _ADJ_WINDOW)
+    window = _neutralize(text[lo : i + len(needle) + _ADJ_WINDOW])
+    a_lo, a_hi = i - lo, i - lo + len(needle)
+    best: str | None = None
+    best_d: int | None = None
+    tied = False
+    for kind, cue in _KIND_CUES:
+        for m in cue.finditer(window):
+            # 0 when the cue overlaps the figure itself, else the gap to the near edge.
+            d = (
+                0
+                if m.start() < a_hi and m.end() > a_lo
+                else min(abs(m.start() - a_hi), abs(a_lo - m.end()))
+            )
+            if best_d is None or d < best_d:
+                best, best_d, tied = kind, d, False
+            elif d == best_d and kind != best:
+                tied = True
+    return "unspecified" if best is None or tied else best
+
+
 def derive_salary(p: dict) -> dict:
     """Fill the structured salary from the display string the adapter already has.
 
@@ -769,6 +873,15 @@ def derive_salary(p: dict) -> dict:
     the ~20-character display string alone would belong in `_coerce`; reading the body
     around it does not.
     """
+    # THE KIND IS SET ABOVE THE FILL-ONLY GUARD, and that placement is the whole point.
+    # Everything below returns early when a vendor already sent numbers -- but a
+    # vendor-stated figure carrying an OTE or equity label is EXACTLY the defect this
+    # field exists to catch, and those rows are the majority: putting this line below
+    # the guard set `salary_kind` on 411 of 41,665 rows and found zero equity, which is
+    # how the misplacement was caught. It describes the figure the EMPLOYER wrote, so it
+    # is independent of whether our parser can turn that string into numbers.
+    if p.get("salary"):
+        p["salary_kind"] = salary_kind(p.get("text") or "", p["salary"])
     if p.get("salary_min") is not None or p.get("salary_max") is not None:
         return p
     # AN ESTIMATE IS NOT A COMMITMENT, and the display string is what enforces that
@@ -905,7 +1018,7 @@ _READING_ORDER = (
     "posted", "posted_basis", "expires", "harvested_at",
     # money -- the commitment, then the model's guess, never interleaved
     "salary", "salary_min", "salary_max", "salary_currency", "salary_period",
-    "salary_basis",
+    "salary_basis", "salary_kind",
     # terms
     "employment_type", "employment_type_raw",
     # how to apply

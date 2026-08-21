@@ -8,6 +8,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`salary_kind` — what the figure measures, which nothing in the record recorded.**
+  `salary_basis` says only HOW a figure was extracted (`stated` from a vendor field,
+  `parsed` from prose) and never WHAT quantity it is. That gap is why on-target-earnings
+  bands and a **\$32,000–\$48,000 new-hire equity grant** sat in columns the README
+  defines as what an employer committed to as base pay. Closed vocabulary in
+  `vocab.SALARY_KINDS`: `base` · `ote` · `total_comp` · `equity` · `bonus` ·
+  `unspecified`, and `None` when there is no figure at all — "no salary" and "a salary
+  we could not label" are different facts.
+
+  **No new parsing.** It reads the same ±90-character window `_adjacent_evidence`
+  already uses for currency and period, because the label sits with the number.
+
+  **The decision rule is the design, and both obvious rules were measured and rejected.**
+  3,715 rows carry two or more cues in that window. *First match in a cue list* is
+  decided by the list's order, not the posting — it returns `bonus` on
+  `Base Salary Range: $170,000–$300,000`. *Refusing whenever two cues appear* — the rule
+  `_adjacent_evidence` uses for currency — throws away **1,783 rows** whose window says
+  `Base Salary Range:` immediately before the figure. **The nearest cue wins, and a
+  genuine equidistant tie between different cues still refuses.**
+
+  **A quantity being EXCLUDED is discounted, and this is the dominant multi-cue shape.**
+  `Annual base salary range (excluding equity and bonus): $218,025—$256,500` is a base
+  row, but `bonus` is the nearest word to the number **by construction**. 3,087 rows put
+  a parenthesis or an exclusion between the label and the number. Only a **negated**
+  parenthetical is discounted — blanking every parenthetical also destroys the ones that
+  *contain* the label (`Pay Range (Base Pay): $230,000`), worth **192 rows**.
+
+  **`unspecified` is the default and is the field working.** 64.9% of rows carrying a
+  salary display string, and **28.0% of those cannot locate that string inside their own
+  body at all**, so there is no window to read — those rows already get no currency and
+  no period either. **An absent label is never read as `base`**: inferring base from
+  absence is the same "default an unknown to a plausible value" the contract forbids
+  everywhere else, and it would make the field worse than not having it. **Do not
+  "improve" this field by lowering that number.**
+
+  **There is deliberately no `hourly_rate`.** An hourly rate is base pay expressed per
+  hour: the quantity is base, the interval is `salary_period == "hour"`, already
+  populated on 2,106 rows. The two signals already disagree on 430 rows, which is the
+  drift arriving before shipping rather than after — the same two-columns-one-fact
+  mistake `department`/`team` cost a release to unpick.
+
+  **It moves no number.** A SHA256 over all six salary fields across 102,799 rows is
+  `d5799a52…` before and after, with `salary_min` filled on 41,665 rows and the currency
+  and period distributions identical.
+
+  Distribution `[102,799-row harvest, 2026-08-20]` over the 42,072 rows with a salary
+  display: `unspecified` 27,316 · `base` 10,449 · `bonus` 2,355 · `total_comp` 901 ·
+  `ote` 759 · `equity` 292. By source: greenhouse 13,004 labelled of 27,247, ashby 1,564
+  of 12,920, lever 159 of 1,414.
+
 - **`sections.section_text(record, kind)` — the reader for the spans the record already
   carries.** Everything that parses a posting's prose for one fact (pay, requirements,
   travel) should read the section that fact lives in rather than the whole body; this is

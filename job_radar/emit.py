@@ -153,6 +153,10 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
             "currency": r.get("salary_currency"),
             "period": r.get("salary_period"),
             "basis": r.get("salary_basis"),
+            # WHAT the figure measures, beside HOW it was extracted. A consumer
+            # filtering for base pay needs both: `basis` says we read it correctly,
+            # `kind` says it is not an equity grant.
+            "kind": r.get("salary_kind"),
             # KEPT APART from min/max on purpose. Adzuna predicts a salary with a
             # model on 93% of its rows; merging those into the same keys would make
             # a guess indistinguishable from a figure an employer committed to.
