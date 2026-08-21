@@ -201,6 +201,7 @@ Every one of these produced a confident, wrong number in this repo:
 | 4 | adapter output ≠ record output | skipped `engine._coerce`; saw `state='California'` where the record says `CA` |
 | 5 | stale tree claim | "clean at X, 503 tests" when HEAD was Y at 514 |
 | 6 | **a grep count read as a membership test** | `grep -c '"department",' engine.py` returned 2 and was reported as "present in `_CONTRACT_FIELDS`". The two hits were two *other* tuples; the field was never in that one. Also: a name-grep reported a rewritten function as "0 changed lines", and a search for `emit` matched the English word in prose |
+| 12 | **a mutation that survives because the environment agrees with it** | `.astimezone()` with no argument uses the SYSTEM zone. On a machine already in Eastern, `.astimezone(_ET)` and `.astimezone()` return the same answer — so both mutants passed a full 572-test run locally and failed under `TZ=UTC`. The surviving mutant was the exact line the commit message called "the guard is the fix" |
 | 11 | **a true measurement read against the wrong baseline** | a field measured absent from a tuple, read as damage — it had never been in that tuple. The number was right; "absent means something broke" was the error |
 | 7 | a threshold that passed for the wrong reason | 10-under-12 passed while 9 of the 10 were wrong |
 | 8 | **a zero accepted because it came with an explanation** | an explained zero reads as *more* rigorous than a bare number. It is not. |
@@ -219,6 +220,13 @@ real measurement is involved in each.
   wrong — then measure *that*.** Compare against the prior commit (`git show <rev>^:path`),
   never against your expectation. This is the general form of the wrong-denominator
   trap one level up: there the population was wrong, here the comparison point is.
+
+**Mutation testing has its own version of this.** A mutant that survives is only
+evidence when the environment cannot be quietly supplying the right answer. Run
+zone-, locale- and clock-sensitive mutations under a pinned environment — CI sets
+`TZ: UTC` for exactly this reason. And check *which* mutant went red: disarming a
+neighbouring line and watching a test fail proves something failed, not that the
+guard is tested.
 
 **What actually catches these:** in every instance above that was caught in time, the
 catch came from **executing something** — running the disarm, checking runtime
