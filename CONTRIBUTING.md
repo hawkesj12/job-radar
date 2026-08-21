@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Sixteen ways a check comes back clean for the wrong reason
+## Seventeen ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -208,8 +208,9 @@ Every one of these produced a confident, wrong number in this repo:
 | 15 | **a number measured on someone else's implementation** | `1,088 removed / 792 cost` was carried verbatim into a commit message and a code comment. Re-derived under the committed code the same rule measured `688/969` narrow and `116/637` grown. The figure described **no configuration of that code** — it came from another agent's prototype word lists. Worse than a stale number, because no change to the tree could ever have made it true |
 | 16 | **a number that describes the right code and the wrong rows** | every figure was derived from the correct tree by the correct implementation — ablations, transition counts, corpus totals — and every one described the population AS A WHOLE rather than the population under dispute. The 86 rows that decided the question were readable at any point and nobody read them. Form 14 stopped describing the tree; form 15 never described your code; this one describes both correctly and answers a different question |
 | 17 | **a ratio whose halves come from different instruments** | *"set the field on 411 of 41,665 rows"*. `411` was the population that could REACH the call, not the number labelled (222). `41,665` came from the fingerprint harness's `salary_min` count and matches no population in this corpus — the real denominator is 42,072. **Each half is individually real, so there is no wrong number to spot**, and neither can be checked against the other because they were never in the same frame. Worse than form 15: the surviving half lends the borrowed one credibility |
+| 18 | **a verification that REIMPLEMENTS the thing under test** | three gate variants were compared against the shipped classifier and all three differed by **exactly 60 rows**. The gate was never the variable — the harness had drifted from the shipped function and would have reported 60 phantom differences whatever it tested. **A reimplementing verification measures two implementations at once and cannot say which one moved.** Also the subtlest place it hides: a SAMPLE drawn against a reimplementation is a sample of the wrong population, and every rate computed on it is exact and about something else |
 
-Forms 8, 9, 11, 14, 15, 16 and 17 are the dangerous ones, because all seven look like good
+Forms 8, 9, 11, 14, 15, 16, 17 and 18 are the dangerous ones, because all eight look like good
 work — a real measurement is involved in each. **16 is the worst of them:** nothing about
 it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
@@ -256,6 +257,14 @@ append-only so an existing reference never changes meaning.)
   auditor to "read the sentence around each hit" depends on care at exactly the moment
   the convention has trained them to skim. **Apply the marker as you touch a site — never
   as a dedicated pass**, which buries real changes in churn.
+
+- **WHEN EVERY VARIANT DIFFERS BY THE SAME AMOUNT, THE HARNESS IS THE VARIABLE.** This one
+  fires *during* a run, on evidence, rather than telling you what to do beforehand — which
+  makes it the most useful shape in this file. Three different gates each differing from
+  shipped by exactly 60 rows is not three coincidences; it is one drifted reimplementation.
+  **The correct instrument is to mutate the shipped file and diff the real function against
+  itself** — the same tool the mutation runs already use. Never compare shipped code against
+  your own copy of it.
 
 - **A number's provenance includes WHICH IMPLEMENTATION produced it.** Re-derive a
   measurement under your own code before it goes in your commit message or comment — even
