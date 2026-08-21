@@ -55,9 +55,10 @@ from .util import (
 GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
 
 
-# An address inside a metadata VALUE, not a whole-value match: 9 of the 34 rows
-# carrying one embed it in a longer string. Deliberately narrow -- it has to be
-# conservative enough that a legitimate value is never dropped for containing an @.
+# An address inside a metadata VALUE, not a whole-value match: of 59 such values,
+# 25 are embedded in a longer string. Deliberately narrow -- the dot-TLD requirement
+# is what leaves 'Back@Work Physical Therapy' and '43000 Production@Pure' alone,
+# verified against every string value in a 102,799-row harvest: 0 false positives.
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")
 
 
@@ -93,9 +94,11 @@ def _gh_metadata(md) -> dict:
             # shapes: salary {max_value,min_value,unit} 5,112 rows, referral
             # {amount,unit} 2,017, PEOPLE {email,employee_id,name,user_id} 1,739, and
             # a bare pay range {max_value,min_value} 36. So the person-key test drops
-            # zero legitimate dicts -- but 34 rows carry the email as a plain STRING
-            # ('Hiring Manager' -> 'vinit.jadhav@careem.com'), same harm, invisible to
-            # an isinstance check.
+            # zero legitimate dicts -- but 57 MORE rows carry the email as a plain
+            # STRING ('Hiring Manager' -> 'vinit.jadhav@careem.com'), same harm,
+            # invisible to an isinstance check. 59 such values over those rows: 34 are
+            # the whole value, 25 are embedded in a longer one -- so `search`, never
+            # `fullmatch`. The embedded form is 42% of the string cases, not a corner.
             #
             # SCOPED CLAIM, deliberately: this removes work emails and internal staff
             # numbers. Bare personal NAMES still pass through ('Hiring Manager':

@@ -1617,7 +1617,7 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
                 "title": "AI Engineer",
                 "location": {"name": "Remote - US"},
                 "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
-                "updated_at": "2026-07-10T00:00:00Z",
+                "updated_at": "2026-07-10T00:00:00-04:00",
                 "departments": [{"name": "Engineering"}],
                 "content": "<p>Build &amp; ship LLM systems.</p>",
             }
@@ -1630,12 +1630,14 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     assert j["title"] == "AI Engineer"
     assert j["location"] == "Remote - US"
     assert j["url"].endswith("/acme/jobs/1")
-    # ET, not the vendor's UTC day: the fixture's `2026-07-10T00:00:00Z` is 20:00 on
-    # the 9th in Eastern. `to_date` now converts an offset-bearing instant instead of
-    # truncating it. Real Greenhouse sends an ET offset and does not move -- measured
-    # 0 changed of 1,971 live values -- so this synthetic `Z` value is the one shape
-    # that shifts, and exercising it here is deliberate.
-    assert j["posted"] == "2026-07-09"
+    # THE FIXTURE CARRIES AN ET OFFSET BECAUSE GREENHOUSE DOES. Measured on 3,064 live
+    # date values across three boards: 100% are -04:00/-05:00, 0 are `Z`. So this test
+    # pins the guarantee that matters for 68% of the corpus -- an ET-offset instant
+    # must NOT shift when `to_date` converts. The conversion path itself is exercised
+    # by test_to_date_converts_an_instant_to_eastern..., which has a real `Z` case; a
+    # `Z` fixture here would freeze a shape this vendor has never sent and would stop
+    # catching the regression that would actually hurt.
+    assert j["posted"] == "2026-07-10"
     assert j["department"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
 

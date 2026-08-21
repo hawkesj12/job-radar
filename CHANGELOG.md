@@ -8,7 +8,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`posted` was one day too new on every source that sends a UTC timestamp.**
+- **`posted` was one day too new on every source that sends a UTC timestamp** (and
+  `expires` with it, though only braintrust's ten rows actually move).
   `util.to_date`'s epoch branch converted to Eastern; the string branch three lines
   below truncated to `str(val)[:10]`, keeping the **vendor's** calendar day. One column,
   two conventions, against a project rule of Eastern Time everywhere. Measured against
@@ -42,8 +43,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   objects under 17 key names — Hiring Manager 365, Recruiter 280, Job Approver 156 — at
   veeam.com, datavant.com, nice.com, celonis.com, x.ai and hasbro.com. The boards publish
   it, so nothing was breached; republishing it under a consumer's name was a default
-  nobody chose. Two encodings are filtered: the person object, and **34 rows** carrying
-  the address as a plain string. Clustering every dict value in that harvest gives four
+  nobody chose. Two encodings are filtered: the person object, and **57 rows** carrying
+  the address as a plain string (59 values; 25 of them embedded in longer text, which
+  is why the test is a search rather than a whole-value match). Clustering every dict value in that harvest gives four
   shapes — salary, referral, a bare pay range, and the person object — so the person-key
   test drops **zero** legitimate values. **Scoped deliberately:** this removes emails and
   staff numbers; bare personal *names* still pass through, because filtering those needs

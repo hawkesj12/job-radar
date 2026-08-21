@@ -2572,12 +2572,12 @@ def test_a_missing_deadline_stays_absent(monkeypatch):
 
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
     assert r["expires"] is None
-    fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00Z"
+    # ET offset, because that is what greenhouse sends -- 3,064 live values across
+    # three boards are 100% -04:00/-05:00 and 0 are `Z`. An offset already in
+    # Eastern must not shift when `to_date` converts.
+    fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00-04:00"
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
-      # ET, not the vendor's UTC day: midnight UTC is 20:00 the PREVIOUS day in
-    # Eastern. `to_date` converts an offset-bearing instant rather than truncating
-    # it, so a `...T00:00:00Z` fixture legitimately lands one day earlier.
-    assert r["expires"] == "2026-09-29"
+    assert r["expires"] == "2026-09-30"
 
 
 def test_posted_and_its_basis_are_produced_together():
@@ -4019,8 +4019,8 @@ def test_a_named_persons_contact_details_never_reach_source_extra():
     nice.com, celonis.com and others. The board publishes it; republishing it under a
     consumer's name is a decision nobody made.
 
-    TWO ENCODINGS. A dict test alone misses the 34 rows carrying the address as a
-    plain string. And the four legitimate dict shapes in that harvest -- salary
+    TWO ENCODINGS. A dict test alone misses the 57 rows carrying the address as a
+    plain string -- 59 values, of which 25 are embedded in longer text. And the four legitimate dict shapes in that harvest -- salary
     {max_value,min_value,unit}, referral {amount,unit}, a bare pay range, and the
     person object -- mean the person-KEY test drops nothing real."""
     md = [

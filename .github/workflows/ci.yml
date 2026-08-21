@@ -38,6 +38,17 @@ jobs:
         # 3.10 is the floor pyproject.toml advertises (requires-python + classifier),
         # so it gets tested rather than assumed.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      # TZ IS PINNED BECAUSE THE ABSENCE OF A PIN IS UNTESTABLE. `util.to_date` converts
+      # an offset-bearing instant with `.astimezone(_ET)`, and `.astimezone()` with no
+      # argument -- plus any naive datetime -- falls back to the SYSTEM zone. On a
+      # developer machine already in Eastern those are the same answer, so the guards
+      # are right by coincidence and a mutation run comes back green. Measured on such
+      # a machine: mutating `tail = s[10:]` to `tail = s`, and `.astimezone(_ET)` to
+      # `.astimezone()`, BOTH survived a full 572-test run locally and both fail here
+      # -- 3 and 4 failures respectively. Pinning UTC makes every zone-sensitive
+      # assertion in the suite honest instead of accidentally true in one place.
+      TZ: UTC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
