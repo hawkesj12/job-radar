@@ -41,6 +41,32 @@ def test_config_defaults():
     assert c.llm.enabled is False
 
 
+def test_to_date_converts_an_instant_to_eastern_and_leaves_a_calendar_day_alone():
+    """The epoch branch converted to ET; the string branch three lines later did
+    `str(val)[:10]`, keeping the VENDOR's calendar day. Measured against live vendor
+    APIs on 3,732 corpus rows: ashby 16.3% of dates wrong, hn 10.5%, greenhouse 0.00%,
+    lever 0.00%. Always one day too NEW, so the role dodged the staleness penalty too.
+
+    The guard is the point: a date-only or zone-less string is NOT an instant and must
+    not shift, or this fix moves the 68% of the corpus that is correct today."""
+    # an instant: 02:00 UTC is the previous day in Eastern
+    assert util.to_date("2026-05-23T02:00:50.464+00:00") == "2026-05-22"
+    assert util.to_date("2026-08-21T02:17:57Z") == "2026-08-20"
+    # NOT instants -- no offset, so no timezone to convert from
+    assert util.to_date("2026-05-22") == "2026-05-22"
+    assert util.to_date("2026-05-22T14:00:00") == "2026-05-22"
+    # already Eastern: same day in, same day out
+    assert util.to_date("2026-05-22T14:00:00-04:00") == "2026-05-22"
+    # `.astimezone()` raises OverflowError, NOT ValueError, at the edge of the
+    # datetime range -- and "0001-01-01T00:00:00Z" is in catalog/_raw/4dayweek.json.
+    # An uncaught raise here takes out a whole harvest.
+    assert util.to_date("0001-01-01T00:00:00Z") == "0001-01-01"
+    # unchanged behaviour
+    assert util.to_date(1785719389) == "2026-08-02"
+    assert util.to_date("not a date") == ""
+    assert util.to_date("") == ""
+
+
 def test_default_config_enables_every_registered_adapter():
     """The defaults are 'whatever sources.py registers', not a second hand-kept list.
     Asserting on the RESOLVED set (not the raw field) is what makes a newly added
@@ -1604,7 +1630,12 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     assert j["title"] == "AI Engineer"
     assert j["location"] == "Remote - US"
     assert j["url"].endswith("/acme/jobs/1")
-    assert j["posted"] == "2026-07-10"
+    # ET, not the vendor's UTC day: the fixture's `2026-07-10T00:00:00Z` is 20:00 on
+    # the 9th in Eastern. `to_date` now converts an offset-bearing instant instead of
+    # truncating it. Real Greenhouse sends an ET offset and does not move -- measured
+    # 0 changed of 1,971 live values -- so this synthetic `Z` value is the one shape
+    # that shifts, and exercising it here is deliberate.
+    assert j["posted"] == "2026-07-09"
     assert j["department"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
 

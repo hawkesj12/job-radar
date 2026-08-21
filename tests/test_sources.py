@@ -2574,7 +2574,10 @@ def test_a_missing_deadline_stays_absent(monkeypatch):
     assert r["expires"] is None
     fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00Z"
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
-    assert r["expires"] == "2026-09-30"
+      # ET, not the vendor's UTC day: midnight UTC is 20:00 the PREVIOUS day in
+    # Eastern. `to_date` converts an offset-bearing instant rather than truncating
+    # it, so a `...T00:00:00Z` fixture legitimately lands one day earlier.
+    assert r["expires"] == "2026-09-29"
 
 
 def test_posted_and_its_basis_are_produced_together():
@@ -2589,8 +2592,11 @@ def test_posted_and_its_basis_are_produced_together():
     """
     from job_radar.util import posted_from
 
+      # ET, not the vendor's UTC day: midnight UTC is 20:00 the PREVIOUS day in
+    # Eastern. `to_date` converts an offset-bearing instant rather than truncating
+    # it, so a `...T00:00:00Z` fixture legitimately lands one day earlier.
     assert posted_from("2026-07-30T00:00:00Z") == {
-        "posted": "2026-07-30",
+        "posted": "2026-07-29",
         "posted_basis": "stated",
     }
     # An unparseable or absent date leaves the basis None — honestly unknown, never

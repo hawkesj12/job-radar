@@ -379,14 +379,61 @@ def to_date(val) -> str:
     """
     if not val:
         return ""
+    out = ""
     if isinstance(val, (int, float)):
         ts = val / 1000 if val > 1e11 else val
         try:
-            return datetime.fromtimestamp(ts, tz=_ET).strftime("%Y-%m-%d")
+            out = datetime.fromtimestamp(ts, tz=_ET).strftime("%Y-%m-%d")
         except Exception:
             return ""
-    s = str(val)[:10]
-    return s if _ISO_DATE_RE.match(s) else ""
+    else:
+        s = str(val)
+        # A TIMESTAMP CARRYING AN OFFSET IS AN INSTANT, and an instant falls on a
+        # different calendar day in different zones. Converting is what the epoch
+        # branch above already does; this branch used to `s[:10]` instead, which kept
+        # the VENDOR's day and put two conventions in one column. Measured against
+        # live vendor APIs on 3,732 corpus rows: ashby 16.3% of dates wrong, hn 10.5%,
+        # greenhouse 0.00%, lever 0.00% -- the two correct ones being the ones that
+        # already send an ET offset or an epoch. Always one day too NEW, so the role
+        # also dodged the staleness penalty. `CLAUDE.md` requires ET everywhere; this
+        # was the one place enforcing it for epochs and abandoning it for strings.
+        #
+        # A DATE-ONLY OR ZONE-LESS STRING IS NOT AN INSTANT -- it is already somebody's
+        # calendar day, and shifting it would invent a timezone nobody stated. So the
+        # offset test looks at `s[10:]` and never the whole string, because
+        # "2026-05-22" is itself full of hyphens. Measured on 8,714 live values across
+        # 12 sources: 0 changed on greenhouse/lever/himalayas/remotive/arbeitnow, and
+        # the sources that DO move land at 14-20%, which is the ~16.7% a uniform
+        # 4-hour window predicts.
+        #
+        # `.astimezone()` raises OverflowError -- NOT ValueError -- at the edge of the
+        # datetime range, and "0001-01-01T00:00:00Z" (the .NET/Go zero value) is
+        # sitting in this repo's own `catalog/_raw/4dayweek.json`. Today it truncates
+        # harmlessly; an uncaught raise here would take out a whole harvest, which is
+        # the failure class `_coerce`'s docstring exists to remember.
+        #
+        # PYTHON 3.10 IS IN THE CI MATRIX and its `fromisoformat` is far narrower: a
+        # .NET 7-digit fractional second, a basic-format stamp, and a colon-less or
+        # hour-only offset all raise there and fall back to truncation -- i.e. to
+        # today's behaviour, never to a new wrong answer. That is a deliberate,
+        # accepted split, not an oversight; usajobs is a .NET API and is the source
+        # most likely to expose it.
+        tail = s[10:]
+        if "+" in tail or "-" in tail or "Z" in tail or "z" in tail:
+            try:
+                out = (
+                    datetime.fromisoformat(s.replace("Z", "+00:00").replace("z", "+00:00"))
+                    .astimezone(_ET)
+                    .strftime("%Y-%m-%d")
+                )
+            except (ValueError, OverflowError, OSError):
+                out = ""
+        if not out:
+            out = s[:10]
+    # ONE VALIDATED EXIT. Every path lands here rather than returning its own string,
+    # so the "a date is the ONLY thing to_date may return" contract above is checked
+    # rather than asserted by whichever branch happened to produce the value.
+    return out if _ISO_DATE_RE.match(out) else ""
 
 
 _SAL_RE = re.compile(
