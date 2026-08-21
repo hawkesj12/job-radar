@@ -1401,13 +1401,15 @@ SALARY_BASES = frozenset({"stated", "parsed"})
 # period does not, 142 the other way). `department` and `team` cost a release to unpick
 # for exactly this reason. Hourly cues therefore resolve to `base`.
 #
-# `unspecified` IS THE DEFAULT AND IS NOT A FAILURE. A figure with no label near it gets
-# `unspecified`, never `base` -- inferring base from absence is the same "default an
-# unknown to a plausible value" the contract forbids everywhere else, and it would make
-# this field worse than not having it. The rate is high on purpose: 86.0% of rows with a
-# salary display string [102,799-row harvest, 2026-08-20], because 28.0% of them cannot
-# even locate that string inside their own body. Do not "improve" this field by lowering
-# that number.
+# `unspecified` MEANS NO QUANTITY WORD IN THE WINDOW -- not a word judged
+# insufficiently specific, and never a guess. A bare `Salary Range` / `Pay Range` IS a
+# label; a figure with nothing near it is not. Inferring `base` from absence is the
+# "default an unknown to a plausible value" the contract forbids everywhere else.
+# 40.1% of rows with a salary display [102,799-row harvest, 2026-08-20], and the honest
+# floor under that is a SEPARATE fact: 28.0% cannot locate their display string inside
+# their own body at all, so there is no window to read. Those two were conflated in an
+# earlier version of this comment, which cited 86.0% -- a figure measured before the cue
+# table accepted bare quantity words. Do not lower this number by guessing.
 SALARY_KINDS = frozenset(
     {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
 )

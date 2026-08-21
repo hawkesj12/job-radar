@@ -755,8 +755,17 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("equity", re.compile(
         r"\b(new[- ]hire equity|equity (grant|award|refresh)|rsus?|restricted stock"
         r"|stock (option|grant|award))\b", re.I)),
+    # `<something> + commission / variable / incentive` IS on-target earnings, by
+    # definition rather than by measurement: a range described as base plus commission
+    # is what the term means. It is here because boards write OTE that way and the
+    # nearest token INSIDE the parenthetical is `base` or `commission`, so without this
+    # the row reads `base` or `bonus`. Sixteen of the ~24 residual errors on a
+    # hand-labelled sample were this one form: `(TTC / OTE)`, `(base + commission)`,
+    # `(Base Salary + Variable)`, `(Base + On-Target Commission)`. Parentheses are
+    # OTE's primary carrier, which is also why only NEGATED parentheticals are blanked.
     ("ote", re.compile(
-        r"\b(ote|on[- ]target earnings|on[- ]target compensation)\b", re.I)),
+        r"\b(ote|on[- ]target earnings|on[- ]target compensation|total target cash"
+        r"|\w+\s*\+\s*(on[- ]target\s+)?(commission|variable|incentive))", re.I)),
     ("total_comp", re.compile(
         r"\b(total (compensation|cash compensation|target compensation|rewards)|tcc)\b",
         re.I)),
@@ -786,30 +795,33 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.I)),
 )
 
-# THE LABEL IS THE PHRASE INTRODUCING THE FIGURE, not the last cue word before it, and
-# a sentence boundary is where that stops being true. This is structural -- it is how
-# job posts are written -- not a heuristic tuned to a few rows: everything before the
-# last full stop is prose about benefits, and the cue in it is a BENEFIT BEING
-# DESCRIBED rather than a label. `"...eligible for additional bonus opportunities.
-# Salary Range $53,560-$67,000"` is a BASE row whose nearest cue is `bonus`, and no
-# negation appears anywhere in it -- which is why the exclusion strip alone could not
-# reach this class. Measured: it removes 1,088 false `bonus`/`equity` assertions.
+# THERE IS DELIBERATELY NO SENTENCE-BOUNDARY TRUNCATION HERE, AND THAT IS A DECISION
+# THAT WAS BUILT AND REMOVED -- so read this before re-deriving it, because the
+# reasoning behind it is sound and only the CONFIGURATION made it unnecessary.
 #
-# THE COST IS REAL AND HALF-MEASURED: 792 rows go `base` -> `unspecified`, and on a
-# hand-labelled sample about HALF the prior-sentence rows carried a genuine governing
-# label (`"the base pay ranges ... are listed below"`). Precision over recall is the
-# ruling, and a lost `base` costs nothing where a wrong `bonus` on a base salary is the
-# exact defect this field exists to prevent -- but the loss is not free and is recorded
-# here rather than discovered later.
-_SENTENCE_END = ".!?"
-
-
-def _last_sentence(window: str, before: int) -> str:
-    """Blank everything up to the last sentence end preceding the figure."""
-    cut = max(window.rfind(c, 0, before) for c in _SENTENCE_END)
-    return " " * (cut + 1) + window[cut + 1 :] if cut >= 0 else window
-
-
+# The rule was: read only the sentence the figure lives in, because a cue in the prior
+# sentence is a benefit being described rather than a label -- `"eligible for additional
+# bonus opportunities. Salary Range $53,560-$67,000"` is a base row whose nearest cue is
+# `bonus`, with no negation anywhere, so the exclusion strip could not reach it. That is
+# a real class and the rule really did fix it.
+#
+# IT WAS MEASURED AGAINST A NARROWER CUE TABLE. When the table grew to accept a bare
+# `Salary Range` / `Pay Range` as a `base` label, a cue appeared on the NEAR side of the
+# break for exactly these rows, and proximity already suppressed the prose:
+#
+#     narrow cues -- truncation removed  equity +77  bonus +521   (598 assertions)
+#     grown cues  -- truncation removed  equity  +0  bonus  +64   ( 64 assertions)
+#
+# The widening absorbed 91% of what the truncation was doing. What it had left to do was
+# discard GENUINE prior-sentence labels -- `"the base pay ranges ... are listed below"` --
+# measured at 20 of 40 such rows on a hand-labelled sample, and 637 `base` labels
+# corpus-wide. On 150 blind-labelled rows the two configurations produced IDENTICAL
+# wrong assertions (21 each, same four classes); the only difference was 5 rows of
+# refusal-turned-correct in favour of leaving it out.
+#
+# So: measured cost, no measured benefit, and one fewer stacked rule. If a future change
+# narrows the cue table again, this becomes correct again -- but re-measure it against
+# the table you actually have rather than against this comment.
 def _snap(text: str, lo: int, hi: int) -> tuple[int, int]:
     """Widen a window to word boundaries.
 
@@ -874,10 +886,10 @@ def salary_kind(text: str, needle: str) -> str:
     A GENUINE TIE STILL REFUSES: two DIFFERENT cues equidistant from the figure return
     `unspecified`. That is the currency rule kept exactly where it still applies.
 
-    RETURNS `unspecified`, NEVER None, and never `base` from absence. Absence of a label
-    is not evidence of base pay -- see vocab.SALARY_KINDS. `unspecified` runs 86.0% of
-    rows carrying a salary display string, and 28.0% of those cannot locate that string
-    in their own body at all, so there is no window to read. Both are the field working.
+    RETURNS `unspecified`, NEVER None, and never `base` from absence. `unspecified` means
+    NO QUANTITY WORD IN THE WINDOW -- not a word judged insufficiently specific. See
+    vocab.SALARY_KINDS for the rate and for why the honest floor under it is the 28.0%
+    of rows whose display string cannot be found in their own body at all.
     """
     if not text or not needle:
         return "unspecified"
@@ -886,9 +898,10 @@ def salary_kind(text: str, needle: str) -> str:
         return "unspecified"  # no window exists; 28.0% of rows with a display string
     lo, hi = _snap(text, max(0, i - _ADJ_WINDOW), i + len(needle) + _ADJ_WINDOW)
     a_lo, a_hi = i - lo, i - lo + len(needle)
-    window = _last_sentence(_neutralize(text[lo:hi]), a_lo)
+    window = _neutralize(text[lo:hi])
     best: str | None = None
     best_d: int | None = None
+    best_n = best_start = best_end = 0
     tied = False
     for kind, cue in _KIND_CUES:
         for m in cue.finditer(window):
@@ -898,10 +911,32 @@ def salary_kind(text: str, needle: str) -> str:
                 if m.start() < a_hi and m.end() > a_lo
                 else min(abs(m.start() - a_hi), abs(a_lo - m.end()))
             )
+            n = m.end() - m.start()
             if best_d is None or d < best_d:
-                best, best_d, tied = kind, d, False
+                best, best_d, best_n, tied = kind, d, n, False
+                best_start, best_end = m.start(), m.end()
             elif d == best_d and kind != best:
-                tied = True
+                # A LONGER MATCH AT THE SAME DISTANCE IS THE SAME TEXT READ MORE
+                # PRECISELY, not a competing signal. `(Base + On-Target Commission)`
+                # matches `ote` across 27 characters and `bonus` across the 10 of
+                # `Commission` inside it, both ending at the figure -- treating that as
+                # an ambiguous tie refuses a row whose label is unambiguous. The cue
+                # table is already ordered most-specific-first for exactly this reason;
+                # this makes the tie-break honour that ordering instead of contradicting
+                # it.
+                #
+                # ONLY WHEN THE SPANS OVERLAP. Two UNRELATED cues equidistant from the
+                # figure -- `"bonus $100-$200 base pay"` -- are a genuine ambiguity and
+                # still refuse, however long either one is. Length is evidence of
+                # precision only when one match contains the other; between separate
+                # phrases it is evidence of nothing.
+                overlaps = m.start() < best_end and m.end() > best_start
+                if overlaps and n > best_n:
+                    best, best_n, best_start, best_end, tied = (
+                        kind, n, m.start(), m.end(), False
+                    )
+                elif not overlaps or n == best_n:
+                    tied = True
     return "unspecified" if best is None or tied else best
 
 

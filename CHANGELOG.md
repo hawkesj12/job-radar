@@ -44,16 +44,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in 150) but a recall collapse, because the rule and the rubric were measuring different
   things.
 
-  **A THIRD RULE: only the sentence the figure lives in is read.** The label is the phrase
-  *introducing* the figure, not the last cue word before it, and a sentence boundary is
-  where that stops being true — a structural fact about how job posts are written.
-  `"eligible for additional bonus opportunities. Salary Range $53,560-$67,000"` is a base
-  row whose nearest cue is `bonus`, with **no negation anywhere in it**, which is why the
-  exclusion strip alone could not reach the class. Removes **1,088 false `bonus`/`equity`
-  assertions**. **Its cost is 792 `base` rows lost to `unspecified`, and on a hand-labelled
-  sample about half the prior-sentence rows carried a genuine governing label** — so
-  roughly half that loss is real, not refusal. Precision over recall: a lost `base` costs
-  nothing where a wrong `bonus` on a base salary is the defect this field exists to prevent.
+  **A SENTENCE-BOUNDARY RULE WAS BUILT AND REMOVED, and the removal is the finding.**
+  It read only the sentence the figure lives in, because a cue in the prior sentence is a
+  benefit being described. That fixed a real class — and it was measured against the
+  NARROWER cue table. Once bare quantity words became labels, a cue appeared on the near
+  side of the break for exactly those rows and proximity already suppressed the prose:
+  the truncation removed **598 assertions under the narrow table and 64 under the grown
+  one — the widening absorbed 91% of it.** What it had left to do was discard genuine
+  prior-sentence labels: 20 of 40 such rows on a hand-labelled sample, 637 `base` labels
+  corpus-wide. On 150 blind-labelled rows both configurations produced **identical wrong
+  assertions** (21 each, same four classes). Measured cost, no measured benefit.
+
+  **An earlier version of this entry justified that rule with "1,088 false assertions
+  removed against 792 lost."** Those figures were measured with a different detector's
+  word lists against the narrow cue table, and were carried across the widening without
+  re-measurement. They described no configuration this project has shipped. Named rather
+  than silently swapped, because a wrong number in a changelog is a bug here.
 
   **The window snaps to word boundaries**, because a fixed-offset slice can cut a word in
   half and manufacture a `\b` that was not there — `remote` becomes `ote`, and `OTE` is a
@@ -77,12 +83,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `d5799a52…` before and after, with `salary_min` filled on 41,665 rows and the currency
   and period distributions identical.
 
+  **`ote` is also read out of a parenthetical**, which is where boards actually write it:
+  a range described as base PLUS commission **is** on-target earnings, definitionally
+  rather than statistically. `(base + commission)`, `(Base Salary + Variable)`,
+  `(Base + On-Target Commission)`, `(TTC / OTE)` — 16 of ~24 residual errors on a
+  hand-labelled sample were this one shape, because the nearest token inside the
+  parenthetical is `base` or `commission`. This is also why only NEGATED parentheticals
+  are discounted: blanking them all would destroy the label on exactly these rows.
+
   Distribution `[102,799-row harvest, 2026-08-20]` over the 42,072 rows with a salary
-  display: `base` 21,854 · `unspecified` 17,610 · `bonus` 1,366 · `ote` 623 ·
-  `total_comp` 537 · `equity` 82. **`equity` false positives fell 293 → 82 and `bonus`
-  2,407 → 1,366** as the three rules went in — the widened cue list improved precision as
-  well as recall, because a bare cue on the near side of a sentence break is the right
-  answer and having one is what finally suppressed the eligibility-prose class.
+  display: `base` 22,442 · `unspecified` 16,851 · `bonus` 1,351 · `ote` 768 ·
+  `total_comp` 579 · `equity` 81. **`equity` false positives fell 293 → 81 and `bonus`
+  2,407 → 1,351** — the widened cue list improved precision as well as recall, which was
+  not the expected direction: a bare cue on the near side is the right answer, and having
+  one is what suppressed the eligibility-prose class. **`base` is 89.5% of labelled rows,
+  and that is the field working** — its job is to stop the other 2,779 being read as base
+  pay, and one of them is a \$32,000–\$48,000 equity grant.
 
   **It is deliberately NOT a `shortlist.csv` column.** The CSV is a curated human subset —
   `seniority`, `category`, `team` and `tags` are absent for the same reason — and adding a

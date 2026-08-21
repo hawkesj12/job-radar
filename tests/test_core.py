@@ -4696,42 +4696,6 @@ def test_salary_kind_never_infers_base_from_an_absent_label():
     assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
 
 
-def test_salary_kind_reads_the_sentence_the_figure_lives_in():
-    """THE LABEL IS THE PHRASE INTRODUCING THE FIGURE, not the last cue word before it.
-
-    Everything before the last full stop is prose about benefits, and a cue in it is a
-    BENEFIT BEING DESCRIBED. No negation appears in any of these, which is why the
-    exclusion strip alone could not reach the class -- it is grammatically positive.
-    Removes 1,088 false `bonus`/`equity` assertions on base-salary rows.
-    """
-    k = engine.salary_kind
-    for text in [
-        "This position is eligible for additional bonus opportunities. "
-        "Salary Range $53,560-$67,000",
-        "...product discounts, referral bonus program, and more. "
-        "Pay Range $99,000-$121,000",
-        "...generous employee referral bonus, and employee stock option awards. "
-        "Salary Range $120,000-$140,000",
-        # "internal equity" is pay FAIRNESS, not stock -- a homonym, and the sentence
-        # boundary is what keeps it out.
-        "...knowledge, skills, experience and internal equity. "
-        "Canada Pay Range $90,000-$110,000",
-    ]:
-        sal = text.rsplit(" ", 1)[1]
-        assert k(text, sal) == "base", text[-60:]
-
-    # THE COST, recorded rather than hidden: a governing label in the PRIOR sentence is
-    # discarded too. On a hand-labelled sample about HALF the prior-sentence rows carried
-    # a real label, so roughly half of the 792 `base` losses are genuine label loss.
-    # Precision over recall: a lost `base` costs nothing, a wrong `bonus` on a base
-    # salary is the defect this field exists to prevent.
-    assert k(
-        "The base pay ranges for a successful candidate are listed below. "
-        "CA, NY, CT, NJ $245,000-$258,500",
-        "$245,000-$258,500",
-    ) == "unspecified"
-
-
 def test_salary_kind_window_snaps_to_word_boundaries():
     """A FIXED-OFFSET SLICE CAN MANUFACTURE A `\b` THAT WAS NOT THERE.
 
@@ -4893,3 +4857,33 @@ def test_salary_kind_is_set_above_the_fill_only_guard():
     engine._coerce(q)
     engine.derive_salary(q)
     assert q["salary_kind"] is None
+
+
+def test_salary_kind_reads_ote_out_of_a_parenthetical():
+    """PARENTHESES ARE OTE'S PRIMARY CARRIER, not a marginal case.
+
+    A range described as base PLUS commission IS on-target earnings -- definitional,
+    not a heuristic tuned on a sample. Boards write it that way, and the nearest token
+    INSIDE the parenthetical is `base` or `commission`, so without a cue for the whole
+    form the row reads `base` or `bonus`. Sixteen of ~24 residual errors on a
+    hand-labelled sample were this one shape.
+
+    This is also why only NEGATED parentheticals are blanked: blanking them all would
+    destroy the label on exactly these rows.
+    """
+    k = engine.salary_kind
+    for text in [
+        "the on-target earnings (base pay + commissions) for this role: $160,000-$220,000",
+        "Total OTE Range (Base Salary + Variable) $175,000-$200,000",
+        "Estimated Annual Cash Compensation (Base + On-Target Commission) $180,000-$210,000",
+        "Compensation Range (TTC / OTE) $293,100-$544,200",
+    ]:
+        sal = text.rsplit(" ", 1)[1]
+        assert k(text, sal) == "ote", text[:60]
+
+    # A LONGER MATCH WINS ONLY WHEN IT CONTAINS THE SHORTER ONE. In the third row above
+    # `Commission` matches `bonus` INSIDE the span `Base + On-Target Commission` that
+    # matches `ote`; that is one phrase read at two precisions, not two signals. Two
+    # UNRELATED cues equidistant from the figure are a real ambiguity and still refuse,
+    # however long either is.
+    assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
