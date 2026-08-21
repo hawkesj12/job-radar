@@ -67,7 +67,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **This does NOT fix `seniority`, and the earlier framing of this bug said it did.**
   `vocab._SENIORITY` is keyed on ASCII, so `sênior` is still not a member and those
-  rows keep `seniority: None` — measured, **7 non-null before and 7 after**.
+  rows keep `seniority: None`. **Unchanged on every population, and the population is
+  named because the three counts look contradictory otherwise:** 7 → 7 across the 115
+  distinct titles this change touches, 61 → 61 across the 506 rows carrying a non-ASCII
+  *letter*, and 772 → 772 across the 2,628 rows carrying any non-ASCII *character*.
   Accent-folding the lookup is a separate change with its own blast radius.
 
   **There was no test for any of this.** The full suite was green on both sides of the
@@ -285,6 +288,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the `team or category` recovery describes the record and the NDJSON, not the CSV.** A
   script that greps the CSV header for `department` still breaks — it loses a name, not
   the data.
+
+  **What a user sees the morning after, because a rename is not free.** On the first
+  scan after upgrading, the header swaps and every row that gets **re-harvested** picks
+  up its `team`. A **sticky** row does not: an `applied` or `dismissed` role that was
+  not seen this run keeps its stored values, and its old `department` is not carried
+  into the new column — so it comes back with **`team` blank while `status` and
+  `first_seen` are intact**. Reproduced on a 0.8.x store: `status='applied'`,
+  `first_seen='2026-05-01'`, `team=''`. It self-heals the next time that posting is
+  harvested — but a role that has **left the market**, which is precisely what sticky
+  status exists to preserve, will never be re-harvested and stays blank permanently.
+  Unavoidable for any renamed column, and stated here rather than discovered in an
+  applied list.
 
   **What the test suite loses, stated rather than left to be found.** The
   `department` byte-identity gate loaded 0.6.0's `sources.py` out of git and ran it

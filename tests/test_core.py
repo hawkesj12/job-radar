@@ -851,6 +851,58 @@ def test_applied_is_sticky_when_role_leaves_feed(tmp_path):
     assert any(r["status"] == "applied" for r in merged2)  # history persists
 
 
+def test_a_0_8_store_survives_the_department_to_team_rename(tmp_path):
+    """THE UPGRADE PATH EVERY EXISTING USER HITS, and it was untested — the sticky test
+    above writes in the CURRENT format, so nothing read a 0.8.x store.
+
+    `department` became `team` at 0.9.0 rather than being deleted, because
+    `shortlist.COLUMNS` carried no other org-unit column. This pins both halves: what
+    the rename PRESERVES, and what it COSTS.
+    """
+    import csv as _csv
+
+    old_header = [
+        "id", "first_seen", "posted", "age_days", "score", "llm_score", "llm_note",
+        "status", "salary", "company", "title", "department", "employment_type",
+        "location", "source", "url", "signals", "dedup_key",
+    ]
+    csvp = tmp_path / "shortlist.csv"
+    with csvp.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=old_header)
+        w.writeheader()
+        w.writerow(dict(zip(old_header, [
+            "abc123", "2026-05-01", "2026-04-28", "30", "70", "", "", "applied", "",
+            "Acme", "Staff Engineer", "Platform Engineering", "FULL_TIME", "Austin, TX",
+            "greenhouse", "https://x/1", "", "acme|staff engineer|austin tx",
+        ])))
+
+    # a run that does NOT re-harvest it -- a role that left the market, which is
+    # exactly what sticky status exists for
+    shortlist.upsert(csvp, [], today="2026-08-21")
+    rows = list(_csv.DictReader(csvp.open(encoding="utf-8")))
+
+    # PRESERVED: the header migrates and the application history is intact.
+    assert list(rows[0]) == shortlist.COLUMNS
+    assert "department" not in rows[0] and "team" in rows[0]
+    assert rows[0]["status"] == "applied"
+    assert rows[0]["first_seen"] == "2026-05-01"
+
+    # THE COST, pinned deliberately. A row that is not re-harvested keeps its stored
+    # values, and the old `department` is NOT carried across -- so `team` comes back
+    # blank. It self-heals the next time that posting is seen; a role that has LEFT
+    # THE MARKET never is, and stays blank. Back-filling would mean asserting an org
+    # unit from a column whose meaning varied by source, which is the whole reason
+    # `department` was removed.
+    #
+    # THE BACK-FILL WOULD HAVE TO GO IN `load_all`, and that is the mutant this line
+    # is tested against -- mapping `department` -> `team` on READ turns this red.
+    # Doing it in `_build_row` instead does NOT turn it red and would not work:
+    # `upsert` carries a stored row forward untouched when the posting is absent, so
+    # a sticky row never passes through `_build_row` at all. Measured, not assumed --
+    # that mutant survives.
+    assert rows[0]["team"] == ""
+
+
 def test_surface_excludes_applied_and_low_score(tmp_path):
     c = _cfg()
     csvp = tmp_path / "shortlist.csv"
