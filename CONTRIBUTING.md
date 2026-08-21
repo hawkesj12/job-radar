@@ -239,6 +239,17 @@ append-only so an existing reference never changes meaning.)
   are disclosing is the one that decides the question, **block on it — do not attach it to
   a recommendation and let it ride.**
 
+- **Our own correction convention makes a stale-number sweep noisy — expect false
+  positives exactly where someone did the right thing.** The house style is that a
+  corrected comment *names what it corrected* ("an earlier version of this comment cited
+  86.0% -- a figure measured before the cue list was widened"). So every honoured
+  correction leaves a stale-looking figure in the tree, and a grep-based audit flags
+  precisely the places the convention was followed. **Read the sentence around a hit
+  before filing it**, and when a sweep reports a stale number, say whether it is a live
+  claim or a recorded correction. The real cost is not the noise — it is that an auditor
+  who sees enough of these starts dismissing hits, which is the failure the sweep exists
+  to prevent.
+
 - **A number's provenance includes WHICH IMPLEMENTATION produced it.** Re-derive a
   measurement under your own code before it goes in your commit message or comment — even
   when the number is right and the person you took it from is careful. Especially then: the
