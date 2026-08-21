@@ -191,10 +191,6 @@ def _in_spans(spans: list[tuple[int, int, str]], i: int) -> str | None:
     return None
 
 
-def _blank(text: str, pat: re.Pattern) -> str:
-    """Blank a pattern's matches, preserving every offset -- `engine._blank`'s trick."""
-    return pat.sub(lambda m: " " * len(m.group(0)), text)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # X3 -- SPONSORSHIP
@@ -241,12 +237,16 @@ _COLLOC = re.compile(
     rf"(?xi) (?: {_ANCHOR} [^.;!?\n]{{0,40}}? {_SPON} | {_SPON} [^.;!?\n]{{0,40}}? {_ANCHOR} )"
 )
 
-# A NEGATION THAT GOVERNS NOTHING. `including, but not limited to` carries `not` and
-# attaches to a list, never to the sponsorship act -- 280 occurrences across 164 rows
-# within +/-160 characters of a sponsor token. One of them sits beside a genuine
-# `not_offered`, so it produces the right answer for the wrong reason, which is worse
-# than a visible failure. Blanked before any cue scan, offsets preserved.
-_DEAD_NEG = re.compile(r"including,?\s+but\s+not\s+limited\s+to", re.I)
+# `including, but not limited to` IS NOT NEUTRALISED, AND DOES NOT NEED TO BE. It was:
+# the phrase carries `not`, attaches to a list rather than to the sponsorship act, and
+# appears 280 times across 164 rows within +/-160 characters of a sponsor token -- one of
+# them beside a genuine refusal, where it would have produced the right answer for the
+# wrong reason. A blanking pass was written for it and then MUTATION-TESTED AWAY: disarmed
+# in an isolated export, the guarding test still passed, because `_NEG` is built from
+# phrases and not one of them matches `not limited to`. The blanking protected against
+# nothing, so it is gone and `test_neg_never_matches_a_negation_that_governs_nothing`
+# pins the property that actually does the work -- which fails the moment anyone adds a
+# bare `not` to `_NEG`.
 
 # A HEDGE OUTRANKS A POLARITY, and that ordering is the ruling this field turns on.
 # 33 of 190 stratified rows are conditional -- MORE than the 27 labelled `offered` --
@@ -380,7 +380,7 @@ def sponsorship_events(text: str) -> list[SponsorshipHit]:
     hits: list[SponsorshipHit] = []
     for m in _COLLOC.finditer(text):
         s0, s1 = sentence_bounds(text, m.start(), m.end())
-        scope = _blank(text[s0:s1], _DEAD_NEG)
+        scope = text[s0:s1]
         state = basis = None
         cues: tuple[str, ...] = ()
         for name, pat in (

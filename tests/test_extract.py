@@ -192,18 +192,22 @@ def test_the_subject_verb_offer_shape_is_positive():
     assert extract.sponsorship(t)[0] == "offered"
 
 
-def test_including_but_not_limited_to_does_not_flip_a_sentence():
-    """A NEGATION THAT GOVERNS NOTHING.
+def test_neg_never_matches_a_negation_that_governs_nothing():
+    """`including, but not limited to` carries `not` and attaches to a LIST.
 
     280 occurrences across 164 rows sit within +/-160 characters of a sponsor token, and
-    one of them sits beside a genuine `not_offered` -- so it would produce the right
-    answer for the wrong reason, which is worse than a visible failure. Here it sits
-    beside a genuine positive, where reading it flips the sign.
+    one of them sits beside a genuine refusal -- so reading it would produce the right
+    answer for the wrong reason, which is worse than a visible failure.
+
+    THIS ASSERTS THE PROPERTY, NOT A WORKAROUND. A blanking pass was written for this and
+    mutation-testing showed it was unreachable: `_NEG` is built from phrases, and none of
+    them matches `not limited to`. The blanking was removed; this fails the moment
+    anyone adds a bare `not` to `_NEG`, which is the change that would reintroduce the bug.
     """
-    t = (
-        "We offer visa sponsorship for a range of classifications, including but not "
-        "limited to H-1B and O-1."
-    )
+    assert extract._NEG.search("including, but not limited to, visa sponsorship") is None
+    assert extract._NEG.search("including but not limited to OPT and STEM OPT") is None
+    t = ("We offer visa sponsorship for a range of classifications, including but not "
+         "limited to H-1B and O-1.")
     assert extract.sponsorship(t)[0] == "offered", extract.sponsorship_events(t)
 
 
@@ -297,6 +301,12 @@ def test_able_to_obtain_is_not_required():
         "Eligible to obtain and maintain a U.S. Secret security clearance.",
         "Must be able to obtain and maintain a Top Secret clearance.",
         "US Citizenship and ability to obtain and maintain a Top-Secret security clearance.",
+        # CARRIES BOTH CUES, and it is the only one of these that tests the ORDERING.
+        # Swapping `_REQUIRED` ahead of `_OBTAINABLE` survived a mutation run because the
+        # three fixtures above contain no required-cue at all, so the precedence they were
+        # written to guard was never exercised. This phrasing is common and unambiguous:
+        # the clearance is required, and being ABLE TO OBTAIN it is what is asked of you.
+        "Ability to obtain and maintain a Secret clearance is required.",
     ):
         assert extract.clearance(_req(t))[0] == "obtainable", t
 
