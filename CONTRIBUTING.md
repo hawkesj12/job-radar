@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Fourteen ways a check comes back clean for the wrong reason
+## Fifteen ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -206,9 +206,11 @@ Every one of these produced a confident, wrong number in this repo:
 | 9 | **a correct explanation applied outside the scope it was derived in** | true of every row measured, false for a class that was not |
 | 14 | **an approval invalidated by a later change to its shared input** | a rule was approved on a measurement against the NARROW cue list. Widening the list was a separate, correct change — and against the wider list the same rule cost 5 rows net and moved every stratum it touched the wrong way. Nobody re-opened the approval, because the edit was to a different object |
 | 15 | **a number measured on someone else's implementation** | `1,088 removed / 792 cost` was carried verbatim into a commit message and a code comment. Re-derived under the committed code the same rule measured `688/969` narrow and `116/637` grown. The figure described **no configuration of that code** — it came from another agent's prototype word lists. Worse than a stale number, because no change to the tree could ever have made it true |
+| 16 | **a number that describes the right code and the wrong rows** | every figure was derived from the correct tree by the correct implementation — ablations, transition counts, corpus totals — and every one described the population AS A WHOLE rather than the population under dispute. The 86 rows that decided the question were readable at any point and nobody read them. Form 14 stopped describing the tree; form 15 never described your code; this one describes both correctly and answers a different question |
 
-Forms 8, 9, 11, 14 and 15 are the dangerous ones, because all five look like good work —
-a real measurement is involved in each. (There is no form 10; the numbering is
+Forms 8, 9, 11, 14, 15 and 16 are the dangerous ones, because all six look like good
+work — a real measurement is involved in each. **16 is the worst of them:** nothing about
+it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
