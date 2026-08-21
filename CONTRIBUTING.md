@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Twenty ways a check comes back clean for the wrong reason
+## Twenty-one ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -212,8 +212,9 @@ Every one of these produced a confident, wrong number in this repo:
 | 19 | **the requester leaked the answer into the instruction** | *"`bonus` precision is 0 of 25... now label the sample blind."* Every blinding protocol guarded the two labellers from **each other**; nobody guarded them from the **orchestrator**, who sees every result first and writes every instruction. The second label set could then only DISCONFIRM — agreement was worth nothing, and agreement is what it produced. **Raised by the labeller, about its own compromised work, not by the person who caused it** |
 | 20 | **a mutation run that never selected the guarding test** | a mutant was disarmed and the suite came back GREEN. The filter was `-k salary_kind`; the test written to guard that exact change was named `test_equity_fires_only_inside_the_figures_own_clause`, which does not contain the string. **The selector excluded its own target.** Re-run as `-k "salary_kind or equity_fires"` and both mutants went red. A green mutation run proves nothing unless you can show the guarding test RAN |
 | 21 | **a failure form applied by pattern-match instead of by measurement** | THIS CATALOGUE causing a failure. An agent recognised form 14's shape — two decisions in one lane, one arming the other — and reported it, minutes after being told form 14 was working forward for the first time. Measured, the intersection was **exactly zero**, and **the disconfirming evidence was in its own earlier message**: it had defined the population by "has a non-USD currency" and then argued the fix would give it one. **Recognition is fast and cheap, which is what lets it substitute for measurement without anyone noticing** |
+| 22 | **an isolated-export run that imported the working tree** | `python3 -m pytest /tmp/gate` launched FROM the repo puts cwd on `sys.path[0]`, so the export's tests import the **worktree's** `job_radar`, not the export's. Same mutant: **605 passed from the repo, 1 failed from inside the export.** `PYTHONPATH` does not fix it — only `cd`ing into the export does. Form 12's shape in a new place: the environment supplied the unmutated code, and the result is a green run that looks exactly like a passing guard |
 
-Forms 8, 9, 11, 14, 15, 16, 17, 18, 19, 20 and 21 are the dangerous ones, because all eleven look like good
+Forms 8, 9, 11, 14, 15, 16, 17, 18, 19, 20, 21 and 22 are the dangerous ones, because all twelve look like good
 work — a real measurement is involved in each. **16 is the worst of them:** nothing about
 it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
@@ -325,6 +326,14 @@ append-only so an existing reference never changes meaning.)
   already sitting in a message it had sent an hour earlier. **A claim that costs someone
   else work has a higher bar than one that only costs you** — if a ruling lands on your
   claim, go verify it before the work starts.
+
+- **`cd` INTO the isolated export. Do not run pytest at it from outside.** The `cd` in this
+  file's recipe is load-bearing and nothing says so until it bites: launching
+  `python3 -m pytest /tmp/gate` from the repo puts the repo's cwd on `sys.path[0]`, and the
+  export's tests import the working tree's `job_radar` instead of the export's. **The same
+  mutant scored 605 passed from outside and 1 failed from inside.** `PYTHONPATH` does not
+  fix it. **Print `job_radar.__file__` from inside the run** if you want proof rather than
+  faith about which tree you just measured.
 
 - **Quote the collected-test count from every mutation run, and name the guarding test.**
   `assert old in src` proves the mutant applied; it says nothing about whether the test that
