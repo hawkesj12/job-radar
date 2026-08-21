@@ -7,19 +7,27 @@ the market, so your application history is never lost. Written atomically
 (temp -> os.replace), so an interrupted write leaves the previous file intact.
 
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
-salary, company, title, department, employment_type, location,
+salary, company, title, team, employment_type, location,
 source, url, signals, dedup_key
 
 THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 18 columns
 are a HUMAN shortlist you open in a spreadsheet; `emit.py`'s NDJSON is the machine
 contract, and a test asserts every `engine._CONTRACT_FIELDS` member appears there.
 So contract fields land here only when a person reading a row wants them —
-`seniority`, `seniority_raw`, `category`, `team` and `tags` are all deliberately
-absent, and `seniority_raw` in particular would be incoherent without the
-`seniority` beside it that this file also does not carry. Adding a column is a
-schema change for every existing CSV, which is a real cost to a CLI user; decide it
-here on purpose rather than letting a field appear in one surface and vanish from
-the other by accident.
+`seniority`, `seniority_raw`, `category` and `tags` are all deliberately absent, and
+`seniority_raw` in particular would be incoherent without the `seniority` beside it
+that this file also does not carry. Adding a column is a schema change for every
+existing CSV, which is a real cost to a CLI user; decide it here on purpose rather
+than letting a field appear in one surface and vanish from the other by accident.
+
+`team` IS HERE, and it is here because `department` was. This file carried the
+deprecated `department` and, uniquely, carried no other org-unit column -- so unlike
+the record, where `department` was a byte-identical duplicate of `team` on 100,825 of
+100,878 filled rows, in the CSV it was the ONLY place the employer's own group
+appeared. Deleting it would have dropped that information out of the CLI's primary
+output silently, in place, on the user's own file, on the first scan after upgrade.
+The column was renamed instead: same position, same 98.1% fill, the name the record
+already uses.
 """
 
 from __future__ import annotations
@@ -146,7 +154,7 @@ COLUMNS = [
     "salary",
     "company",
     "title",
-    "department",
+    "team",
     "employment_type",
     "location",
     "source",
@@ -281,7 +289,7 @@ def _build_row(p: dict, today: str) -> dict:
         "salary": p.get("salary", ""),
         "company": p.get("company", ""),
         "title": (p.get("title", "") or "").strip(),
-        "department": p.get("department", ""),
+        "team": p.get("team") or "",
         "employment_type": p.get("employment_type", ""),
         "location": (p.get("location", "") or "").strip(),
         "source": src,

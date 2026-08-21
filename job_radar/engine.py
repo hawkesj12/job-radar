@@ -216,7 +216,7 @@ _CONTRACT_FIELDS = (
 # README-documented field with call sites in the only consumer, and renaming it buys
 # a nicer word and nothing else. If it ever moves it moves at 1.0 with `department`.
 _NULLABLE_TEXT = (
-    "posted", "salary", "text", "location", "department", "employment_type",
+    "posted", "salary", "text", "location", "employment_type",
 )  # fmt: skip
 
 
@@ -867,7 +867,7 @@ _READING_ORDER = (
     # what the role is
     "title", "title_root", "title_level", "title_qualifiers",
     # who is hiring, and for which group
-    "company", "team", "department", "category", "tags",
+    "company", "team", "category", "tags",
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",

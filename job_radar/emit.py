@@ -98,9 +98,7 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
     only to NDJSON. If those two ever need to agree, this mapping is the one place to
     change.
 
-    `department` rides along unchanged. It is deprecated, not gone: jobfitr pins a
-    released version and reads it today, so removing it here would break a consumer
-    at a minor version. It goes at 1.0.
+    `department` is GONE as of 0.9.0. Its org unit is `team`; see the record contract.
     """
     srcs = _sources(r)
     out = {
@@ -190,8 +188,6 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
         "source_extra": r.get("source_extra"),
         "score": r.get("score"),
         "signals": r.get("signals") or None,
-        # DEPRECATED -- see the docstring. Preserved byte-identical.
-        "department": r.get("department") or None,
     }
     if not include_text:
         # DROPPED, not nulled. `text: null` is already taken: it means the source sent

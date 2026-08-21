@@ -40,8 +40,8 @@ pytestmark = pytest.mark.live
 # what the parser expects, so it is a hard failure rather than a soft one.
 # `braintrust` and `hn` were missing entirely, and braintrust is precisely where a
 # vendor silently dropped a field on us: its `level` key -- which the adapter mapped
-# to `department` -- returns on 0 of 20 rows today. Uncovered sources are where drift
-# hides, so the list is now every keyless breadth adapter.
+# to the since-removed `department` -- returns on 0 of 20 rows today. Uncovered
+# sources are where drift hides, so the list is now every keyless breadth adapter.
 WHOLE_BOARD = [
     "jobicy", "arbeitnow", "remoteok", "themuse", "remotive", "braintrust", "hn",
 ]  # fmt: skip

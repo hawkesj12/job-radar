@@ -981,7 +981,7 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
     p.update(
         {
             "location": hostile,
-            "department": hostile,
+            "team": hostile,
             "employment_type": hostile,
             "salary": hostile,
             "industry": hostile,
@@ -1638,7 +1638,7 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     # `Z` fixture here would freeze a shape this vendor has never sent and would stop
     # catching the regression that would actually hurt.
     assert j["posted"] == "2026-07-10"
-    assert j["department"] == "Engineering"
+    assert j["team"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
 
 

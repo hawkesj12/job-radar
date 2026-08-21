@@ -14,9 +14,6 @@ and nesting verbatim — a fixture invented from the code proves only that the c
 agrees with itself. Run: pytest tests/test_sources.py
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from job_radar import config, sources
@@ -28,7 +25,6 @@ REQUIRED_KEYS = {
     "location",
     "url",
     "posted",
-    "department",
     "employment_type",
     "salary",
     "text",
@@ -111,7 +107,7 @@ def test_remotive_parser_maps_fields(monkeypatch):
     assert j["title"] == "AI Engineer" and j["company"] == "Acme"
     assert j["location"] == "USA (Remote)"  # Remotive is remote-only by definition
     assert j["posted"] == "2026-07-10"
-    assert j["department"] == "Software Development"
+    assert j["category"] == "Software Development"
     assert j["salary"] == "$150,000 - $180,000"  # vendor's own field wins
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
     _assert_contract(out, "remotive")
@@ -160,8 +156,8 @@ def test_jobicy_parser_maps_fields(monkeypatch):
     out = sources.search_jobicy(["ml"])
     j = out[0]
     assert j["title"] == "Machine Learning Engineer" and j["company"] == "Globex"
-    # jobIndustry is a LIST in the live API; it must not reach the CSV as a repr.
-    assert j["department"] == "Engineering"
+    # jobIndustry is a LIST in the live API; it must not reach the record as a repr.
+    assert j["category"] == "Engineering"
     assert j["location"] == "Anywhere (Remote)"
     # The list-vs-string case is the whole reason this adapter has a branch.
     assert j["employment_type"] == "full-time, contract"
@@ -292,7 +288,18 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
     j = out[0]
     assert j["title"] == "IT Specialist (Data Management)"
     assert j["company"] == "National Institutes of Health"
-    assert j["department"] == "Department of Health"
+    # THE ACCEPTED LOSS, pinned where it happens. `DepartmentName` ("Department of
+    # Health") is the EMPLOYING DEPARTMENT, and it rode in the deprecated `department`
+    # until 0.9.0 removed that field. This is the one adapter of nineteen where the
+    # removal cost information: `team` takes `SubAgency` (a facility name, absent from
+    # this fixture as it is from 5 of 82 live federal rows) and `category` takes the
+    # OPM series; neither is the department, and `parent_company` -- the recovery the
+    # README used to name -- was removed earlier in this same release. So the string
+    # "Department of Health" now appears nowhere in the record, and this asserts that
+    # rather than leaving it to be discovered.
+    assert "department" not in j
+    assert j["team"] is None and j["category"] is None
+    assert not any(v == "Department of Health" for v in j.values())
     # NORMALIZED from PositionSchedule[].Code — `.Name` is EMPTY on 47 of 50 live
     # rows and a shift pattern on the rest, so not one row in 50 produced a usable
     # employment type from it. The vendor's own string is preserved.
@@ -915,6 +922,46 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
 @pytest.mark.parametrize(
     "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
 )
+def test_no_adapter_still_emits_department(name, monkeypatch):
+    """`department` is GONE at 0.9.0, and nothing else in the suite would notice it
+    coming back.
+
+    THE REASON THIS EXISTS IS `engine._reorder`, which KEEPS a key it does not name
+    rather than dropping it -- deliberately, so that adding a contract field cannot
+    silently delete it. The consequence is that `department` no longer being in
+    `_NULLABLE_TEXT` or `_READING_ORDER` does NOT remove it: an adapter that assigns
+    `"department": ""` puts the key straight back into the record, and because it is
+    no longer in `_NULLABLE_TEXT` it is not even normalized to None -- it arrives as a
+    literal `""`, the exact empty-string-means-absent lie the contract exists to
+    remove. Nineteen adapters had that line; a twentieth adapter, or a revert, would
+    reintroduce it with nothing red.
+
+    Asserted on the ADAPTER's own output, before the engine, because that is where
+    the key would be written.
+    """
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+
+    out = (
+        sources.DEPTH_ALL[name]("slug")
+        if name in sources.DEPTH_ALL
+        else sources.BREADTH_ALL[name](["AI Engineer"])
+    )
+    assert out, f"{name}: produced no row, so this proved nothing"
+    for r in out:
+        assert "department" not in r, (
+            f"{name} still emits `department` -- removed at 0.9.0. Its org unit "
+            f"belongs in `team`, its job family in `category`."
+        )
+
+
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
 def test_every_adapter_emits_sections_or_honestly_omits_them(name, monkeypatch):
     """0.9.0 wired `sections` at eighteen body sites across FOUR different call shapes
     -- a plain assignment, two helpers that return the value, a mutator writing into a
@@ -1119,7 +1166,7 @@ def test_themuse_ignores_a_query_because_it_cannot_search(monkeypatch):
         assert "nurse" not in u.lower(), f"query leaked into the URL: {u}"
     j = out[0]
     assert j["company"] == "Acme"
-    assert j["department"] == "Data Science"  # a job FAMILY, not an org unit
+    assert j["category"] == "Data Science"  # a job FAMILY, not an org unit
     assert j["url"] == "https://www.themuse.com/jobs/acme/ai-engineer"
     _assert_contract(out, "themuse")
 
@@ -1285,9 +1332,13 @@ def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
 
 
 # ── Strand B: the record contract ───────────────────────────────────────────
-# These are the gates BUILD-0.7.0 names. The department byte-identity test is the
-# COMPATIBILITY gate: jobfitr pins a released job-radar and reads that column, so if
-# it goes red the release breaks a consumer at a minor version.
+# These are the gates BUILD-0.7.0 names. The `department` byte-identity gate lived
+# here until 0.9.0 removed the field; with nothing left to compare, the suite no
+# longer has an equivalence-against-history harness. That is intrinsic to the
+# removal, not an oversight -- but it is a real subtraction and it is recorded here
+# rather than left to be noticed. Its anti-vacuity coverage survives in
+# `test_every_adapter_honours_the_posting_contract`, which is parametrized over
+# every adapter and asserts each one actually produced rows.
 
 
 def _harvest_one(fn, payload, monkeypatch, **kw):
@@ -1369,9 +1420,10 @@ def test_adzuna_area_depth_maps_state_and_remote():
 
 
 def test_usajobs_employer_is_not_a_category(monkeypatch):
-    """`DepartmentName` is "Department of Veterans Affairs" -- the EMPLOYER. It stays
-    in `department` byte-identically for compatibility, and is now also stated as what
-    it actually is."""
+    """`DepartmentName` is "Department of Veterans Affairs" -- the EMPLOYER, never a
+    job family. It rode in the deprecated `department` until 0.9.0 removed that field;
+    the value is now unmapped, which is the single genuine loss of the nineteen
+    adapters. `team` carries `SubAgency` and `category` the OPM series."""
     place = sources._usajobs_place(
         [{"CityName": "Austin", "CountrySubDivisionCode": "TX", "CountryCode": "US"}]
     )
@@ -2015,119 +2067,6 @@ def test_hn_reads_two_threads_not_one(monkeypatch):
     out = sources.search_hn_whoishiring([])
     assert seen == ["aug", "jul"], f"read {seen}, expected the two newest"
     assert len(out) == 2
-
-
-# ── the compatibility gate ──────────────────────────────────────────────────
-def test_department_is_byte_identical_to_0_6_0(monkeypatch):
-    """THE COMPATIBILITY GATE. If this goes red, the release breaks a consumer.
-
-    `department` is deprecated but still emitted. This docstring used to say jobfitr
-    reads it; verified 2026-08-20, **it does not** — the column is absent from that
-    consumer's production schema and its store reads it zero times. The gate is kept
-    anyway, because it costs 0.07s and an unreleased or third-party consumer may pin a
-    version that does read it, and removing the column before 1.0 would break them at a
-    MINOR version. Keep the gate; do not repeat the claim that justified it.
-
-    KNOW WHAT THIS GATE CANNOT SEE. It calls the adapters DIRECTLY and never imports
-    `engine`, so it compares raw adapter output. A change to `department` made in the
-    adapter turns it red, correctly — but the same change made after the adapter, at
-    the engine boundary, leaves it green while every consumer's value changes. Anything
-    touching this field must therefore touch it in the adapter, or extend this gate to
-    compare post-engine records.
-
-    This is an equivalence test against history, not a self-consistent pin: it loads
-    0.6.0's sources.py out of git, runs both versions against the SAME fixtures, and
-    compares the department values. A pin written from the current code would only
-    prove the code agrees with itself.
-
-    Compared as a SET, deliberately. Row COUNTS changed on purpose in 0.7.0 —
-    himalayas now runs two lanes, smartrecruiters pages — so counting rows would fail
-    for the right reasons and hide the wrong ones. What must not change is the VALUE
-    the mapping derives from a given posting.
-    """
-    import importlib.util
-    import subprocess
-    import sys
-
-    src = subprocess.run(
-        ["git", "show", "b839c81:job_radar/sources.py"],
-        capture_output=True,
-        text=True,
-        cwd=str(Path(__file__).parent.parent),
-    )
-    if src.returncode != 0:
-        # Skip ONLY where there is genuinely no history to read (an sdist, a wheel
-        # test). Where .git exists and the blob still cannot be read, that is a
-        # SHALLOW CLONE, and skipping is how this gate silently never ran in CI:
-        # actions/checkout defaults to depth 1, and `pytest -q` prints a bare `s`
-        # with no reason. A compatibility gate that quietly does not run reads as
-        # assurance, which is worse than not having it. ci.yml now sets
-        # fetch-depth: 0; this makes a regression there loud instead of invisible.
-        if (Path(__file__).parent.parent / ".git").exists():
-            pytest.fail(
-                "0.6.0 blob unreachable but .git is present — shallow clone? "
-                "The department compatibility gate cannot run. "
-                "CI needs `fetch-depth: 0` on actions/checkout."
-            )
-        pytest.skip("no git history here (sdist/wheel test) — gate cannot run")
-    blob = Path(tempfile.mkdtemp()) / "sources_060.py"
-    blob.write_text(src.stdout, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("job_radar._v060_sources", blob)
-    old = importlib.util.module_from_spec(spec)
-    sys.modules["job_radar._v060_sources"] = old
-    spec.loader.exec_module(old)
-
-    restore = config.active()  # this test mutates the process global; put it back
-    c = _cfg()
-    # Keyed sources return [] before making a request. Counting those as "compared"
-    # is how the anti-vacuity guard below stayed partly vacuous: adzuna, google_jobs,
-    # usajobs and hn were all comparing [] == []. USAJOBS is the case the CHANGELOG
-    # names as the sharp one (DepartmentName is the EMPLOYER), so a gate blind to it
-    # was blind to its own headline example. Same three lines the contract test
-    # above already uses.
-    monkeypatch.setattr(c, "env", lambda key: "test-key")
-    # USAJOBS builds its own urllib Request rather than going through get_json, so it
-    # has to be stubbed a level lower — and it is the adapter whose department mapping
-    # matters most here (DepartmentName is the EMPLOYER, the CHANGELOG's headline
-    # example). A gate that skipped it was blind to its own motivating case.
-    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
-
-    def departments(mod, name, depth):
-        fn = (mod.DEPTH_ALL if depth else mod.BREADTH_ALL).get(name)
-        if fn is None or name not in SAMPLES:
-            return None
-        og, op, osl = mod.get_json, mod.post_json, mod.time.sleep
-        mod.get_json = lambda u, *a, **k: SAMPLES[name]
-        mod.post_json = lambda u, b, *a, **k: SAMPLES[name]
-        mod.time.sleep = lambda s: None
-        try:
-            rows = fn("slug") if depth else fn(["AI Engineer"])
-        except Exception:  # noqa: BLE001 — a keyed source without a key returns []
-            return None
-        finally:
-            mod.get_json, mod.post_json, mod.time.sleep = og, op, osl
-        return sorted({r.get("department") for r in rows})
-
-    compared, empty = [], []
-    for name, depth in [
-        (n, True) for n in sorted(set(old.DEPTH_ALL) & set(sources.DEPTH_ALL))
-    ] + [(n, False) for n in sorted(set(old.BREADTH_ALL) & set(sources.BREADTH_ALL))]:
-        before, after = departments(old, name, depth), departments(sources, name, depth)
-        if before is None:
-            continue
-        assert before == after, f"{name}: department changed {before} -> {after}"
-        # An adapter that produced NO rows compared [] == [] and proved nothing. Track
-        # it separately rather than counting it toward the guard.
-        (compared if before else empty).append(name)
-    assert not empty, (
-        f"{empty} yielded no rows, so the gate compared [] == [] for them and proved "
-        "nothing. Hand them a key / stub their transport, or the gate is blind to "
-        "exactly the adapters whose department mapping is most interesting."
-    )
-    assert len(compared) >= 8, (
-        f"only compared {compared} — the gate proved almost nothing"
-    )
-    config.set_active(restore)
 
 
 def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
