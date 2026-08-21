@@ -315,6 +315,17 @@ append-only so an existing reference never changes meaning.)
   much stronger than luck. **Report the accurate degradation, not the most self-critical
   one**, and name which of the two a reader is getting.
 
+- **"Use the shipped code" is necessary and NOT sufficient — you must also interrogate the
+  object the shipped code actually chose.** Form 18 one level deeper, and it caught three
+  people in one thread after the rule against it was already written. A detector picks the
+  **nearest** matching cue; a reader looking at the same posting reads the cue that
+  *governs the sentence*. Both are real occurrences of the same word in the same row, and a
+  boundary test applied to the reader's occurrence reports behaviour the machine never
+  exhibits. **The fix is to have the shipped function emit the span it selected** — a debug
+  return, a hook, whatever does not change the shipped signature — and ask every downstream
+  question of that span. Four harnesses produced 15, 26, 29 and a 269-row population that
+  does not exist; one instrumented run ended it.
+
 - **WHEN EVERY VARIANT DIFFERS BY THE SAME AMOUNT, THE HARNESS IS THE VARIABLE.** This one
   fires *during* a run, on evidence, rather than telling you what to do beforehand — which
   makes it the most useful shape in this file. Three different gates each differing from
