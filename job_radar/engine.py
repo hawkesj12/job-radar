@@ -915,12 +915,31 @@ def _neutralize(window: str) -> str:
 # rate for this code.
 _CLAUSE_BREAK = ".!?;\n"
 
+# AN ADDITIVE CONNECTOR IS ALSO A BOUNDARY, FOR `equity` ONLY, and the asymmetry is
+# semantic rather than convenient. A label PRECEDES its value: `"New hire equity:
+# $32,000-$48,000"`. A term joined to a figure by `+` or `plus` names a SEPARATE item,
+# which is the identical construction that made `bonus` right 0 times in 50 and
+# `total_comp` 3 of 22 -- third member, third appearance, one shape.
+#
+# WHY IT IS SCOPED TO `equity` AND MUST NOT BE APPLIED TO `ote`: the connector's meaning
+# depends on what the named quantity IS. On-target earnings ARE base plus commission, so
+# `"$231,000-$275,000+ OTE, Base + Commissions"` uses `+` to describe THE FIGURE'S OWN
+# PARTS -- a true positive that this rule would destroy. Equity is never part of a
+# salary, so `"$180-$220k + attractive RSU package"` uses `+` to name something OUTSIDE
+# the figure. Same token, opposite meaning. Verified: `ote` is unchanged at 809 rows.
+#
+# MEASURED on the shipped classifier, instrumented rather than reimplemented:
+#     clause breaks only        29 retained · 15 correct · 14 wrong   (52%)
+#     + additive connectors     15 retained · 15 correct ·  0 wrong  (100%)
+_ADDITIVE_JOIN = re.compile(r"[+&]|\bplus\b|\band\b", re.I)
+
 
 def _same_clause(window: str, cue_lo: int, cue_hi: int, fig_lo: int, fig_hi: int) -> bool:
-    """Is the cue in the same clause as the figure -- no break between them?"""
-    return not any(
-        c in window[min(cue_lo, fig_lo) : max(cue_hi, fig_hi)] for c in _CLAUSE_BREAK
-    )
+    """Is the cue in the same clause as the figure, and not merely joined to it?"""
+    seg = window[min(cue_lo, fig_lo) : max(cue_hi, fig_hi)]
+    if any(c in seg for c in _CLAUSE_BREAK):
+        return False
+    return not _ADDITIVE_JOIN.search(seg)
 
 
 def salary_kind(text: str, needle: str) -> str:

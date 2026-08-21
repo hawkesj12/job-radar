@@ -39,8 +39,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **`equity` was SCOPE-RESTRICTED, not removed, and the order mattered.** Unrestricted it
   fires on 81 rows and is right on 15; an equity mention on the next line of a benefits
   list (`"…base salary range is \$132,000–\$178,000, plus RSUs"`) reads as the figure
-  BEING equity. Restricted to the figure's own clause it fires on **29 and keeps all
-  15** — roughly **52% precision, not 100%**. **The restriction had to land BEFORE the
+  BEING equity.
+
+  **Two things count as a boundary, and the second is the one that finished it.** Clause
+  breaks alone retain 29 and are right on 15 — 52%. **Adding an additive connector
+  (`+`, `plus`, `and`) as a boundary retains 15 and is right on 15 — 100% on this
+  corpus.** A label *precedes* its value (`"New hire equity: \$32,000–\$48,000"`); a term
+  joined by `+` names a **separate item** — the identical construction that made `bonus`
+  right 0 times in 50. Third member, third appearance, one shape.
+
+  **Scoped to `equity` alone, and the asymmetry is semantic.** On-target earnings *are*
+  base plus commission, so `"\$231,000–\$275,000+ OTE, Base + Commissions"` uses `+` to
+  describe **the figure's own parts** — the same rule applied to `ote` destroys a true
+  positive. Verified: `ote` unchanged at 809 rows. **The restriction had to land BEFORE the
   removal:** with `bonus` gone and `equity` unrestricted, **188 of its rows would have
   moved from one wrong label to another**. In the shipped order, 3 do.
 

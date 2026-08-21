@@ -4878,6 +4878,29 @@ def test_equity_fires_only_inside_the_figures_own_clause():
     ]:
         assert k(text, sal) != "equity", text[:60]
 
+    # AN ADDITIVE CONNECTOR IS A BOUNDARY TOO, and only for `equity`. A label PRECEDES
+    # its value; a term joined by `+` or `plus` names a SEPARATE item -- the identical
+    # construction that made `bonus` right 0 times in 50. Measured on the shipped
+    # classifier: clause breaks alone retain 29 and are right on 15 (52%); with additive
+    # connectors, 15 and 15 (100%).
+    for text, sal in [
+        ("Salary Range: $180,000-$220,000 / year + attractive RSU package",
+         "$180,000-$220,000"),
+        ("New York City residents* $138,000-$214,000 + RSUs + benefits.",
+         "$138,000-$214,000"),
+        ("What We Offer\nSalary Range: $175,000-$220,000 and an equity grant",
+         "$175,000-$220,000"),
+    ]:
+        assert engine.salary_kind(text, sal) != "equity", text[:56]
+
+    # AND IT MUST NOT REACH `ote`. On-target earnings ARE base plus commission, so a `+`
+    # there describes the FIGURE'S OWN PARTS. Applying this boundary to `ote` destroys a
+    # true positive -- which is why the rule is scoped to one cue and says so.
+    assert engine.salary_kind(
+        "Estimated annual salary of $231,000-$275,000+ OTE, Base + Commissions",
+        "$231,000-$275,000",
+    ) == "ote"
+
     # the boundary set itself, pinned so a future edit cannot quietly add `:`
     assert ":" not in engine._CLAUSE_BREAK, (
         "a colon binds a label to its figure; treating it as a break deletes every "
