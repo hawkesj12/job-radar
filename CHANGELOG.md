@@ -9,137 +9,70 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`salary_kind` — what the figure measures, which nothing in the record recorded.**
-  `salary_basis` says only HOW a figure was extracted (`stated` from a vendor field,
-  `parsed` from prose) and never WHAT quantity it is. That gap is why on-target-earnings
-  bands and a **\$32,000–\$48,000 new-hire equity grant** sat in columns the README
-  defines as what an employer committed to as base pay. Closed vocabulary in
-  `vocab.SALARY_KINDS`: `base` · `ote` · `total_comp` · `equity` · `bonus` ·
-  `unspecified`, and `None` when there is no figure at all — "no salary" and "a salary
-  we could not label" are different facts.
+  `salary_basis` says only HOW a figure was extracted and never WHAT quantity it is.
+  That gap is why on-target-earnings bands and a **\$32,000–\$48,000 new-hire equity
+  grant** sat in columns the README defines as what an employer committed to as base pay.
+  Closed vocabulary in `vocab.SALARY_KINDS`: **`base` · `ote` · `equity` ·
+  `unspecified`**, and `None` when there is no figure at all.
 
-  **No new parsing.** It reads the same ±90-character window `_adjacent_evidence`
-  already uses for currency and period, because the label sits with the number.
+  **No new parsing** — it reads the ±90-character window `_adjacent_evidence` already
+  uses for currency and period, because the label sits with the number. **Two rules
+  decide among competing cues:** the nearest wins, with a longer *containing* match
+  preferred as one phrase read at two precisions; and a quantity being **excluded**
+  (`base salary (excluding equity and bonus)`) is discounted, because the excluded word
+  is nearest by construction. Only the sentence the figure lives in is read — see the
+  separate entry for why that rule was removed and restored.
 
-  **The decision rule is the design, and both obvious rules were measured and rejected.**
-  3,715 rows carry two or more cues in that window. *First match in a cue list* is
-  decided by the list's order, not the posting — it returns `bonus` on
-  `Base Salary Range: $170,000–$300,000`. *Refusing whenever two cues appear* — the rule
-  `_adjacent_evidence` uses for currency — throws away **1,783 rows** whose window says
-  `Base Salary Range:` immediately before the figure. **The nearest cue wins, and a
-  genuine equidistant tie between different cues still refuses.**
+  **`bonus` AND `total_comp` WERE REMOVED, on measured precision rather than judgement.**
+  Rows the detector called each were drawn from the shipped classifier and labelled
+  blind: **`bonus` 0 of 25 and 0 of 25** (two readers — one anchored, and reported as
+  such), **`total_comp` 3 of 22 and 5 of 25.** Both far under the 40% line fixed in
+  writing before the draw.
 
-  **A quantity being EXCLUDED is discounted, and this is the dominant multi-cue shape.**
-  `Annual base salary range (excluding equity and bonus): $218,025—$256,500` is a base
-  row, but `bonus` is the nearest word to the number **by construction**. 3,087 rows put
-  a parenthesis or an exclusion between the label and the number. Only a **negated**
-  parenthetical is discounted — blanking every parenthetical also destroys the ones that
-  *contain* the label (`Pay Range (Base Pay): $230,000`), worth **192 rows**.
+  **The cause is a class, not a threshold: `+ bonus` after a figure means the bonus is
+  NOT IN IT.** The cue is anti-correlated with the label, and proximity makes it worse —
+  the nearer the word, the more certain the exclusion. No threshold repairs a signal
+  pointing the wrong way. **Removal is mostly not a refusal:** of the 1,815 rows,
+  **1,171 land on `base`** — the right answer on 22 of 25 labelled rows — 600 on
+  `unspecified` and 41 on `ote`.
 
-  **A STATED QUANTITY WORD IS A LABEL.** `Salary Range`, `Pay Range` and `Compensation
-  Range` name base pay as distinct from bonus, equity and OTE. Measured before deciding:
-  of 30,283 rows with a locatable display string, **11,657 (38.5%) carry a qualified cue**
-  (`base salary`, `annual base`) and **14,638 (48.3%) carry only a bare one** — the bare
-  population is larger. A detector without those cues refused **77 of 150 hand-labelled
-  rows** the rubric calls `base`; that was never a precision failure (4 wrong assertions
-  in 150) but a recall collapse, because the rule and the rubric were measuring different
-  things.
+  **`equity` was SCOPE-RESTRICTED, not removed, and the order mattered.** Unrestricted it
+  fires on 81 rows and is right on 15; an equity mention on the next line of a benefits
+  list (`"…base salary range is \$132,000–\$178,000, plus RSUs"`) reads as the figure
+  BEING equity. Restricted to the figure's own clause it fires on **29 and keeps all
+  15** — roughly **52% precision, not 100%**. **The restriction had to land BEFORE the
+  removal:** with `bonus` gone and `equity` unrestricted, **188 of its rows would have
+  moved from one wrong label to another**. In the shipped order, 3 do.
 
-  **A THIRD RULE: only the sentence the figure lives in is read.** A cue in the prior
-  sentence is a benefit being described, not a label. **This rule was removed and
-  restored, and the restoration is the finding.** It was dropped on an argument three
-  independent readers made and all got wrong: once bare quantity words became `base`
-  labels, a cue sits on the near side of the break and wins on proximity, so the
-  truncation is redundant. That is true of the corpus as a whole — and **false of the
-  rows the rule actually touches, which have no near-side cue at all**, only a bare
-  location or nothing:
+  **A COLON IS NOT A CLAUSE BREAK, and that nearly cost the field its reason to exist.**
+  Every true positive is `"New hire equity: \$32,000–\$48,000"` — colon included — so a
+  boundary set of `.!?;:` keeps 11 rows and **zero** true positives. `.!?;` plus a
+  newline keeps 26 and all 15. A colon *introduces* the figure it labels.
 
-  > *"...is just one component of \<co\>'s total compensation package. New York City:
-  > \$155,000–\$185,000"*
+  **And the 100% figure was a human split, not a mechanical one.** A blind labelling put
+  15 of the 81 in the figure's own clause and scored those at 100%; no punctuation rule
+  reproduces it — the four tried give 11, 26, 26 and 61. **The code approximates the
+  judgement and is published at its own rate**, never the labelling's.
 
-  **Labelled exhaustively and blind, 81 of 86 suppressed rows (94.2%) are genuinely
-  `base`.** Without the rule those rows assert `bonus` or `total_comp` on a base salary —
-  the precise defect this field exists to prevent. Under this project's cue table the rule
-  suppresses **116 non-base assertions at a cost of 637 `base` rows returning
-  `unspecified`**; at the measured 94.2% that is **~109 wrong assertions prevented for 637
-  refusals**, and under precision-over-recall a refusal costs nothing. It creates exactly
-  one wrong assertion of its own.
+  **All 15 true positives are one employer's template**, so the restriction is validated
+  on one board's phrasing. Shipped anyway on an asymmetry: **too narrow costs recall,
+  which is free; too loose costs precision, which is the defect this field exists to
+  prevent.** A grant written differently is missed and emits `unspecified` — a refusal.
 
-  **THE RULE'S TWO NUMBERS BELONG TOGETHER AND NEITHER IS COMPLETE ALONE.** On the
-  stratified 146-row set it costs 7 correct labels and prevents 1 wrong one; on the
-  exhaustive 86 rows it actually touches it prevents 81. **Both are true and quoting
-  either without the other is a lie by selection** — the stratified draw structurally
-  cannot see the population the rule acts on, which is the whole reason the exhaustive
-  labelling exists.
+  **Measured rates** `[102,799-row harvest, 2026-08-20; 42,072 rows with a salary
+  display]`: `base` 54.7% · `unspecified` 43.3% · `ote` 1.9% · `equity` 0.1%. **`base`
+  may contain on-target-earnings rows** where the governing phrase sits in a prior
+  sentence or an unread parenthetical — nine of fourteen wrong assertions on a
+  hand-labelled sample. **Overall wrong-assertion rate 16 of 150 = 10.7%**, adjudicated
+  across two independent readers.
 
-  **The defence is narrower than the count suggests, and that is disclosed rather than
-  buried:** those 86 rows come from **13 employers, 48 of them one employer's repeated
-  boilerplate** and 19 more a second's. It guards a small number of *shapes*, not 86
-  independent decisions.
-
-  **The figures that previously justified this rule — "1,088 removed against 792 lost" —
-  described no configuration this project has shipped.** They were measured with a
-  different detector's word lists against a narrower cue table and carried across the
-  widening without re-derivation. Named rather than silently swapped, because a wrong
-  number in a changelog is a bug here.
-
-  **The window snaps to word boundaries**, because a fixed-offset slice can cut a word in
-  half and manufacture a `\b` that was not there — `remote` becomes `ote`, and `OTE` is a
-  three-letter case-insensitive token. Three real rows had exactly that; the wider exposure
-  is 3,073 rows whose window contains `ote` only as a substring (`quote`, `note`,
-  `promote`) against 763 carrying it as a word.
-
-  **`unspecified` now means NO QUANTITY WORD IN THE WINDOW** — not a word judged
-  insufficiently specific. **41.8%** of rows with a salary display, re-derived on the
-  shipped tree.
-
-  **The 28.0% floor under it is a SEPARATE fact and is kept separate deliberately.**
-  Those rows cannot locate their display string in their own body at all, so there is no
-  window to read and no cue rule can touch them — they already get no currency and no
-  period either. It is the one figure in this set that does not move when the rules
-  change, and conflating it with the `unspecified` rate is exactly what hid both numbers
-  drifting across three commits. **A kind is still never inferred from nothing.**
-
-  **There is deliberately no `hourly_rate`.** An hourly rate is base pay expressed per
-  hour: the quantity is base, the interval is `salary_period == "hour"`, already
-  populated on 2,106 rows. The two signals already disagree on 430 rows, which is the
-  drift arriving before shipping rather than after — the same two-columns-one-fact
-  mistake `department`/`team` cost a release to unpick.
+  **A widened `ote` cue was measured and dropped.** Allowing a modifier between `+` and
+  the noun (`"base salary + Uncapped commission"`) would have gained 9 rows and **broken
+  5 that are currently right — including `"(Base + On-Target Commission)"`, the exact
+  shape it was meant to strengthen.** Recorded rather than shipped.
 
   **It moves no number.** A SHA256 over all six salary fields across 102,799 rows is
-  `d5799a52…` before and after, with `salary_min` filled on 41,665 rows and the currency
-  and period distributions identical.
-
-  **`ote` is also read out of a parenthetical**, which is where boards actually write it:
-  a range described as base PLUS commission **is** on-target earnings, definitionally
-  rather than statistically. `(base + commission)`, `(Base Salary + Variable)`,
-  `(Base + On-Target Commission)`, `(TTC / OTE)` — 16 of ~24 residual errors on a
-  hand-labelled sample were this one shape, because the nearest token inside the
-  parenthetical is `base` or `commission`. This is also why only NEGATED parentheticals
-  are discounted: blanking them all would destroy the label on exactly these rows.
-
-  Distribution `[102,799-row harvest, 2026-08-20]` over the 42,072 rows with a salary
-  display: `base` 21,805 · `unspecified` 17,603 · `bonus` 1,274 · `ote` 768 ·
-  `total_comp` 541 · `equity` 81. **`equity` false positives fell 293 → 81 and `bonus`
-  2,407 → 1,274** — the widened cue list improved precision as well as recall, which was
-  not the expected direction: a bare cue on the near side is the right answer, and having
-  one is what suppressed the eligibility-prose class. **`base` is 89.1% of labelled rows,
-  and that is the field working** — its job is to stop the other 2,664 being read as base
-  pay, and one of them is a \$32,000–\$48,000 equity grant.
-
-  **It is deliberately NOT a `shortlist.csv` column.** The CSV is a curated human subset —
-  `seniority`, `category`, `team` and `tags` are absent for the same reason — and adding a
-  column is a schema change for every existing store. **So a CSV reader cannot see that a
-  figure is an equity grant rather than base pay**, which is the one case where that
-  omission costs something real: the Affirm \$32,000–\$48,000 new-hire equity grant reads
-  in the CSV as an ordinary salary.
-
-  **The machine feed carries it. `job-radar scan --format ndjson` emits it as
-  `salary.kind`**, joined onto the store row because `salary_kind` is in
-  `engine._CONTRACT_FIELDS` and that join loops over exactly that tuple — the same
-  structural reason every contract field rides, and unlike `text`, which needs a
-  hand-written graft because it is not one. Under `--drop-empty` the key survives as
-  `"unspecified"` when a figure could not be labelled and is **dropped entirely** when
-  there was no figure at all, so those two stay distinguishable through the wire format.
+  `d5799a52…` before and after, unchanged across every commit in this sequence.
 
 - **`sections.section_text(record, kind)` — the reader for the spans the record already
   carries.** Everything that parses a posting's prose for one fact (pay, requirements,

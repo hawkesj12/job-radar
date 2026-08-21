@@ -4652,10 +4652,12 @@ def test_salary_kind_reads_the_label_beside_the_figure():
         "equity"
     )
     assert k("OTE Range: $160,000-$205,000 + equity", "$160,000-$205,000") == "ote"
+    # `total_comp` was REMOVED -- its precision measured 3/22 and 5/25 on blind labels.
+    # A bare "total compensation" phrase now refuses rather than asserting.
     assert k(
         "The estimated total compensation for this role ranges from $210,000 - $250,000",
         "$210,000 - $250,000",
-    ) == "total_comp"
+    ) == "unspecified"
     assert k("USA base pay range per year: $195,000 - $255,000", "$195,000 - $255,000") == (
         "base"
     )
@@ -4692,8 +4694,9 @@ def test_salary_kind_never_infers_base_from_an_absent_label():
     assert k("a body that never quotes the figure", "$1-$2") == "unspecified"
     assert k("", "$1-$2") == "unspecified"
     assert k("some text", "") == "unspecified"
-    # a genuine equidistant tie between two DIFFERENT cues still refuses
-    assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
+    # `bonus` was REMOVED (0/25 on blind labels, twice), so this is no longer a tie --
+    # `base pay` is the only cue left and it wins outright.
+    assert k("bonus $100-$200 base pay", "$100-$200") == "base"
 
 
 def test_salary_kind_ignores_a_cue_in_the_prior_sentence():
@@ -4837,10 +4840,50 @@ def test_salary_kind_picks_the_nearest_cue_not_the_first_one_in_the_table():
     ) == "base"
     # and the mirror, so this is not just "base always wins": a bonus figure with the
     # word `base` further away must come back `bonus`.
+    # WAS: `bonus`. That member is gone; a real bonus figure now refuses rather than
+    # being labelled, which is the accepted cost of a cue that was right 0 times in 50.
     assert k(
         "This is in addition to your base salary. Annual bonus target: $10,000-$20,000",
         "$10,000-$20,000",
-    ) == "bonus"
+    ) == "unspecified"
+
+
+def test_equity_fires_only_inside_the_figures_own_clause():
+    """`equity` is SCOPE-RESTRICTED, and the boundary is where this nearly went wrong.
+
+    Unrestricted the cue fires on 81 corpus rows and is right on 15: an equity mention
+    on the NEXT line of a benefits list reads as the figure BEING equity. Restricted to
+    the figure's own clause it fires on 26 and keeps all 15.
+
+    A COLON IS NOT A CLAUSE BREAK, and treating it as one deletes every true positive
+    there is -- all 15 are `"New hire equity: $32,000-$48,000"`, colon included. A colon
+    INTRODUCES the figure it labels; it binds a label to its value, which is the exact
+    relationship this restriction detects. Measured: `.!?;` keeps 26 with all 15;
+    `.!?;:` keeps 11 with ZERO.
+    """
+    k = engine.salary_kind
+    # the labelled shape -- the motivating case for the whole field
+    assert k("Equity grade: 4\nNew hire equity: $32,000-$48,000", "$32,000-$48,000") == (
+        "equity"
+    )
+    assert k("New hire equity: $16,000-$24,000", "$16,000-$24,000") == "equity"
+
+    # a benefits line AFTER the figure is a different clause -- real corpus shapes
+    for text, sal in [
+        ("anticipated annual base salary for Member of Technical Staff: "
+         "$150,000-$200,000\nStock option grant and benefits package", "$150,000-$200,000"),
+        ("Salary: $120,000-$175,000\nValuable stock option plan", "$120,000-$175,000"),
+        ("The compensation band for this role is $70,000-$85,000; equity grant and "
+         "benefits for all team members", "$70,000-$85,000"),
+    ]:
+        assert k(text, sal) != "equity", text[:60]
+
+    # the boundary set itself, pinned so a future edit cannot quietly add `:`
+    assert ":" not in engine._CLAUSE_BREAK, (
+        "a colon binds a label to its figure; treating it as a break deletes every "
+        "true positive this cue has"
+    )
+    assert set(engine._CLAUSE_BREAK) == set(".!?;\n")
 
 
 def test_salary_kind_stays_inside_its_closed_vocabulary():
@@ -4855,9 +4898,7 @@ def test_salary_kind_stays_inside_its_closed_vocabulary():
     import inspect
 
     # the literal, so a member added without thought is visible in a diff
-    assert vocab.SALARY_KINDS == frozenset(
-        {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
-    )
+    assert vocab.SALARY_KINDS == frozenset({"base", "ote", "equity", "unspecified"})
     # every string the classifier can emit is declared in that literal
     emitted = {
         kind for kind, _cue in engine._KIND_CUES
@@ -4866,6 +4907,10 @@ def test_salary_kind_stays_inside_its_closed_vocabulary():
     # and the source agrees -- a cue table entry outside the vocabulary fails here
     src = inspect.getsource(engine)
     assert '"hourly_rate"' not in src, "hourly_rate is salary_period's job, not a kind"
+    # `bonus` and `total_comp` were removed on measured precision (0/25 and 3/22-5/25 on
+    # blind labels). A cue for either must not come back without a new measurement.
+    for gone in ('"bonus"', '"total_comp"'):
+        assert f'({gone}, re.compile' not in src, f"{gone} cue is back, unmeasured"
 
     # exercised, not only read: hostile and ordinary inputs both stay in-vocabulary
     for text, needle in [
@@ -4926,4 +4971,4 @@ def test_salary_kind_reads_ote_out_of_a_parenthetical():
     # matches `ote`; that is one phrase read at two precisions, not two signals. Two
     # UNRELATED cues equidistant from the figure are a real ambiguity and still refuse,
     # however long either is.
-    assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
+    assert k("bonus $100-$200 base pay", "$100-$200") == "base"

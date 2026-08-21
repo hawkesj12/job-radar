@@ -1410,9 +1410,17 @@ SALARY_BASES = frozenset({"stated", "parsed"})
 # their own body at all, so there is no window to read. Those two were conflated in an
 # earlier version of this comment. WAS: 86.0% -- measured before the cue table accepted
 # bare quantity words. Do not lower this number by guessing.
-SALARY_KINDS = frozenset(
-    {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
-)
+# `bonus` AND `total_comp` WERE REMOVED after their precision was measured, not
+# assumed. Blind labelling of rows the detector called each: `bonus` 0/25 and 0/25 (two
+# readers, one anchored), `total_comp` 3/22 and 5/25. Both far under the 40% line fixed
+# before the draw.
+#
+# THE CAUSE IS A CLASS, NOT A THRESHOLD: `+ bonus` after a figure means the bonus is NOT
+# IN IT. The cue is anti-correlated with the label, and proximity makes it worse -- the
+# nearer the word, the more certain the exclusion. No threshold fixes a signal pointing
+# the wrong way. Removal is mostly not a refusal either: 1,171 of the 1,815 rows land on
+# `base`, which is the right answer on 22 of 25 labelled rows.
+SALARY_KINDS = frozenset({"base", "ote", "equity", "unspecified"})
 
 # `text_basis` -- what KIND of body this is, when it is not an ordinary one.
 #

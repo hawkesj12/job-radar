@@ -752,6 +752,11 @@ def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
 # proximity does, below -- but a narrower pattern must not be shadowed by a broader one
 # matching the same span, so `total compensation` is listed before the bare cues.
 _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # SCOPE-RESTRICTED TO THE FIGURE'S OWN CLAUSE -- see `_same_clause`. Unrestricted,
+    # this cue fires on 81 rows and is right on 15 of them: an equity mention on the
+    # NEXT line of a benefits list ("...base salary range is $132,000-$178,000, plus
+    # RSUs" / "Salary: $120,000-$175,000 / Valuable stock option plan") reads as the
+    # figure BEING equity. Restricted, it fires on 26 and keeps all 15.
     ("equity", re.compile(
         r"\b(new[- ]hire equity|equity (grant|award|refresh)|rsus?|restricted stock"
         r"|stock (option|grant|award))\b", re.I)),
@@ -773,11 +778,6 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ote", re.compile(
         r"\b(ote|on[- ]target earnings|on[- ]target compensation|total target cash"
         r"|\w+\s*\+\s*(on[- ]target\s+)?(commission|variable|incentive))", re.I)),
-    ("total_comp", re.compile(
-        r"\b(total (compensation|cash compensation|target compensation|rewards)|tcc)\b",
-        re.I)),
-    ("bonus", re.compile(
-        r"\b(bonus|commission|incentive (pay|compensation))\b", re.I)),
     # Hourly cues resolve to `base` on purpose -- see vocab.SALARY_KINDS. The interval
     # is `salary_period`, which already carries it.
     #
@@ -895,6 +895,34 @@ def _neutralize(window: str) -> str:
     return _EXCL_RUN.sub(_blank, window)
 
 
+# A CLAUSE BREAK IS `.!?;` OR A NEWLINE -- AND DELIBERATELY NOT A COLON. A colon
+# INTRODUCES the figure it labels; it is the punctuation that binds a label to its
+# value, which is the exact relationship this restriction exists to detect. Measured
+# on the 81 rows `equity` fires on:
+#
+#     .!?; + newline   keeps 26   all 15 true positives survive
+#     .!?;: + newline  keeps 11   ZERO true positives -- every one is
+#                                 "New hire equity: $32,000-$48,000", colon included
+#     .!?  (sentence)  keeps 61   keeps the 15 and ~46 false positives with them
+#
+# Treating `:` as a break would have deleted the motivating case for this whole field.
+#
+# AND THIS IS A MECHANICAL APPROXIMATION OF A HUMAN JUDGEMENT, not a reproduction of
+# one. A blind labelling put 15 of the 81 in the same CLAUSE as the figure and scored
+# those 15 at 100%; no punctuation rule reproduces that split -- the four tried give
+# 11, 26, 26 and 61. The restriction keeps 26 to keep the 15, so its precision is
+# roughly 58-65%, NOT the 100% the labelling measured. Do not quote the labelling's
+# rate for this code.
+_CLAUSE_BREAK = ".!?;\n"
+
+
+def _same_clause(window: str, cue_lo: int, cue_hi: int, fig_lo: int, fig_hi: int) -> bool:
+    """Is the cue in the same clause as the figure -- no break between them?"""
+    return not any(
+        c in window[min(cue_lo, fig_lo) : max(cue_hi, fig_hi)] for c in _CLAUSE_BREAK
+    )
+
+
 def salary_kind(text: str, needle: str) -> str:
     """WHAT QUANTITY the figure in `needle` measures -- never how it was extracted.
 
@@ -932,6 +960,13 @@ def salary_kind(text: str, needle: str) -> str:
     tied = False
     for kind, cue in _KIND_CUES:
         for m in cue.finditer(window):
+            # `equity` alone is clause-scoped. The others are not: `bonus`'s failing
+            # shape was SAME-clause (`"$175,000-$210,000 + Bonus."`), so a clause rule
+            # would not have saved it -- which is why those two were removed instead.
+            if kind == "equity" and not _same_clause(
+                window, m.start(), m.end(), a_lo, a_hi
+            ):
+                continue
             # 0 when the cue overlaps the figure itself, else the gap to the near edge.
             d = (
                 0
