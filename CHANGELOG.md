@@ -6,6 +6,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`posted` was one day too new on every source that sends a UTC timestamp.**
+  `util.to_date`'s epoch branch converted to Eastern; the string branch three lines
+  below truncated to `str(val)[:10]`, keeping the **vendor's** calendar day. One column,
+  two conventions, against a project rule of Eastern Time everywhere. Measured against
+  live vendor APIs joined to a 102,799-row harvest: **ashby 16.3% of dates wrong**
+  (26,218 rows, 25.5% of that corpus), **hn 10.5%**, greenhouse **0.00%**, lever
+  **0.00%** — the correct two already sending an ET offset or an epoch. Estimated
+  3,100–4,300 rows, always one day too **new**, so the role also dodged the staleness
+  penalty; four rows were dated tomorrow. A date-only or zone-less string is *not* an
+  instant and deliberately does not shift. Catches `OverflowError` as well as
+  `ValueError` — `.astimezone()` raises it on `0001-01-01T00:00:00Z`, the .NET/Go zero
+  value, which is in this repo's own `catalog/_raw/`. On Python 3.10 the narrower
+  `fromisoformat` falls back to truncation for .NET 7-digit fractions and colon-less
+  offsets — today's behaviour, never a new wrong answer.
+
+- **An Ashby hybrid role no longer renders as `"(Remote)"`.** The location string
+  appended the suffix from `isRemote`, which is **true on every hybrid row** — the
+  measurement is recorded at the `remote_type` assignment, which was rewired to
+  `workplaceType` in 0.9.0 while the display string was not. **7,435 rows** read
+  `location: 'San Francisco (Remote)'` beside `remote_type: 'hybrid'`.
+  **Not display-only:** `remote_scope_raw` is a byte-copy of `location`, and **775 rows**
+  correctly go `remote_areas: ['US'] → None` because a hybrid role in Menlo Park never
+  stated a remote boundary; **6,225 rows** drop 1–5 score points because
+  `score_and_signals` scans `location` and "remote" is a scored keyword. **`dedup_key`
+  does not move** — `normalize_location` already discards the word, verified identical
+  on all 7,435. Anyone diffing two harvests will see these as regressions; they are the
+  correction.
+
+- **A named person's work email and staff number no longer reach `source_extra`.**
+  `_gh_metadata` copied every Greenhouse `metadata[]` entry with no filter on the value.
+  **1,280 rows** of a 102,799-row harvest carried `{name, email, user_id, employee_id}`
+  objects under 17 key names — Hiring Manager 365, Recruiter 280, Job Approver 156 — at
+  veeam.com, datavant.com, nice.com, celonis.com, x.ai and hasbro.com. The boards publish
+  it, so nothing was breached; republishing it under a consumer's name was a default
+  nobody chose. Two encodings are filtered: the person object, and **34 rows** carrying
+  the address as a plain string. Clustering every dict value in that harvest gives four
+  shapes — salary, referral, a bare pay range, and the person object — so the person-key
+  test drops **zero** legitimate values. **Scoped deliberately:** this removes emails and
+  staff numbers; bare personal *names* still pass through, because filtering those needs
+  a key list that would also drop legitimate values under the same keys.
+
 ### Added
 
 - **Two output-shape levers: `output.include_text` and `output.omit_empty`** (CLI:

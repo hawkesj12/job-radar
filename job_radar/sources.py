@@ -55,6 +55,12 @@ from .util import (
 GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
 
 
+# An address inside a metadata VALUE, not a whole-value match: 9 of the 34 rows
+# carrying one embed it in a longer string. Deliberately narrow -- it has to be
+# conservative enough that a legitimate value is never dropped for containing an @.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")
+
+
 def _gh_metadata(md) -> dict:
     """Greenhouse `metadata[]` -> a flat name->value dict for `source_extra`.
 
@@ -72,7 +78,35 @@ def _gh_metadata(md) -> dict:
     out = {}
     for m in md or []:
         if isinstance(m, dict) and m.get("name") and m.get("value") not in (None, ""):
-            out[str(m["name"])] = m["value"]
+            v = m["value"]
+            # A PERSON IS NOT A JOB ATTRIBUTE. Greenhouse's user-type metadata carries
+            # a named employee's work email and internal staff number: 1,280 rows of a
+            # 102,799-row harvest, under 17 key names (Hiring Manager 365, Recruiter
+            # 280, Job Approver 156), at veeam.com, datavant.com, nice.com, celonis.com,
+            # x.ai, hasbro.com. The board publishes it, so nothing is breached -- but
+            # re-publishing a third party's contact details under a consumer's name is
+            # a decision, not a default. The name-vocabulary reasoning above is about
+            # KEYS; this is about VALUES, which it never asked.
+            #
+            # TWO ENCODINGS, and the dict test alone misses the second. Clustering
+            # every dict value in that harvest by key signature gives exactly four
+            # shapes: salary {max_value,min_value,unit} 5,112 rows, referral
+            # {amount,unit} 2,017, PEOPLE {email,employee_id,name,user_id} 1,739, and
+            # a bare pay range {max_value,min_value} 36. So the person-key test drops
+            # zero legitimate dicts -- but 34 rows carry the email as a plain STRING
+            # ('Hiring Manager' -> 'vinit.jadhav@careem.com'), same harm, invisible to
+            # an isinstance check.
+            #
+            # SCOPED CLAIM, deliberately: this removes work emails and internal staff
+            # numbers. Bare personal NAMES still pass through ('Hiring Manager':
+            # 'Pete Kern'). Filtering those needs a key list that does not also drop
+            # 'Not Applicable' and other legitimate values under the same keys, and
+            # a name with no contact detail is a different risk tier.
+            if isinstance(v, dict) and {"email", "employee_id", "user_id"} & set(v):
+                continue
+            if isinstance(v, str) and _EMAIL_RE.search(v):
+                continue
+            out[str(m["name"])] = v
     return out
 
 
@@ -367,7 +401,26 @@ def fetch_ashby(slug: str):
     out = []
     for j in data.get("jobs", []):
         loc = j.get("location", "")
-        if j.get("isRemote"):
+        # `workplaceType`, NOT `isRemote` -- the same reason `remote_type` reads it,
+        # recorded in full at that assignment below: isRemote is TRUE ON EVERY HYBRID
+        # ROW (measured on openai, n=733: isRemote=True with workplaceType='Hybrid'
+        # on 442). So appending "(Remote)" from it labelled 7,435 hybrid postings as
+        # remote in the one field a listing page renders -- `location: 'San Francisco
+        # (Remote)'` beside `remote_type: 'hybrid'`. The classifier was corrected in
+        # 0.9.0 and this string was not, which is two zones each individually right
+        # and never checked against each other.
+        #
+        # This is NOT display-only. `remote_scope_raw` is a byte-copy of `location`,
+        # and 775 of the affected rows currently parse a US boundary out of the
+        # suffix, so `remote_areas` goes ['US'] -> None on them -- correctly: a hybrid
+        # role in Menlo Park never stated a remote boundary. 6,225 rows also drop
+        # 1-5 score points because `score_and_signals` scans `location` and "remote"
+        # is a scored keyword. `dedup_key` does NOT move: `normalize_location` already
+        # eats the word, verified identical on all 7,435.
+        #
+        # Nothing unique is discarded: across 7 live Ashby boards (1,392 postings),
+        # isRemote=True with workplaceType ABSENT occurs 0 times.
+        if str(j.get("workplaceType", "")).strip().lower() == "remote":
             loc = (loc + " (Remote)").strip()
         # HTML FIRST, and the fallback is the safety net -- not the other way round.
         # This read `descriptionPlain` until 0.9.0 and that produced `sections: []` on

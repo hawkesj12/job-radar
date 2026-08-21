@@ -3985,3 +3985,60 @@ def test_no_adapter_puts_a_url_on_a_location(name, monkeypatch):
                 f"{name}: location keys {sorted(el)} != {sorted(want)} -- a per-place "
                 "`url` is the row's own url on every source and was removed at 0.9.0"
             )
+
+
+def test_ashby_marks_remote_from_workplace_type_not_the_boolean(monkeypatch):
+    """`isRemote` is TRUE ON EVERY HYBRID ROW -- measured on openai (n=733):
+    isRemote=True with workplaceType='Hybrid' on 442. `remote_type` was rewired to
+    `workplaceType` in 0.9.0 on that measurement; the location string was not, so
+    7,435 hybrid postings rendered as `'San Francisco (Remote)'` in the one field a
+    listing page shows, beside `remote_type: 'hybrid'`."""
+    payload = {
+        "jobs": [
+            {"title": "A", "location": "San Francisco", "isRemote": True,
+             "workplaceType": "Hybrid", "jobUrl": "https://x/1"},
+            {"title": "B", "location": "Austin", "isRemote": True,
+             "workplaceType": "Remote", "jobUrl": "https://x/2"},
+            {"title": "C", "location": "Boston", "isRemote": False,
+             "workplaceType": "OnSite", "jobUrl": "https://x/3"},
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *a: None)
+    rows = sources.fetch_ashby("acme")
+    hybrid, remote, onsite = rows[0], rows[1], rows[2]
+    assert hybrid["location"] == "San Francisco", "a hybrid role claimed (Remote)"
+    assert hybrid["remote_type"] == "hybrid"
+    assert remote["location"] == "Austin (Remote)", "a real remote role lost its suffix"
+    assert onsite["location"] == "Boston"
+
+
+def test_a_named_persons_contact_details_never_reach_source_extra():
+    """Greenhouse user-type metadata carries a named employee's work email and
+    internal staff number -- 1,280 rows of a 102,799-row harvest, at veeam.com,
+    nice.com, celonis.com and others. The board publishes it; republishing it under a
+    consumer's name is a decision nobody made.
+
+    TWO ENCODINGS. A dict test alone misses the 34 rows carrying the address as a
+    plain string. And the four legitimate dict shapes in that harvest -- salary
+    {max_value,min_value,unit}, referral {amount,unit}, a bare pay range, and the
+    person object -- mean the person-KEY test drops nothing real."""
+    md = [
+        {"name": "Hiring Manager",
+         "value": {"name": "A Person", "email": "a@corp.com",
+                   "user_id": 1, "employee_id": "E1"}},
+        {"name": "Recruiter Email", "value": "someone@corp.com"},
+        {"name": "Contact", "value": "reach us at team@corp.com for questions"},
+        {"name": "Salary Range",
+         "value": {"unit": "USD", "min_value": "1", "max_value": "2"}},
+        {"name": "Referral", "value": {"amount": "500", "unit": "USD"}},
+        {"name": "Department", "value": "Engineering"},
+    ]
+    out = sources._gh_metadata(md)
+    assert "Hiring Manager" not in out, "a person object survived"
+    assert "Recruiter Email" not in out, "a bare email string survived"
+    assert "Contact" not in out, "an embedded email survived"
+    # the legitimate dict shapes must be untouched
+    assert out["Salary Range"] == {"unit": "USD", "min_value": "1", "max_value": "2"}
+    assert out["Referral"] == {"amount": "500", "unit": "USD"}
+    assert out["Department"] == "Engineering"
