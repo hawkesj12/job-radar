@@ -213,6 +213,22 @@ append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
 
+- **To evaluate a RULE, sample the rows that rule CHANGES — not a stratified draw over
+  the whole population.** A general sample can be well-constructed, honestly reported, and
+  structurally blind to the question. The instance: a 150-row sample stratified on cue
+  placement scored two candidate detectors at **21 wrong assertions and 21** — tied — and
+  contained **zero** of the 86 rows the rule under debate actually acted on. Labelled
+  directly, those 86 were **94.2% wrong assertions prevented**, reversing the ruling. The
+  effect lived in an *intersection* the strata split apart (a cue in the prior sentence
+  **and** no near-side cue), so no stratum could hold it. **Before scoring a rule, list the
+  rows it changes and draw from those.** If the rule changes rows your sample cannot
+  contain, the sample cannot evaluate the rule, no matter how good it is.
+
+- **A caveat does not make a wrong recommendation safe.** The recommendation is what gets
+  acted on; the caveat is what gets read afterward, if something breaks. When the limit you
+  are disclosing is the one that decides the question, **block on it — do not attach it to
+  a recommendation and let it ride.**
+
 - **A number's provenance includes WHICH IMPLEMENTATION produced it.** Re-derive a
   measurement under your own code before it goes in your commit message or comment — even
   when the number is right and the person you took it from is careful. Especially then: the
