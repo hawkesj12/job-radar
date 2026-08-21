@@ -35,13 +35,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parenthetical is discounted — blanking every parenthetical also destroys the ones that
   *contain* the label (`Pay Range (Base Pay): $230,000`), worth **192 rows**.
 
-  **`unspecified` is the default and is the field working.** 64.9% of rows carrying a
-  salary display string, and **28.0% of those cannot locate that string inside their own
-  body at all**, so there is no window to read — those rows already get no currency and
-  no period either. **An absent label is never read as `base`**: inferring base from
-  absence is the same "default an unknown to a plausible value" the contract forbids
-  everywhere else, and it would make the field worse than not having it. **Do not
-  "improve" this field by lowering that number.**
+  **A STATED QUANTITY WORD IS A LABEL.** `Salary Range`, `Pay Range` and `Compensation
+  Range` name base pay as distinct from bonus, equity and OTE. Measured before deciding:
+  of 30,283 rows with a locatable display string, **11,657 (38.5%) carry a qualified cue**
+  (`base salary`, `annual base`) and **14,638 (48.3%) carry only a bare one** — the bare
+  population is larger. A detector without those cues refused **77 of 150 hand-labelled
+  rows** the rubric calls `base`; that was never a precision failure (4 wrong assertions
+  in 150) but a recall collapse, because the rule and the rubric were measuring different
+  things.
+
+  **A THIRD RULE: only the sentence the figure lives in is read.** The label is the phrase
+  *introducing* the figure, not the last cue word before it, and a sentence boundary is
+  where that stops being true — a structural fact about how job posts are written.
+  `"eligible for additional bonus opportunities. Salary Range $53,560-$67,000"` is a base
+  row whose nearest cue is `bonus`, with **no negation anywhere in it**, which is why the
+  exclusion strip alone could not reach the class. Removes **1,088 false `bonus`/`equity`
+  assertions**. **Its cost is 792 `base` rows lost to `unspecified`, and on a hand-labelled
+  sample about half the prior-sentence rows carried a genuine governing label** — so
+  roughly half that loss is real, not refusal. Precision over recall: a lost `base` costs
+  nothing where a wrong `bonus` on a base salary is the defect this field exists to prevent.
+
+  **The window snaps to word boundaries**, because a fixed-offset slice can cut a word in
+  half and manufacture a `\b` that was not there — `remote` becomes `ote`, and `OTE` is a
+  three-letter case-insensitive token. Three real rows had exactly that; the wider exposure
+  is 3,073 rows whose window contains `ote` only as a substring (`quote`, `note`,
+  `promote`) against 763 carrying it as a word.
+
+  **`unspecified` now means NO QUANTITY WORD IN THE WINDOW** — not a word judged
+  insufficiently specific. 41.9% of rows with a salary display, and most of those are the
+  **28.0% whose display string cannot be found in their own body at all**, leaving no
+  window to read; those rows already get no currency and no period either. **A kind is
+  still never inferred from nothing.**
 
   **There is deliberately no `hourly_rate`.** An hourly rate is base pay expressed per
   hour: the quantity is base, the interval is `salary_period == "hour"`, already
@@ -54,9 +78,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and period distributions identical.
 
   Distribution `[102,799-row harvest, 2026-08-20]` over the 42,072 rows with a salary
-  display: `unspecified` 27,316 · `base` 10,449 · `bonus` 2,355 · `total_comp` 901 ·
-  `ote` 759 · `equity` 292. By source: greenhouse 13,004 labelled of 27,247, ashby 1,564
-  of 12,920, lever 159 of 1,414.
+  display: `base` 21,854 · `unspecified` 17,610 · `bonus` 1,366 · `ote` 623 ·
+  `total_comp` 537 · `equity` 82. **`equity` false positives fell 293 → 82 and `bonus`
+  2,407 → 1,366** as the three rules went in — the widened cue list improved precision as
+  well as recall, because a bare cue on the near side of a sentence break is the right
+  answer and having one is what finally suppressed the eligibility-prose class.
 
 - **`sections.section_text(record, kind)` — the reader for the spans the record already
   carries.** Everything that parses a posting's prose for one fact (pay, requirements,

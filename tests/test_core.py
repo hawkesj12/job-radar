@@ -4666,22 +4666,123 @@ def test_salary_kind_reads_the_label_beside_the_figure():
 
 
 def test_salary_kind_never_infers_base_from_an_absent_label():
-    """`unspecified` is the default and it is the contract working, not a gap.
+    """`unspecified` means NO QUANTITY WORD IN THE WINDOW -- not "a word I judged
+    insufficiently specific".
 
-    Defaulting an unlabelled figure to `base` is the same "default an unknown to a
-    plausible value" the record forbids everywhere else, and it would make this field
-    worse than not having it. 64.9% of rows carrying a salary display string come back
-    `unspecified` [102,799-row harvest, 2026-08-20]; 28.0% of them cannot even locate
-    that string inside their own body, so there is no window to read.
+    A bare `Salary Range` / `Pay Range` / `Compensation Range` NAMES base pay as
+    distinct from bonus, equity and OTE, so it is a label. That was measured before it
+    was decided: of 30,283 rows with a locatable display string, 11,657 carry a
+    qualified cue (`base salary`, `annual base`) and **14,638 carry only a bare one** --
+    the bare population is the larger, and a detector without those cues refused 77 of
+    150 hand-labelled rows the rubric calls `base`.
+
+    What is still never inferred is a kind from NOTHING. A figure with no quantity word
+    anywhere in its window stays `unspecified`, and so does one whose display string
+    cannot be found in the body at all (28.0% of rows with a salary).
     """
     k = engine.salary_kind
-    assert k("Salary Range: $190,000-$270,000", "$190,000-$270,000") == "unspecified"
+    # a bare quantity word IS a label
+    assert k("Salary Range: $190,000-$270,000", "$190,000-$270,000") == "base"
+    assert k("Pay Range $53,560-$67,000", "$53,560-$67,000") == "base"
+    # ...but a figure with NO quantity word near it is still unspecified
+    assert k("Join our team! $190,000-$270,000 available.", "$190,000-$270,000") == (
+        "unspecified"
+    )
     # no window at all -- the display string is not in the body
     assert k("a body that never quotes the figure", "$1-$2") == "unspecified"
     assert k("", "$1-$2") == "unspecified"
     assert k("some text", "") == "unspecified"
     # a genuine equidistant tie between two DIFFERENT cues still refuses
     assert k("bonus $100-$200 base pay", "$100-$200") == "unspecified"
+
+
+def test_salary_kind_reads_the_sentence_the_figure_lives_in():
+    """THE LABEL IS THE PHRASE INTRODUCING THE FIGURE, not the last cue word before it.
+
+    Everything before the last full stop is prose about benefits, and a cue in it is a
+    BENEFIT BEING DESCRIBED. No negation appears in any of these, which is why the
+    exclusion strip alone could not reach the class -- it is grammatically positive.
+    Removes 1,088 false `bonus`/`equity` assertions on base-salary rows.
+    """
+    k = engine.salary_kind
+    for text in [
+        "This position is eligible for additional bonus opportunities. "
+        "Salary Range $53,560-$67,000",
+        "...product discounts, referral bonus program, and more. "
+        "Pay Range $99,000-$121,000",
+        "...generous employee referral bonus, and employee stock option awards. "
+        "Salary Range $120,000-$140,000",
+        # "internal equity" is pay FAIRNESS, not stock -- a homonym, and the sentence
+        # boundary is what keeps it out.
+        "...knowledge, skills, experience and internal equity. "
+        "Canada Pay Range $90,000-$110,000",
+    ]:
+        sal = text.rsplit(" ", 1)[1]
+        assert k(text, sal) == "base", text[-60:]
+
+    # THE COST, recorded rather than hidden: a governing label in the PRIOR sentence is
+    # discarded too. On a hand-labelled sample about HALF the prior-sentence rows carried
+    # a real label, so roughly half of the 792 `base` losses are genuine label loss.
+    # Precision over recall: a lost `base` costs nothing, a wrong `bonus` on a base
+    # salary is the defect this field exists to prevent.
+    assert k(
+        "The base pay ranges for a successful candidate are listed below. "
+        "CA, NY, CT, NJ $245,000-$258,500",
+        "$245,000-$258,500",
+    ) == "unspecified"
+
+
+def test_salary_kind_window_snaps_to_word_boundaries():
+    """A FIXED-OFFSET SLICE CAN MANUFACTURE A `\b` THAT WAS NOT THERE.
+
+    `remote` cut mid-word becomes `ote`, and `OTE` is a three-letter case-insensitive
+    token -- the worst possible shape for this. 6 of 813 OTE matches were that; the
+    wider exposure is 3,073 rows whose window contains `ote` only as a substring
+    (`quote`, `note`, `promote`, `denote`) against 763 carrying it as a word.
+    """
+    # "aaaremote" runs 0..9; the naive slice [3:9] is "remote" and yields the phantom
+    # `ote` boundary. Snapping widens left to the real word start and stops at the
+    # space, so the window sees "aaaremote" and no cue matches.
+    assert engine._snap("aaaremote bbb", 3, 9) == (0, 9)
+    assert engine._snap("xx remote yy", 5, 9) == (3, 9)
+
+    # A REAL ROW, not a construction. Koalafi and Cloudflare both put the word `remote`
+    # exactly 90 characters before their figure, so the naive window opens mid-word on
+    # "ote opportunities are available" and matches `\bote\b`. Snapping opens it on
+    # "Remote" instead. Three rows in the corpus have this shape and all three were
+    # labelled `ote` before the snap.
+    # THE OFFSET IS COMPUTED, NOT GUESSED, because the bug only fires when the window
+    # edge lands INSIDE a word. Three real rows have this shape -- Koalafi twice and
+    # Cloudflare -- each with `remote` exactly `_ADJ_WINDOW` characters before its
+    # figure, so the naive window opens on "ote opportunities…" and matches `\bote\b`.
+    # Without the snap all three were labelled `ote`.
+    sal = "$174,000-$226,000"
+    prefix = "This role can be performed remote"
+    body = prefix + " " + "y" * 85 + " " + sal
+    i = body.find(sal)
+    assert body[i - engine._ADJ_WINDOW :][:3] == "ote", "fixture drifted: no mid-word cut"
+    assert engine.salary_kind(body, sal) == "unspecified", (
+        "the window edge manufactured an `ote` cue out of `remote`"
+    )
+
+    # `base compensation` and `base hourly` earn their place because their ABSENCE
+    # caused false positives, not misses: without them the nearest surviving cue in
+    # these two real rows is `equity`.
+    k = engine.salary_kind
+    assert k(
+        "...bonus, equity, and a generous benefits program. "
+        "Base Compensation Range $65,000-$85,000",
+        "$65,000-$85,000",
+    ) == "base"
+    assert k(
+        "We believe in equity when it comes to compensation. For this role, the "
+        "anticipated base hourly range is $16 - $21",
+        "$16 - $21",
+    ) == "base"
+    # a real body where the naive slice would have produced `ote` from `remote`
+    pad = "x" * 200
+    text = pad + "work remotely. Remote opportunities available. Salary Range $90,000"
+    assert engine.salary_kind(text, "$90,000") == "base"
 
 
 def test_salary_kind_ignores_a_quantity_that_is_being_excluded():

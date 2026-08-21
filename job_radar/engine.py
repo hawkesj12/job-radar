@@ -764,10 +764,67 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"\b(bonus|commission|incentive (pay|compensation))\b", re.I)),
     # Hourly cues resolve to `base` on purpose -- see vocab.SALARY_KINDS. The interval
     # is `salary_period`, which already carries it.
+    #
+    # A BARE QUANTITY WORD IS A LABEL. `Salary Range`, `Pay Range`, `Compensation Range`
+    # name base pay as distinct from bonus, equity and OTE, so they are `base` -- not
+    # `unspecified`. This was measured before it was decided: of 30,283 rows with a
+    # locatable display string, 11,657 (38.5%) carry a QUALIFIED cue (`base salary`,
+    # `annual base`) and 14,638 (48.3%) carry ONLY a bare one. The bare population is
+    # the larger. With only qualified cues the detector refused 77 of 150 hand-labelled
+    # rows that the rubric calls `base` -- not a precision failure (4 wrong assertions
+    # in 150) but a recall collapse, because the rule and the rubric were measuring
+    # different things.
+    #
+    # `base compensation` and `base hourly` are here because their ABSENCE caused false
+    # positives rather than misses: `"...bonus, equity, and a generous benefits program.
+    # Base Compensation Range $65,000"` returned `equity` without them.
     ("base", re.compile(
-        r"\b(base (salary|pay|compensation|rate)|annual base|hourly (rate|pay|wage))\b",
+        r"\b(base (salary|pay|compensation|rate|hourly)|annual base"
+        r"|hourly (rate|pay|wage)"
+        r"|(salary|pay|compensation)\s+range"
+        r"|(annual|estimated|national|expected|target)\s+(salary|pay|compensation))\b",
         re.I)),
 )
+
+# THE LABEL IS THE PHRASE INTRODUCING THE FIGURE, not the last cue word before it, and
+# a sentence boundary is where that stops being true. This is structural -- it is how
+# job posts are written -- not a heuristic tuned to a few rows: everything before the
+# last full stop is prose about benefits, and the cue in it is a BENEFIT BEING
+# DESCRIBED rather than a label. `"...eligible for additional bonus opportunities.
+# Salary Range $53,560-$67,000"` is a BASE row whose nearest cue is `bonus`, and no
+# negation appears anywhere in it -- which is why the exclusion strip alone could not
+# reach this class. Measured: it removes 1,088 false `bonus`/`equity` assertions.
+#
+# THE COST IS REAL AND HALF-MEASURED: 792 rows go `base` -> `unspecified`, and on a
+# hand-labelled sample about HALF the prior-sentence rows carried a genuine governing
+# label (`"the base pay ranges ... are listed below"`). Precision over recall is the
+# ruling, and a lost `base` costs nothing where a wrong `bonus` on a base salary is the
+# exact defect this field exists to prevent -- but the loss is not free and is recorded
+# here rather than discovered later.
+_SENTENCE_END = ".!?"
+
+
+def _last_sentence(window: str, before: int) -> str:
+    """Blank everything up to the last sentence end preceding the figure."""
+    cut = max(window.rfind(c, 0, before) for c in _SENTENCE_END)
+    return " " * (cut + 1) + window[cut + 1 :] if cut >= 0 else window
+
+
+def _snap(text: str, lo: int, hi: int) -> tuple[int, int]:
+    """Widen a window to word boundaries.
+
+    A FIXED-OFFSET SLICE CAN CUT A WORD IN HALF AND MANUFACTURE A `\b` THAT WAS NOT
+    THERE. `remote` sliced mid-word becomes `ote`, and `OTE` is a three-letter
+    case-insensitive token -- the worst possible shape for this. 6 of 813 OTE matches
+    were that; the wider exposure is 3,073 rows whose window contains `ote` only as a
+    substring (`quote`, `note`, `promote`, `denote`) against 763 carrying it as a word.
+    Every cue already requires `\b`; this makes the WINDOW agree with them.
+    """
+    while lo > 0 and (text[lo - 1].isalnum() or text[lo - 1] == "_"):
+        lo -= 1
+    while hi < len(text) and (text[hi].isalnum() or text[hi] == "_"):
+        hi += 1
+    return lo, hi
 
 # A NEGATED CUE IS THE ONE NEAREST THE FIGURE, ALWAYS, because that is what the sentence
 # shape does: "Annual base salary range (excluding equity and bonus): $218,025-$256,500".
@@ -827,9 +884,9 @@ def salary_kind(text: str, needle: str) -> str:
     i = text.find(needle)
     if i < 0:
         return "unspecified"  # no window exists; 28.0% of rows with a display string
-    lo = max(0, i - _ADJ_WINDOW)
-    window = _neutralize(text[lo : i + len(needle) + _ADJ_WINDOW])
+    lo, hi = _snap(text, max(0, i - _ADJ_WINDOW), i + len(needle) + _ADJ_WINDOW)
     a_lo, a_hi = i - lo, i - lo + len(needle)
+    window = _last_sentence(_neutralize(text[lo:hi]), a_lo)
     best: str | None = None
     best_d: int | None = None
     tied = False
