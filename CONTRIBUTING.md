@@ -212,6 +212,18 @@ append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
 
+- **When you rule that two error classes are NOT equally bad, every metric from that
+  point on must separate them.** A composite score silently re-equalises exactly what the
+  ruling separated. The instance cost two rounds, three rulings and a suspension:
+  `salary_kind` was ruled precision-over-recall — a missing label costs a user nothing, a
+  wrong one is the defect the field exists to prevent — and then every configuration was
+  argued on raw agreement, which weights the two identically. Split out, the two
+  candidates were **21 wrong assertions and 21**, tied on the metric that mattered and
+  differing only in refusals. The composite said `126 > 121` and pointed at a real
+  difference that was **not the one under debate**. A ruling changes what you must
+  measure, and nobody changes instruments when the question changes; the tell is a
+  headline number that cannot express the distinction you just made.
+
 - **When you change a shared input, re-read every approval that input supported.** An
   approval is attached to the configuration it was measured in, and nothing warns you when
   a later edit moves that configuration out from under it. The instance: three rules were
