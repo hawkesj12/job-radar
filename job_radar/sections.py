@@ -125,7 +125,6 @@ SECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"a day in the life")),
 ]  # fmt: skip
 
-_TAG = re.compile(r"</?[A-Za-z][^>]*>")
 # A HEADER is a heading tag OR bold text, and the second half is the load-bearing one:
 # 63.6% of the headers this finds come from `<strong>`/`<b>` rather than a heading tag
 # (19,359 of 30,421 on the nine-board corpus). Per-BOARD it swings wildly -- databricks
@@ -146,9 +145,10 @@ _TAG = re.compile(r"</?[A-Za-z][^>]*>")
 _HDR = re.compile(
     r"<(h[1-6])[^>]*>(.{0,1000}?)</\1>|<(strong|b)[^>]*>(.{0,1000}?)</\3>", re.I | re.S
 )
-_ENT = (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"), ("&rsquo;", "’"),
-        ("&quot;", '"'), ("&lt;", "<"), ("&gt;", ">"), ("&ndash;", "–"),
-        ("&mdash;", "—"))  # fmt: skip
+# `_ENT` -- a nine-entry entity table -- was deleted with the second pipeline. It was
+# always a subset of what `html.unescape` handles, and `_clean_decoded` runs that twice
+# (Greenhouse escapes its own escapes), so a header carrying `&amp;amp;` now decodes the
+# way its body already did instead of stopping one level short.
 
 # WHERE A BLOCK BEGINS AND ENDS. `_HDR` finding a `<strong>` says nothing about whether
 # it is a HEADING -- 0.9.0 promoted every one of them, including emphasis in the middle
@@ -287,9 +287,44 @@ def _header_at(body: str, m: re.Match) -> tuple[str, bool]:
 
 
 def _detag(s: str) -> str:
-    for a, b in _ENT:
-        s = s.replace(a, b)
-    return re.sub(r"\s+", " ", _TAG.sub(" ", s or "")).strip()
+    """Markup -> header text, through the SAME pipeline that produced `text`.
+
+    TWO PIPELINES IS THE BUG. This replaced every tag with a space, including an
+    INLINE tag sitting inside a word, while `util._clean_decoded` deletes an inline
+    run whose next character is lower case. So the two disagreed about the same
+    bytes, and `clean_with_sections` locates a section by searching for its header
+    IN that text -- which is exactly the lookup a disagreement breaks. Measured
+    [20 live boards, 6,267 bodies, 67,678 sections, 2026-08-21]: 3,962 headers were
+    absent from their own text; routing this through `_clean_decoded` repairs 3,882
+    and loses 0. `<h2><strong>Health can't wait</strong>. </h2>` yielded the header
+    "Health can't wait ." against a body reading "Health can't wait."
+
+    THE SPANS ARE THE REAL COST, not the string. A header that cannot be found leaves
+    `pos` un-advanced, so the next section is searched for from too far back -- 2,372
+    spans move here (2,248 of them zero-length, i.e. an empty section that was
+    anchored at the wrong place entirely). The guard in `clean_with_sections` that
+    steps past a header was never broken; it was being handed a key that did not fit
+    the lock. Mutation-testing it confirms it is armed and that its fixture cannot
+    reach this path, because that fixture's header IS findable.
+
+    Classification barely moves and that is the expected shape, not a weak result:
+    `classify` lowercases, strips and pattern-matches, so a stray space survives most
+    of its patterns. Exactly 1 of 67,678 changes -- `'A bout the Team:'` ->
+    `'About the Team:'`, unclassified -> `about_company`.
+
+    THE COLLAPSE TO SINGLE SPACES IS DELIBERATE. `_clean_decoded` turns a block end
+    into a newline, and a header is one line by construction; adopting the newline
+    would make 50 more headers findable and put a literal `\\n` inside a published
+    `header` string in the NDJSON and the CSV, which is a worse record than an
+    unfindable header. Those 50 are a named residual, not an oversight.
+
+    The deferred import is required, not stylistic: `util` imports this module, so a
+    module-level import is circular. One definition of the pipeline, imported late,
+    beats a second copy that drifts -- which is the defect this function just had.
+    """
+    from . import util
+
+    return re.sub(r"\s+", " ", util._clean_decoded(s or "")).strip()
 
 
 def classify(header: str) -> str | None:

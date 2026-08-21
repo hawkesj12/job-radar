@@ -122,6 +122,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A section header was built by a second, disagreeing copy of the text pipeline.**
+  `sections._detag` replaced every tag with a space — including an inline tag sitting
+  **inside a word** — while `util._clean_decoded` deletes an inline run followed by
+  lower case. Two pipelines over the same bytes, and `clean_with_sections` locates a
+  section by searching for its header **in that text**, so the disagreement broke the
+  lookup: the record published `"About t he Role"` beside a body reading
+  `"About the Role"`, and `"Health can't wait ."` beside `"Health can't wait."`
+  Measured `[20 live boards, 6,267 postings, 67,678 sections, 2026-08-21]`: **3,962
+  headers were absent from their own text; 3,882 are repaired and 0 are lost.**
+
+  **The spans were the real cost.** A header that cannot be found leaves the search
+  position un-advanced, so the next section is searched for from too far back —
+  **2,372 spans move**, 2,248 of them zero-length, i.e. empty sections anchored to the
+  wrong place entirely. The guard that steps past a header was never broken; it was
+  being handed a key that did not fit the lock, and its fixture uses a findable header
+  so it could not reach this. Classification barely moves, which is the expected shape
+  rather than a weak result — `classify` lowercases and strips before matching, so
+  exactly **1 of 67,678** changes (`"A bout the Team:"` → `about_company`).
+
+  **Named residual: 80 headers are still unfindable, and 50 of those are deliberate.**
+  `_clean_decoded` turns a block end into a newline; adopting that here would find
+  those 50 and put a literal newline inside a published `header` string in the NDJSON
+  and the CSV. A header is one line by construction. The other 30 are a separate
+  defect in `_header_at`'s tail absorption, not fixed here and not folded into the
+  figures above.
+
 - **`title` and `location` shipped with the vendor's edge whitespace on them.**
   `engine._coerce` forced every text field to `str` and never stripped one, so
   **9,874 titles (9.6%) and 1,894 locations** carried leading or trailing whitespace
