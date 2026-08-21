@@ -11,7 +11,7 @@ import re
 import urllib.error
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from . import config, vocab
+from . import config, extract, vocab
 from .dedup import entry_key, find_hit_key, norm
 from .funnel import funnel
 from .scoring import is_remote, relevant, remote_signal, score_and_signals
@@ -208,6 +208,17 @@ _CONTRACT_FIELDS = (
     # a field enters the core contract when TWO OR MORE sources can fill it; a
     # genuine one-source quirk lives here. Never index this; read it by key.
     "source_extra",
+    # WHETHER A PERSON CAN APPLY AT ALL -- read from the posting's prose by
+    # `extract.enrich`, never from a vendor field, because no source publishes either.
+    # Both are THREE-state and in both cases two states was a SIGN FLIP: `conditional`
+    # holds the hedged employer templates that would otherwise be forced into `offered`,
+    # and `obtainable` separates "must be able to obtain" from "must already hold".
+    # Ensured-present-and-`None` here and deliberately NOT coerced, like every other
+    # contract field -- `None` means the posting did not say, on 94% of rows.
+    "sponsorship",         # offered | conditional | not_offered | None
+    "sponsorship_basis",   # vocab.SPONSORSHIP_BASES | None
+    "clearance",           # required | obtainable | mentioned | None
+    "clearance_basis",     # vocab.CLEARANCE_BASES | None
 )
 
 # Fields whose ABSENCE is meaningful and must survive as None rather than "".
@@ -1227,6 +1238,10 @@ _READING_ORDER = (
     "salary_basis", "salary_kind",
     # terms
     "employment_type", "employment_type_raw",
+    # whether a person can apply at all -- beside the other eligibility facts, and
+    # nowhere near the end: this tuple's ORDER is the delivered reading order, so an
+    # append displaces the body from the last slot a test pins it to.
+    "sponsorship", "sponsorship_basis", "clearance", "clearance_basis",
     # how to apply
     "url", "direct_apply",
     # what we made of it
@@ -1306,6 +1321,17 @@ def _consume(postings, hits, blocks, cfg, meta):
             continue
         if not p.get("url"):
             continue
+        # AFTER THE LAST GATE, not beside `derive_remote`/`derive_salary`. Those two run
+        # early because the remote gate reads what they set; nothing here feeds a gate,
+        # so running it last does identical work on strictly fewer rows. Measured: 0 of
+        # 30,000 rows differ between the two placements -- placement changes which rows
+        # are REACHED, never what they return. Of rows passing the relevance gate, 76.9%
+        # die at the remote gate and 2.7% more at age, so 20.4% reach this line under
+        # `remote_only=True, max_age_days=60`. Under `remote_only=False` the remote gate
+        # returns True unconditionally and this placement saves nothing -- a drop rate is
+        # a property of the CONFIG, not of the corpus, which is why the config is named
+        # beside the number.
+        extract.enrich(p)
         p.setdefault("company", "")
         p.setdefault("source", "")
         m = meta.get(norm(p["company"]))

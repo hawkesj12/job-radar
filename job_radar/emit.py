@@ -146,6 +146,18 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
         "harvested_at": r.get("harvested_at"),
         "employment_type": r.get("employment_type") or None,
         "employment_type_raw": r.get("employment_type_raw"),
+        # WHETHER A PERSON CAN APPLY AT ALL. Grouped rather than flat because each
+        # carries a basis, and a consumer that reads the state without the basis
+        # cannot tell a sentence-scoped answer from a section-scoped one. `None`
+        # throughout means the posting did not say -- 94% of rows for both.
+        "sponsorship": {
+            "state": r.get("sponsorship"),
+            "basis": r.get("sponsorship_basis"),
+        },
+        "clearance": {
+            "state": r.get("clearance"),
+            "basis": r.get("clearance_basis"),
+        },
         "salary": {
             "raw": r.get("salary") or None,
             "min": r.get("salary_min"),

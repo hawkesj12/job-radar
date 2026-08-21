@@ -32,52 +32,6 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CLOSED VOCABULARIES
-# THESE RELOCATE TO `vocab.py` AT PHASE-3 INTEGRATION. They live here only because
-# `extract.py` is built in an isolated worktree that cannot import names `vocab.py`
-# does not carry yet -- importing them early turns this lane's gate red for a reason
-# that has nothing to do with this code. The in-lane test below reads these literals;
-# the orchestrator moves them and adds the central `sources`-style enforcing test at
-# integration. THIS COMMENT IS THE THING THAT STOPS THE INTERIM HOME BECOMING
-# PERMANENT -- delete it when they move, not before.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# `sponsorship` -- THREE states, not two. `conditional` is not a hedge on the schema, it
-# is where every hedged employer template goes: on a 190-row stratified hand-label,
-# conditional rows (33) OUTNUMBER `offered` (27), and they are repeating boilerplate
-# ("considers sponsorship on a case-by-case basis", "may be available for select
-# positions"). Without the state each one is forced into `offered` or `not_offered`, and
-# `offered` is exactly where the sign-flip cost lives -- a wrong `offered` sends a person
-# to spend an hour on an application they were never eligible for.
-#
-# `None` remains "the posting did not say", and stays the answer for ~91% of rows.
-SPONSORSHIP_STATES = frozenset({"offered", "conditional", "not_offered"})
-
-# `sponsorship_basis` -- HOW the polarity was decided, deliberately NOT where the text
-# was found. The brief specified `{requirements, body}`; measured, only 12.9% of
-# sponsorship occurrences sit in a typed `requirements` section, so that vocabulary would
-# read `body` on ~87% of rows and carry no information. A basis that is constant is
-# decoration, which the extraction plan forbids by name.
-#
-# `adjacent` WAS RULED IN AND IS NOT HERE, and that reverses half of a ruling on evidence
-# that did not exist when the ruling was made -- flagged, not quietly dropped. The path
-# it named decided 229 rows and was wrong on both of the scope-strings hand-checked out
-# of it, including a clean offer read as a refusal. A vocabulary member nothing emits is
-# the same smell that got two `salary_kind` members removed at 0.9.0, so it goes with the
-# code rather than sitting here describing a path that no longer exists.
-SPONSORSHIP_BASES = frozenset({"sentence"})
-
-# `clearance` -- THREE states, and the third is a sign flip if you omit it. 2,191 of
-# 5,585 clearance rows (39.2%) say a candidate must be ABLE TO OBTAIN a clearance rather
-# than already hold one; folding those into `required` tells an eligible US citizen the
-# job is closed to them.
-CLEARANCES = frozenset({"required", "obtainable", "mentioned"})
-
-# `clearance_basis` -- here the section vocabulary DOES do real work, unlike
-# sponsorship's: 64.7% of the preference cues that decide a clearance's state are the
-# enclosing `requirements` section's own heading rather than anything in the sentence.
-CLEARANCE_BASES = frozenset({"requirements", "body"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

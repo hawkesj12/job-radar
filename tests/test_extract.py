@@ -16,7 +16,7 @@ import re
 
 import pytest
 
-from job_radar import extract
+from job_radar import extract, vocab
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # THE SENTENCE SPLITTER
@@ -372,12 +372,12 @@ def test_vocabularies_are_pinned_by_reading_the_literal():
     These RELOCATE to `vocab.py` at integration; this test relocates with them and is
     replaced by the central `sources`-style enforcement that reads the module source.
     """
-    assert extract.SPONSORSHIP_STATES == frozenset(
+    assert vocab.SPONSORSHIP_STATES == frozenset(
         {"offered", "conditional", "not_offered"}
     )
-    assert extract.SPONSORSHIP_BASES == frozenset({"sentence"})
-    assert extract.CLEARANCES == frozenset({"required", "obtainable", "mentioned"})
-    assert extract.CLEARANCE_BASES == frozenset({"requirements", "body"})
+    assert vocab.SPONSORSHIP_BASES == frozenset({"sentence"})
+    assert vocab.CLEARANCES == frozenset({"required", "obtainable", "mentioned"})
+    assert vocab.CLEARANCE_BASES == frozenset({"requirements", "body"})
 
 
 def test_every_emitted_value_is_inside_its_vocabulary():
@@ -385,11 +385,11 @@ def test_every_emitted_value_is_inside_its_vocabulary():
     invents a state fails here rather than in whatever consumer branches on it."""
     for t in _NOT_OFFERED + _OFFERED + _CONDITIONAL:
         state, basis = extract.sponsorship(t)
-        assert state in extract.SPONSORSHIP_STATES
-        assert basis in extract.SPONSORSHIP_BASES
+        assert state in vocab.SPONSORSHIP_STATES
+        assert basis in vocab.SPONSORSHIP_BASES
     for h in extract.clearance_events(_req("Active TS/SCI clearance required.")):
-        assert h.state in extract.CLEARANCES
-        assert h.basis in extract.CLEARANCE_BASES
+        assert h.state in vocab.CLEARANCES
+        assert h.basis in vocab.CLEARANCE_BASES
 
 
 def test_enrich_sets_every_field_and_is_safe_on_an_empty_body():

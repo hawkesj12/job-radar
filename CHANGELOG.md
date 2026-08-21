@@ -8,6 +8,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`sponsorship` and `clearance` — whether a person can apply at all.** Neither existed in
+  the record and no source publishes either as a field, so both are read from the posting's
+  prose by `extract.enrich`. `None` runs 94.18% and 94.53%; that is the honest answer, not a
+  coverage gap.
+
+  **Both are THREE-state, and in both cases two states was a sign flip.** `sponsorship ∈
+  {offered, conditional, not_offered}`: on a hand-labelled sample the hedged employer
+  templates — *"considers sponsorship on a case-by-case basis"*, *"may be available for
+  select positions"* — **outnumbered clean offers**, and without a state of their own each
+  is forced into `offered`, which is where the cost lives. `clearance ∈ {required,
+  obtainable, mentioned}`: **39.2% of clearance rows say a candidate must be ABLE TO OBTAIN
+  a clearance rather than already hold one**, and folding those into `required` tells an
+  eligible US citizen the job is closed to them.
+
+  **The acceptance gate found a 32% sign-flip rate before this shipped.** Censusing all 87
+  distinct sentences an earlier detector called `offered`, **469 of 1,464 occurrences were
+  refusals or hedges** — the positive pattern matched the bare verb while the negative one
+  could not see the negation attached to it. Contractions (*"we aren't able to sponsor"*)
+  cost 274 and a negation carried by a verb (*"prohibited from offering sponsorship"*) cost
+  185. After the fix, 318 of 318 correct.
+
+  **Then the opposite direction caught the fix overreaching.** Letting an adjacent sentence
+  decide destroyed a clean offer — *"DensityAI sponsors qualified candidates for H-1B, O-1,
+  TN, E-3"* read as a refusal because of a *"do not"* in a **different sentence**. That path
+  decided 229 rows, so `sponsorship_basis` is `{sentence}` alone.
+
+  **A second reader labelled 65 rows blind** (seed 1839095240, sample `c33012c0…`): 25 of 25
+  agreement on `not_offered` and **zero sign flips in either direction**. All 11
+  disagreements sit on one boundary — whether *"sponsorship where applicable"* is a clean
+  offer or a hedge — and neither side of it tells anyone they cannot apply.
+
+  Both are grouped in the NDJSON feed as `sponsorship.state` / `.basis` and
+  `clearance.state` / `.basis`, because a state read without its basis cannot be told from a
+  differently-scoped one. **Neither is a `shortlist.csv` column** — the CSV is a curated
+  human subset.
+
 - **`salary_kind` — what the figure measures, which nothing in the record recorded.**
   `salary_basis` says only HOW a figure was extracted and never WHAT quantity it is.
   That gap is why on-target-earnings bands and a **\$32,000–\$48,000 new-hire equity
