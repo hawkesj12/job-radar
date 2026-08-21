@@ -164,7 +164,7 @@ _CONTRACT_FIELDS = (
     # WHAT the figure measures, vs `salary_basis`'s HOW it was extracted. `None` means
     # there is no figure at all; `unspecified` means there IS one and no label sat near
     # it. Those are different facts and the contract keeps them apart.
-    "salary_kind",  # stated | parsed | None -- vocab.SALARY_BASES
+    "salary_kind",  # base | ote | equity | unspecified | None -- vocab.SALARY_KINDS
     # terms
     "employment_type_raw",  # what the vendor actually said
     "seniority",
