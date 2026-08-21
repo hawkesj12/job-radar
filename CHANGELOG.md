@@ -1014,6 +1014,19 @@ prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including
   (it does not — the column is absent from its production schema and its code reads it
   zero times), and `catalog/_SCHEMA.md` described a Braintrust `level` mapping that was
   already removed. The `department` byte-identity gate is unchanged and still green.
+- **The README's NDJSON key-count table was measured on a harvest that no longer
+  exists, and it was four fields stale.** It published 50 / 31 / 30 keys against a
+  7,568-row local harvest, and stayed at those figures when `industry`,
+  `parent_company`, `salary_estimated_min` and `salary_estimated_max` were removed from
+  the record — a docs-and-code-in-one-commit miss. Re-measured on a corpus that is
+  named in the caption: **102,799 rows across 7,360 boards, 46 / 29 / 28 keys and
+  7,694 / 7,295 / 1,691 bytes** per median record, counting leaves. `text` is 78% of a
+  record's bytes rather than 72%. The caption now also states the corpus's coverage —
+  **11 of 19 sources, 68% Greenhouse**, with usajobs, adzuna, google_jobs, workday,
+  workable, teamtailor, rippling and themuse absent — and which way that biases it, so
+  **19 null keys reads as an upper bound** rather than a measurement of the market. A
+  number whose provenance is gone cannot be re-checked; naming a skewed corpus beats
+  citing an unreproducible one.
 
 ## [0.9.0] - 2026-08-20
 

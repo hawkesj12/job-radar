@@ -262,18 +262,29 @@ wire — including `text`, the full description, which is the entire input to th
 job-radar --format ndjson --all --no-text --drop-empty > jobs.ndjson
 ```
 
-Measured on a 7,568-row local harvest, per median record:
+Measured per median record on a **102,799-row local harvest across 7,360 boards**
+`[2026-08-20]`, counting leaves — a nested key such as `title.raw` counts once:
 
 | | keys | bytes |
 | --- | --- | --- |
-| as emitted | 50 | 8,717 |
-| `--drop-empty` | 31 | 8,313 |
-| `--no-text --drop-empty` | 30 | 2,021 |
+| as emitted | 46 | 7,694 |
+| `--drop-empty` | 29 | 7,295 |
+| `--no-text --drop-empty` | 28 | 1,691 |
 
-`text` is **~72% of a record's bytes** and **19 of its 50 keys are null** on a median
+`text` is **~78% of a record's bytes** and **19 of its 46 keys are null** on a median
 row, so the raw output is a job description with a record buried inside it. Both flags
 **remove keys** rather than nulling them, because `null` already means something
 specific and different here — the source did not say.
+
+**These figures illustrate one harvest; they do not guarantee a shape.** That harvest
+reached **11 of the 19 sources** — 68% of its rows are Greenhouse, and usajobs,
+adzuna, google_jobs, workday, workable, teamtailor, rippling and themuse never ran —
+so it leans to the ATS lane. The keyed aggregators fill `salary_*`, `tags` and
+`category` more often than ATS boards do, which makes **19 null keys an upper bound**:
+a full-mix run nulls fewer. The previous version of this table read 50 / 31 / 30
+against a 7,568-row harvest that no longer exists here, and it still read that after
+four contract fields were removed from the record. A number whose provenance is gone
+cannot be re-checked, which is why the corpus is named.
 
 **`--drop-empty` is opt-in, and worth understanding before you turn it on.** Removing
 a key changes `"x" in record` and `record.keys()`, so a consumer written against the
