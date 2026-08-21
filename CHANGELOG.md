@@ -64,6 +64,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refusals**, and under precision-over-recall a refusal costs nothing. It creates exactly
   one wrong assertion of its own.
 
+  **THE RULE'S TWO NUMBERS BELONG TOGETHER AND NEITHER IS COMPLETE ALONE.** On the
+  stratified 146-row set it costs 7 correct labels and prevents 1 wrong one; on the
+  exhaustive 86 rows it actually touches it prevents 81. **Both are true and quoting
+  either without the other is a lie by selection** — the stratified draw structurally
+  cannot see the population the rule acts on, which is the whole reason the exhaustive
+  labelling exists.
+
   **The defence is narrower than the count suggests, and that is disclosed rather than
   buried:** those 86 rows come from **13 employers, 48 of them one employer's repeated
   boilerplate** and 19 more a second's. It guards a small number of *shapes*, not 86
