@@ -1408,8 +1408,8 @@ SALARY_BASES = frozenset({"stated", "parsed"})
 # 41.8% of rows with a salary display [102,799-row harvest, 2026-08-20], and the honest
 # floor under that is a SEPARATE fact: 28.0% cannot locate their display string inside
 # their own body at all, so there is no window to read. Those two were conflated in an
-# earlier version of this comment, which cited 86.0% -- a figure measured before the cue
-# table accepted bare quantity words. Do not lower this number by guessing.
+# earlier version of this comment. WAS: 86.0% -- measured before the cue table accepted
+# bare quantity words. Do not lower this number by guessing.
 SALARY_KINDS = frozenset(
     {"base", "ote", "total_comp", "equity", "bonus", "unspecified"}
 )

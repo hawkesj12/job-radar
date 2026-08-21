@@ -763,6 +763,13 @@ _KIND_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # hand-labelled sample were this one form: `(TTC / OTE)`, `(base + commission)`,
     # `(Base Salary + Variable)`, `(Base + On-Target Commission)`. Parentheses are
     # OTE's primary carrier, which is also why only NEGATED parentheticals are blanked.
+    #
+    # ONE KNOWN ACCEPTED MISLABEL, named so it is a decision rather than a bug waiting
+    # to be rediscovered. This branch decides 31 rows (27 -> `ote`, 4 -> `total_comp`)
+    # and 30 are unambiguous. The exception offers BOTH readings in one line -- "Base
+    # salary range [or Total On-Target Compensation]: $235,000 - $265,000" -- and this
+    # picks `ote`. Left alone: a rule to split it would be a fourth rule bought for one
+    # row.
     ("ote", re.compile(
         r"\b(ote|on[- ]target earnings|on[- ]target compensation|total target cash"
         r"|\w+\s*\+\s*(on[- ]target\s+)?(commission|variable|incentive))", re.I)),
@@ -950,12 +957,37 @@ def salary_kind(text: str, needle: str) -> str:
                 # still refuse, however long either one is. Length is evidence of
                 # precision only when one match contains the other; between separate
                 # phrases it is evidence of nothing.
-                overlaps = m.start() < best_end and m.end() > best_start
-                if overlaps and n > best_n:
+                # CONTAINMENT, NOT MERE OVERLAP, and the difference is only ever
+                # theoretical -- which is exactly why the code tests the INTENT. A
+                # partial overlap that is not containment is unreachable here: equal
+                # `d` forces an equal near edge, and an equal edge with different
+                # starts IS containment; cues on opposite sides of the figure cannot
+                # overlap at all. Measured: 0 instances in 30,283 rows against 62
+                # containment pairs, and an overlap-gated variant differs on zero rows.
+                #
+                # THE EQUIVALENCE IS LOAD-BEARING ON `d` MEANING "gap to the near
+                # edge", which is defined above and could be changed by someone who
+                # has never read this. If it changes, an overlap test silently starts
+                # preferring longer matches in the case this comment forbids. A future
+                # reader tightening the code to match the comment would be making a
+                # change they believe is a no-op without knowing it -- so the code
+                # tests containment and the comment keeps the reason overlap also works
+                # today. `vocab.LOCATION_SEPARATORS` vs `dedup.normalize_location` is
+                # the same coupling, kept honest the same way.
+                # EITHER DIRECTION. The cue table is walked most-specific-first, so
+                # `ote` matches `Base + On-Target Commission` BEFORE `bonus` matches
+                # the `Commission` inside it -- the incumbent contains the challenger,
+                # not the other way round. A one-directional test refuses exactly the
+                # row this branch exists for; that is not hypothetical, it is what the
+                # first version of this line did and what the test above caught.
+                contains = (m.start() <= best_start and m.end() >= best_end) or (
+                    best_start <= m.start() and best_end >= m.end()
+                )
+                if contains and n > best_n:
                     best, best_n, best_start, best_end, tied = (
                         kind, n, m.start(), m.end(), False
                     )
-                elif not overlaps or n == best_n:
+                elif not contains or n == best_n:
                     tied = True
     return "unspecified" if best is None or tied else best
 
@@ -989,8 +1021,16 @@ def derive_salary(p: dict) -> dict:
     # Everything below returns early when a vendor already sent numbers -- but a
     # vendor-stated figure carrying an OTE or equity label is EXACTLY the defect this
     # field exists to catch, and those rows are the majority: putting this line below
-    # the guard set `salary_kind` on 411 of 41,665 rows and found zero equity, which is
-    # how the misplacement was caught. It describes the figure the EMPLOYER wrote, so it
+    # putting this line below the guard meant only 411 of 42,072 rows with a salary could
+    # be labelled AT ALL -- 222 of them got a kind and none was equity, against 81 equity
+    # rows when the call sits above. That is how the misplacement was caught.
+    #
+    # WAS: "411 of 41,665 rows". Both halves were individually plausible and neither
+    # described this quantity: 411 is the population that could REACH the call, not the
+    # number labelled, and 41,665 is the `salary_min`-filled count from the fingerprint
+    # HARNESS -- a different instrument measuring a different thing. A ratio whose
+    # numerator and denominator come from different instruments reads as sound from
+    # either end. It describes the figure the EMPLOYER wrote, so it
     # is independent of whether our parser can turn that string into numbers.
     if p.get("salary"):
         p["salary_kind"] = salary_kind(p.get("text") or "", p["salary"])
