@@ -185,7 +185,7 @@ def _lever_remote(workplace_type) -> dict:
     return {"remote_type": rt, "remote_basis": "stated" if rt else None}
 
 
-def _lever_text(j: dict) -> tuple[str, list[dict]]:
+def _lever_text(j: dict) -> tuple[str, list[dict] | None]:
     """The WHOLE posting body, which Lever splits across three fields, plus its sections.
 
     `descriptionPlain` is only the intro -- 1,118 chars on average (binance, n=295).
@@ -220,7 +220,21 @@ def _lever_text(j: dict) -> tuple[str, list[dict]]:
                 parts.append(f"<h3>{head}</h3>")
             parts.append(sec.get("content") or "")
     parts.append(j.get("additional") or j.get("additionalPlain") or "")
-    return clean_with_sections("\n".join(str(x) for x in parts if x))
+    body = "\n".join(str(x) for x in parts if x)
+    # `sections: []` MEANS "we read a body and it had no headers", and that is a claim
+    # about a body. With every Lever field empty there is no body to make it about:
+    # `clean_with_sections("")` returns `("", [])`, `""` normalizes to `None` at the
+    # engine boundary, and the row then asserted BOTH "no body" and "a body with no
+    # headers" at once. 21 rows [102,799-row harvest, 2026-08-20], all Lever, because
+    # it is the only adapter that BUILDS a body out of parts that can all be absent.
+    #
+    # Fixed here rather than in `clean_with_sections`, which must keep returning `[]`
+    # for the 1,137 rows that genuinely have a body carrying no headers -- the two
+    # cases are indistinguishable from inside that function, and only the caller knows
+    # whether a body existed.
+    if not body:
+        return "", None
+    return clean_with_sections(body)
 
 
 def fetch_lever(slug: str):
@@ -2709,11 +2723,67 @@ def _hn_location(segment: str) -> str:
     return (cut[:space] if space > 0 else cut).strip()
 
 
+# The "Seeking Freelancer / Wanted" template, as labelled fields. A JOB SEEKER posting
+# inside a hiring thread -- `search_hn_whoishiring` already filters threads to "who is
+# hiring", so no thread-level filter can reach this, and it needs a per-comment shape
+# test instead.
+#
+# NOT ANCHORED TO A LINE START, and that is the whole reason the first version of this
+# fired on nothing: `clean` flattens the seeker block onto one line, so `^` never
+# matches. The first detector scored 0 of 219 INCLUDING the row it was written for.
+_HN_SEEKER_LABELS = tuple(
+    re.compile(rf"(?<![a-z]){p}\s*:", re.I)
+    for p in (
+        r"willing to relocate",
+        r"r[\u00e9e]sum[\u00e9e](?:\s*/\s*cv)?",
+        r"location",
+        r"remote",
+        r"e-?mail",
+        r"technologies",
+        r"seeking",
+    )
+)
+
+
+def _is_hn_seeker_post(text: str) -> bool:
+    """Does this comment use the job-SEEKER template rather than a hiring one?
+
+    THREE OR MORE labels, and the threshold is measured rather than chosen. Scored
+    against every hn row in a 102,799-row harvest [2026-08-20] -- 219 comments, of
+    which 1 is a seeker:
+
+        >= 3 of the seven labels      fires on 1 of 219   0 false positives
+        'willing to relocate:' alone  fires on 1 of 219   0 false positives
+        resume/cv OR relocate         fires on 2 of 219   1 FALSE POSITIVE
+
+    THE FALSE POSITIVE IS WHY `r\u00e9sum\u00e9` CANNOT DECIDE ALONE: a genuine listing
+    said "Resume:" because it was ASKING for one. So no single label is sufficient,
+    including the most seeker-specific one -- a seeker who omits it would still be
+    caught by the other six, and a hiring post has to use three before it is dropped.
+
+    WHAT THE ZERO DOES AND DOES NOT MEAN. 0 of 218 genuine hiring posts is an upper
+    bound of roughly 1.4% at 95% confidence, not proof of zero, and no hiring post in
+    that corpus reached even two labels -- so the margin is real but it is one thread
+    on one day. RECALL RESTS ON n=1: exactly one seeker row exists in the corpus, so
+    this is measured against a single example of what it is built to catch, and a
+    seeker using a different template is not covered by any of it.
+
+    Dropping the whole comment is the point rather than scrubbing the fields. The row
+    that motivated this carries a private individual's email and GitHub profile in
+    `title`, their location line in `company`, and the same details again in the 1,126
+    characters of `text` -- so a field-level fix leaves the body republishing them.
+    Re-publishing a third party's contact details is a decision, not a default.
+    """
+    return sum(bool(rx.search(text)) for rx in _HN_SEEKER_LABELS) >= 3
+
+
 def _hn_rows(tree, out: list) -> None:
     for c in tree.get("children", []):
         text, secs = clean_with_sections(c.get("text"))
         parts = [p.strip() for p in text.split("|")]
         if len(parts) < 2 or not parts[0]:
+            continue
+        if _is_hn_seeker_post(text):
             continue
         # STRUCTURE BEFORE THE STRIP, or not at all -- the same invariant `sections`
         # ships for headers. An HN comment ends its header at a BLOCK TAG, not a pipe

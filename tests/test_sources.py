@@ -3987,3 +3987,81 @@ def test_a_named_persons_contact_details_never_reach_source_extra():
     assert out["Salary Range"] == {"unit": "USD", "min_value": "1", "max_value": "2"}
     assert out["Referral"] == {"amount": "500", "unit": "USD"}
     assert out["Department"] == "Engineering"
+
+
+def test_a_lever_posting_with_no_body_at_all_reports_no_sections_not_an_empty_list():
+    """`sections: []` is a claim ABOUT a body -- "we read one and it had no headers".
+    With every Lever field empty there is no body for it to be about, and the row
+    asserted both "no body" (`text` -> None at the boundary) and "a body with no
+    headers" at once. 21 rows [102,799-row harvest, 2026-08-20], all Lever, because it
+    is the only adapter that BUILDS a body from parts that can all be absent.
+    """
+    assert sources._lever_text({"description": "", "lists": [], "additional": ""}) == (
+        "",
+        None,
+    )
+
+
+def test_a_lever_posting_with_a_headerless_body_still_reports_an_empty_list():
+    """The other half, and the reason this is fixed in the adapter rather than in
+    `clean_with_sections`: 1,137 rows genuinely have a body carrying no headers, and
+    from inside that function the two cases are indistinguishable. Only the caller
+    knows whether a body existed.
+    """
+    text, secs = sources._lever_text({"description": "plain body, no markup"})
+    assert text == "plain body, no markup"
+    assert secs == []
+
+
+def test_a_job_seeker_post_inside_a_hiring_thread_is_dropped():
+    """P34. `search_hn_whoishiring` already filters THREADS to "who is hiring", so a
+    seeker using the seeker template inside one is unreachable by any thread-level
+    filter. The live row carried a private individual's email and GitHub profile in
+    `title` and their location line in `company`.
+
+    THE PIPE IN THIS FIXTURE IS LOAD-BEARING. `_hn_rows` drops any comment with fewer
+    than two pipe-separated parts, and the real seeker row has exactly one pipe --
+    before the GitHub url -- which is precisely why it survived that gate and reached
+    the record. Without it here the comment is dropped by the OLD gate and this test
+    passes with the new one disarmed, which is how it was first written.
+    """
+    seeker = (
+        "Location: Blacksburg, Virginia, USA Remote: Yes (open to remote) "
+        "Willing to relocate: Yes Technologies: Java, Python "
+        "Resume/CV: https://example.com/cv " + chr(124) + " https://github.com/someone "
+        "Email: someone@example.edu Software Engineer with 3+ years."
+    )
+    out: list = []
+    sources._hn_rows({"children": [{"text": seeker, "id": 1, "author": "a"}]}, out)
+    assert out == [], "a seeker post reached the record"
+
+
+def test_the_seeker_filter_does_not_drop_a_hiring_post_that_asks_for_a_resume():
+    """The measurement that set the threshold at three labels rather than one.
+    Scored over 219 real hn comments, `resume/cv OR willing-to-relocate` fired
+    twice -- and the second was a GENUINE listing saying "Resume:" because it was
+    asking for one. No single label may decide, including the most seeker-specific.
+    """
+    hiring = (
+        "Acme Corp | Senior Backend Engineer | Remote (US) | 180k-230k. "
+        "We are hiring. Resume: send to jobs@acme.com and we will reply."
+    )
+    assert not sources._is_hn_seeker_post(hiring)
+    out: list = []
+    sources._hn_rows({"children": [{"text": hiring, "id": 2, "author": "b"}]}, out)
+    assert len(out) == 1, "a genuine hiring post was dropped"
+    assert out[0]["company"] == "Acme Corp"
+
+
+def test_the_seeker_labels_are_not_anchored_to_a_line_start():
+    """The first version of this detector scored 0 of 219 INCLUDING the row it was
+    written for, because it anchored each label with `^` under re.M -- and `clean`
+    flattens the seeker block onto one line, so `^` can never match. A detector that
+    fires on nothing looks exactly like a clean corpus.
+    """
+    one_line = (
+        "Location: Austin Remote: Yes Willing to relocate: No "
+        "Technologies: Go Email: x@example.com"
+    )
+    assert "\n" not in one_line
+    assert sources._is_hn_seeker_post(one_line)
