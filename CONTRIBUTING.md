@@ -258,6 +258,17 @@ append-only so an existing reference never changes meaning.)
   the convention has trained them to skim. **Apply the marker as you touch a site — never
   as a dedicated pass**, which buries real changes in churn.
 
+- **Overstating a limitation is the same failure as understating it — it just fails in the
+  direction that looks humble.** Everything else in this file guards against claiming too
+  much. This guards the reflex of accepting the harshest available reading of your own
+  work: it reads as rigour, it costs a reader real information, and **it is cheaper than
+  measuring, because you can do it without running anything.** The instance: an agent found
+  its labelling view had been one-sided and concluded its agreements "prove nothing" — the
+  other reader checked its own view, found it two-sided on every affected row, and pushed
+  back. Six labels were **single-reader-verified**, which is weaker than double-verified and
+  much stronger than luck. **Report the accurate degradation, not the most self-critical
+  one**, and name which of the two a reader is getting.
+
 - **WHEN EVERY VARIANT DIFFERS BY THE SAME AMOUNT, THE HARNESS IS THE VARIABLE.** This one
   fires *during* a run, on evidence, rather than telling you what to do beforehand — which
   makes it the most useful shape in this file. Three different gates each differing from
