@@ -3859,6 +3859,57 @@ def test_the_delimiter_no_longer_decides_whether_decoration_is_captured():
 
 
 
+def test_coerce_strips_edge_whitespace_without_moving_the_dedup_key():
+    """`title` and `location` arrive from vendors with edge whitespace on 9,874 and
+    1,894 rows of a 102,799-row harvest, and `engine._coerce` forced them to `str`
+    without ever stripping them.
+
+    THE ASYMMETRY IS THE DEFECT. `shortlist._build_row` has stripped exactly these two
+    fields for releases, so the CSV was clean while the record and the NDJSON shipped
+    the raw value -- a library consumer got the dirt the CLI user never saw.
+
+    THIS TEST EXISTED NOWHERE BEFORE, like the title_root one above: the full suite was
+    green on both sides of the bug.
+    """
+    from job_radar import dedup
+
+    # all five classes measured in the corpus, including the three a reader cannot see
+    for ws in (" ", "\u00a0", "\u202f", "\t", "\n"):
+        p = {
+            "title": f"{ws}Data Engineer{ws}",
+            "location": f"{ws}Austin, TX{ws}",
+            "company": "Acme",
+            "url": "https://x/1",
+            "source": "greenhouse",
+        }
+        engine._coerce(p)
+        assert p["title"] == "Data Engineer", repr(ws)
+        assert p["location"] == "Austin, TX", repr(ws)
+
+    # `company`, `url` and `source` are deliberately NOT stripped -- on a depth adapter
+    # `company` comes from the watchlist, not the vendor, so this is the wrong layer.
+    p = {"title": "t", "location": "l", "company": "  Acme  ", "url": "  u  ",
+         "source": "greenhouse"}
+    engine._coerce(p)
+    assert p["company"] == "  Acme  " and p["url"] == "  u  "
+
+    # Stripping runs BEFORE the nullable pass, so a whitespace-only location becomes
+    # None rather than a string that looks present and holds nothing.
+    p = {"title": "t", "location": "   ", "company": "c", "url": "u", "source": "s"}
+    engine._coerce(p)
+    assert p["location"] is None
+
+    # THE GUARANTEE THAT MADE THIS SAFE: `dedup_key` is the store's primary key and
+    # `id = short_id(dedup_key)` is user-facing, so a moved key renames a job someone
+    # may be holding. `normalize_title`/`normalize_location` already collapse every
+    # non-alphanumeric run, so stripping cannot move it -- pinned, not assumed.
+    for ws in (" ", "\u00a0", "\u202f", "\t", "\n"):
+        dirty = {"company": "Acme", "title": f"{ws}Data Engineer{ws}",
+                 "location": f"{ws}Austin, TX{ws}"}
+        clean = {"company": "Acme", "title": "Data Engineer", "location": "Austin, TX"}
+        assert dedup.dedup_key(dirty) == dedup.dedup_key(clean), repr(ws)
+
+
 def test_title_root_never_manufactures_a_word_no_employer_wrote():
     """`vocab._WORD_RE` is the tokenizer AND `title_root` is rebuilt by joining what it
     finds, so a character absent from the class is DELETED and the word splits at the

@@ -444,6 +444,33 @@ def _coerce(p: dict) -> dict:
     4. Derived fields are computed from what the adapter did send -- the title
        decomposition, and `seniority` when the source stayed silent.
     """
+    # EDGE WHITESPACE COMES OFF THE TWO DISPLAYED FREE-TEXT FIELDS, and the asymmetry
+    # it closes is the reason it is here rather than downstream: `shortlist._build_row`
+    # has been stripping exactly `title` and `location` for releases, so the CSV has
+    # been clean the whole time while the record and the NDJSON shipped the raw value.
+    # A library consumer got the dirt; the CLI user never saw it. 9,874 titles (9.6%)
+    # and 1,894 locations carry it [102,799-row harvest, 2026-08-20], and it is not all
+    # ordinary spaces: 9,791 space, but 57 NBSP, 21 U+202F, 14 tab and 2 newline, none
+    # of which a person eyeballing the value would see.
+    #
+    # `dedup_key` DOES NOT MOVE, which is what made this safe to do at all.
+    # `normalize_title` and `normalize_location` both run
+    # `re.sub(r"[^a-z0-9]+", " ", ...).strip()`, which already absorbs all five classes
+    # -- verified over all 9,874 rows, 0 keys change. So no user-facing job id shifts.
+    #
+    # BEFORE the two loops below, not after, so a whitespace-only `location` reaches
+    # the `_NULLABLE_TEXT` pass as "" and becomes None rather than a string that looks
+    # present and holds nothing. (0 such rows in that corpus; the ordering is free.)
+    #
+    # `company`, `url` and `source` are deliberately NOT here. `company` carries edge
+    # whitespace on 24 rows and on a DEPTH adapter it comes from the watchlist rather
+    # than the vendor, so stripping it at this boundary would be fixing the wrong
+    # layer; `url` and `source` carry it on 0.
+    for k in ("title", "location"):
+        v = p.get(k)
+        if isinstance(v, str):
+            p[k] = v.strip()
+
     for k in _REQUIRED_TEXT:
         v = p.get(k)
         if not isinstance(v, str):

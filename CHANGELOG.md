@@ -8,6 +8,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`title` and `location` shipped with the vendor's edge whitespace on them.**
+  `engine._coerce` forced every text field to `str` and never stripped one, so
+  **9,874 titles (9.6%) and 1,894 locations** carried leading or trailing whitespace
+  `[102,799-row harvest, 2026-08-20]` — and not only ordinary spaces: 9,791 space, but
+  **57 non-breaking spaces, 21 U+202F, 14 tabs and 2 newlines**, none of which a person
+  eyeballing the value would see.
+
+  **The asymmetry is the actual defect.** `shortlist._build_row` has stripped exactly
+  these two fields for releases, so `shortlist.csv` was clean the whole time while the
+  record and the NDJSON shipped the raw value — a library consumer got dirt the CLI
+  user never saw. Fixing only `title` would have left half of that in place with no
+  reason recorded for the half left behind.
+
+  **No user-facing job id moves.** `dedup_key` is the store's primary key and
+  `id = short_id(dedup_key)` is what a user holds, so a moved key renames a job.
+  `normalize_title` and `normalize_location` both collapse every non-alphanumeric run
+  before keying, which already absorbed all five whitespace classes — **verified over
+  all 9,874 rows, 0 keys change**, and pinned by a test rather than left as a claim.
+
+  Stripping runs **before** the nullable pass, so a whitespace-only `location` becomes
+  `None` instead of a string that looks present and holds nothing (0 such rows in that
+  corpus; the ordering is free). `company` (24 rows), `url` and `source` (0 each) are
+  deliberately untouched — on a depth adapter `company` comes from the watchlist rather
+  than the vendor, so this boundary is the wrong layer for it.
+
+  **There was no test for this either.** `test_coerce_strips_edge_whitespace_without_moving_the_dedup_key`
+  is the first coverage and was mutation-tested three ways — removing the strip,
+  narrowing it to `title` only, and widening it to `company`/`url` — each red on its
+  own, every one run from a tree verified green first.
+
 - **`title_root` emitted a string no employer wrote, on every title with an accented
   letter.** `vocab._WORD_RE` was `[A-Za-z0-9+#/&]+` and `title_root` is REBUILT by
   joining the tokens it finds — so a character outside the class is not ignored, it is

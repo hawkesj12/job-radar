@@ -265,7 +265,9 @@ job-radar --format ndjson --all --no-text --drop-empty > jobs.ndjson
 ```
 
 Measured per median record on a **102,799-row local harvest across 7,360 boards**
-`[2026-08-20]`, counting leaves — a nested key such as `title.raw` counts once:
+`[2026-08-20]`, counting leaves — a nested key such as `title.raw` counts once, an
+object that prunes to `{}` still counts as one key, and `source_extra`'s vendor keys
+count individually:
 
 | | keys | bytes |
 | --- | --- | --- |
