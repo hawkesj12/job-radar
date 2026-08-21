@@ -45,9 +45,19 @@ jobs:
       # developer machine already in Eastern those are the same answer, so the guards
       # are right by coincidence and a mutation run comes back green. Measured on such
       # a machine: mutating `tail = s[10:]` to `tail = s`, and `.astimezone(_ET)` to
-      # `.astimezone()`, BOTH survived a full 572-test run locally and both fail here
-      # -- 3 and 4 failures respectively. Pinning UTC makes every zone-sensitive
-      # assertion in the suite honest instead of accidentally true in one place.
+      # `.astimezone()`, BOTH survived a full 572-test run locally, and both fail under
+      # TZ=UTC -- 3 and 2 failures respectively.
+      #
+      # THIS PIN DID NOT CLOSE A CI GAP, and should not be read as one: GitHub's hosted
+      # runners already default to UTC, so CI would have caught both mutants without it.
+      # The hole was in LOCAL verification -- a mutation run reporting green on the very
+      # guard its commit message called load-bearing. What the pin buys is that the
+      # hazard is written down at the place that enforces it, and cannot silently
+      # regress if a runner default ever changes.
+      #
+      # Windows may be inert here: CPython on Windows takes its local zone from the OS
+      # rather than from TZ, so that leg is covered by the runner being UTC anyway, not
+      # by this line. Worth knowing only if a Windows-only date bug ever appears.
       TZ: UTC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
