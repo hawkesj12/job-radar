@@ -743,14 +743,21 @@ def derive_salary(p: dict) -> dict:
     """
     if p.get("salary_min") is not None or p.get("salary_max") is not None:
         return p
-    # AN ESTIMATE IS NOT A COMMITMENT, and this guard is the whole reason
-    # `_adzuna_pay` splits the columns in the first place. A predicted row has NULL
-    # commitment columns by design, so the fill-only test above waves it straight
-    # through -- and the display string is right there to parse. Caught by measuring,
-    # not by review: this function wrote 109106.0 into `salary_min` with
-    # basis="parsed" on a row whose 109106.69 was a model output. One forgotten
-    # WHERE clause downstream and every average built on the corpus is poisoned,
-    # which is the failure `_adzuna_pay`'s own comment records.
+    # AN ESTIMATE IS NOT A COMMITMENT, and the display string is what enforces that
+    # now. This function once wrote 109106.0 into `salary_min` with basis="parsed" on
+    # a row whose 109106.69 was a model output -- caught by measuring, not by review.
+    # The fix at the time was a pair of salary_estimated_* columns plus an early return
+    # here when they were set. Those columns were removed at 0.9.0, and the reason is
+    # worth keeping: measured on the live consumer's store, all 6,633 rows carrying an
+    # estimate ALSO rendered it as a `salary` string -- "$129,584-$129,584", a point
+    # estimate shaped like a posted range -- and 0 of them had a commitment figure. The
+    # separation the columns existed to enforce was defeated at the display layer on
+    # 100% of rows, so they bought false assurance rather than safety.
+    #
+    # `_adzuna_pay` now emits NO salary at all for a predicted row, so the guard is the
+    # `not display` return below: there is no string to parse and no column to leak
+    # into. Verified end to end through the real adapter path, including a row whose
+    # body quotes the model's own figure as prose.
     display = p.get("salary")
     if not display:
         return p
@@ -1062,7 +1069,6 @@ def _harvest(cfg, watchlist_path, companies):
         meta[norm(c.get("name", ""))] = {
             "frontier": bool(c.get("frontier")),
             "local": bool(c.get("local")),
-            "industry": c.get("industry", ""),
         }
         known_slugs.add(entry_key(c))
     known_companies = set(meta.keys())

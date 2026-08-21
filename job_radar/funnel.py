@@ -54,7 +54,7 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
     # cannot be used to stop early.
     if dry:  # no probing at all — just report what WOULD be probed
         return [
-            {**entry, "name": name, "industry": "(discovered)"}
+            {**entry, "name": name}
             for name, entry in list(candidates.values())[: cfg.funnel_max_new_per_run]
         ]
 
@@ -79,7 +79,7 @@ def funnel(breadth_postings, known_companies, known_slugs, cfg=None, dry=False):
         live = [c for c in ex.map(_probe, batch) if c]
 
     return [
-        {**c, "industry": "(discovered)", "source": "discovered"}
+        {**c, "source": "discovered"}
         for c in live[: cfg.funnel_max_new_per_run]
     ]
 

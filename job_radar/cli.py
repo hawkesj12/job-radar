@@ -244,11 +244,11 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
     each holds half of what the feed needs:
 
       * the HARVEST row (`by_key`) carries the 0.7.0 contract -- structured location,
-        remote + basis, category/team/parent_company, salary, tags, seniority
+        remote + basis, category/team, salary, tags, seniority
       * the STORE row (`merged`) carries the HISTORY -- id, first_seen, status, and
         any llm_score
 
-    The store is a nineteen-column CSV and deliberately does not persist the contract
+    The store is a eighteen-column CSV and deliberately does not persist the contract
     fields, so emitting straight from `merged` would produce a feed of nulls that
     looked structurally correct. Emitting straight from the harvest would lose
     `status`, so a consumer could not tell an applied role from a new one. Join them

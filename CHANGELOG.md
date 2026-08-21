@@ -175,15 +175,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Removed — BREAKING
 
 - **`industry`, `parent_company`, `salary_estimated_min` and `salary_estimated_max` are
-  gone.** All four were empty on **102,799 of 102,799 rows** of a harvest across 7,360
-  boards and eleven sources. The record is **49 fields → 45**.
+  gone.** The record is **49 fields → 45**. All four were empty on 102,799 of 102,799
+  rows of a harvest across 7,360 boards — but **that number is only evidence for two of
+  them**, and saying otherwise would be a population error a reader can falsify:
 
-  They were not empty for the same reason, and the difference is the argument for
-  cutting them anyway:
+  - `industry` and `parent_company`: genuinely empty, and the corpus is fair evidence.
+  - **`salary_estimated_min`/`_max` were empty because that harvest had no Adzuna keys**
+    — the one adapter that fills them could not run. In the live consumer's store they
+    hold **6,633 of 67,481 rows**, 92.8% of its Adzuna rows and 73% the size of the
+    entire commitment column. They are **discarded deliberately**, not swept up as dead
+    weight.
 
-  - **`industry` could never be filled from a posting.** It came from a *watchlist
-    annotation* — `engine` copied it off the caller's company entry — so a consumer that
-    keeps its universe anywhere but a curated JSON file got nothing, forever. It was
+  - **`industry` was fillable only by hand-annotating a watchlist**, never from a
+    posting — `engine` copied it off the caller's company entry. The shipped example
+    watchlist did exactly that on ten companies and its `_comment` advertised the flag,
+    so anyone who ran `init` and used that file **has a populated `industry` column**.
+    Those ten annotations are removed with the field, and **a pre-0.9.0 `shortlist.csv`
+    loses its `industry` values on the next scan** — silently, atomically. The merge
+    itself is safe (verified: sticky rows keep `status`, `first_seen` and `llm_score`,
+    ids unmoved) but that column's data is gone. It was
     also the record's only field using `""` rather than `null` for absent (it sat in
     `_REQUIRED_TEXT`, so it was str-coerced), which quietly broke the contract's own
     rule that `None` means "the source did not say" on every row. And it appeared
@@ -202,7 +212,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   returns at its display-string check and can never parse the figure into a commitment
   column. Same property, one fewer column, and both tests were re-pointed at the new
   mechanism rather than deleted. **The prediction is discarded, not relocated** — if you
-  were reading Adzuna's estimates, they are gone.
+  were reading Adzuna's estimates, they are gone — and a downstream store declaring its
+  own `salary_estimated_*` columns sees them go permanently NULL on upgrade rather than
+  error.
+
+  **Why discarding beats separating, measured.** The pair existed so a model's guess
+  could never sit beside a commitment. In the live consumer's store, **all 6,633 rows
+  carrying an estimate also rendered it as a `salary` display string** —
+  `"$129,584–$129,584"`, a point estimate shaped like a posted range — and **0 of them
+  had a commitment figure**. The separation was defeated at the display layer on 100% of
+  rows, so the columns bought false assurance rather than safety, while nothing
+  downstream ever read them.
 
   **One migration path broke and it is called out above:** the `department`
   deprecation note recommended `parent_company` as the recovery on USAJOBS, because that

@@ -2338,20 +2338,17 @@ def _adzuna_pay(j: dict) -> dict:
     `util.salary_range` already stopped rendering the fake range `$109,106-$109,106`,
     and its comment names this exact failure -- but removing the RANGE appearance is
     not the same as removing the COMMITMENT appearance, and the bare figure kept it.
-    `SALARY_BASES` deliberately has no `estimated` member so that "a figure in
-    salary_min is always one an employer committed to"; `salary` is the display of
-    those columns, so a row with no commitment gets no string. The figures are not
-    lost -- they are in salary_estimated_*, where a consumer that wants to show an
-    estimate must reach for them deliberately and label them itself.
+
+    NOTHING IS EMITTED FOR A PREDICTED ROW AS OF 0.9.0, and the figures ARE lost. The
+    salary_estimated_* pair that used to carry them was removed: measured on the live
+    consumer's store, all 6,633 rows holding an estimate also rendered it as a `salary`
+    string and 0 had a commitment figure, so the columns bought false assurance rather
+    than separation -- and nothing downstream ever read them. `salary` staying empty is
+    now the whole protection: `engine.derive_salary` returns at its display-string check
+    and can never parse the figure into `salary_min`.
     """
     lo, hi = j.get("salary_min"), j.get("salary_max")
     if str(j.get("salary_is_predicted")) == "1":
-
-        def _n(v):
-            try:
-                return float(v) or None
-            except (TypeError, ValueError):
-                return None
 
         # NOTHING IS EMITTED FOR A PREDICTED ROW. The estimate columns this used to
         # write were removed at 0.9.0 -- empty on 102,799 of 102,799 rows of a harvest

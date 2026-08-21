@@ -1,5 +1,5 @@
 {
-  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable|workday|rippling|teamtailor), and slug (the last path segment of the company's public job-board URL). WORKDAY IS DIFFERENT: it needs a three-part key -- slug (tenant) + host (the wdN shard) + site -- because the site slug is unguessable. Get more with `job-radar seed workday`. The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles), industry.",
+  "_comment": "A generic starter list. Replace with your own targets. Each entry: name, ats (greenhouse|lever|ashby|smartrecruiters|workable|workday|rippling|teamtailor), and slug (the last path segment of the company's public job-board URL). WORKDAY IS DIFFERENT: it needs a three-part key -- slug (tenant) + host (the wdN shard) + site -- because the site slug is unguessable. Get more with `job-radar seed workday`. The funnel auto-adds companies it discovers, so this only needs to seed the list. Optional flags: local:true (adds a bonus), frontier:true (penalizes non-applied roles).",
   "companies": [
     {
       "name": "Anthropic",
@@ -126,80 +126,70 @@
       "ats": "workday",
       "slug": "accenture",
       "host": "wd103",
-      "site": "AccentureCareers",
-      "industry": "consulting"
+      "site": "AccentureCareers"
     },
     {
       "name": "Advocate Aurora Health",
       "ats": "workday",
       "slug": "aah",
       "host": "wd5",
-      "site": "external",
-      "industry": "healthcare"
+      "site": "external"
     },
     {
       "name": "Academy Sports + Outdoors",
       "ats": "workday",
       "slug": "academy",
       "host": "wd1",
-      "site": "Careers",
-      "industry": "retail"
+      "site": "Careers"
     },
     {
       "name": "3M",
       "ats": "workday",
       "slug": "3m",
       "host": "wd1",
-      "site": "Search",
-      "industry": "manufacturing"
+      "site": "Search"
     },
     {
       "name": "Avanade",
       "ats": "workday",
       "slug": "accenture",
       "host": "wd103",
-      "site": "avanadecareers",
-      "industry": "consulting"
+      "site": "avanadecareers"
     },
     {
       "name": "ABC Supply",
       "ats": "workday",
       "slug": "abcsupply",
       "host": "wd1",
-      "site": "ABCSupplyCareers",
-      "industry": "distribution"
+      "site": "ABCSupplyCareers"
     },
     {
       "name": "AAA Mid-Atlantic",
       "ats": "workday",
       "slug": "aaamidatlantic",
       "host": "wd5",
-      "site": "AAAMidAtlantic",
-      "industry": "insurance"
+      "site": "AAAMidAtlantic"
     },
     {
       "name": "AllianceBernstein",
       "ats": "workday",
       "slug": "abglobal",
       "host": "wd1",
-      "site": "alliancebernsteincareers",
-      "industry": "finance"
+      "site": "alliancebernsteincareers"
     },
     {
       "name": "Ace Hardware",
       "ats": "workday",
       "slug": "acehardware",
       "host": "wd1",
-      "site": "AHHS_External",
-      "industry": "retail"
+      "site": "AHHS_External"
     },
     {
       "name": "23andMe",
       "ats": "workday",
       "slug": "23andme",
       "host": "wd5",
-      "site": "23",
-      "industry": "biotech"
+      "site": "23"
     }
   ]
 }

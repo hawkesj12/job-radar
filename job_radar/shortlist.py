@@ -10,7 +10,7 @@ Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
 salary, company, title, department, employment_type, location,
 source, url, signals, dedup_key
 
-THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 19 columns
+THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 18 columns
 are a HUMAN shortlist you open in a spreadsheet; `emit.py`'s NDJSON is the machine
 contract, and a test asserts every `engine._CONTRACT_FIELDS` member appears there.
 So contract fields land here only when a person reading a row wants them —
