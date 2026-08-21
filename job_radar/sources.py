@@ -1695,20 +1695,19 @@ def fetch_rippling(slug: str, keep=None):
                 "location": loc.get("label", "") if isinstance(loc, dict) else "",
                 "url": j.get("url", ""),
                 "posted": "",
-                # THE ONLY ADAPTER OF NINETEEN THAT SET NO `team` AND NO `category`.
-                # Every other one assigns its org unit to `team` (greenhouse, lever,
-                # ashby, smartrecruiters, workable) or its job family to `category` on
-                # the line beside the deprecated `department` it also fills; this one
-                # filled `department` alone. So the eventual removal of `department`
-                # at 1.0 would silently drop Rippling's org unit from every row unless
-                # this line exists first. Invisible to any corpus measurement --
-                # rippling is keyless but was not among the 14 sources in the harvest
-                # this was measured on; found by reading all nineteen adapters, which
-                # is the only method that covers a source that did not run.
-                # `department.label` is an org unit ({"id": "Eng", "label":
-                # "Engineering"}) -- the same vendor shape the other four map to
-                # `team`. Set BESIDE `department`, not instead of it, so 1.0 stays a
-                # one-line cut.
+                # THE PRECONDITION FOR THE 0.9.0 REMOVAL, and it had to land first.
+                # This was the ONLY adapter of nineteen that set no `team` and no
+                # `category`: every other one assigned its org unit to `team`
+                # (greenhouse, lever, ashby, smartrecruiters, workable) or its job
+                # family to `category` on the line beside the `department` it also
+                # filled, so cutting that field cost them nothing -- while here it
+                # would have silently dropped Rippling's org unit from every row.
+                # Invisible to any corpus measurement: rippling is keyless but was not
+                # among the sources in the harvest the cut was measured on. Found by
+                # reading all nineteen adapters, which is the only method that covers a
+                # source that did not run. `department.label` is an org unit
+                # ({"id": "Eng", "label": "Engineering"}) -- the same vendor shape the
+                # other four map to `team`.
                 "team": dept.get("label") if isinstance(dept, dict) else None,
                 "employment_type": "",
                 "salary": "",
@@ -3132,11 +3131,19 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # that shut yesterday is worse than no job: it wastes the one thing
                 # the user actually spends, which is the time to read and apply.
                 "expires": to_date(d.get("ApplicationCloseDate")),
-                # PRESERVED byte-identical (deprecated, removed at 1.0) -- but it
-                # was never a department. "Department of Veterans Affairs" is the
-                # EMPLOYER, and pouring it into a category column is how a
-                # downstream store ended up with employer names among its most
-                # common "categories". The three keys below say what each thing is.
+                # THE ONE PLACE THE 0.9.0 REMOVAL COST INFORMATION. `DepartmentName`
+                # ("Department of Veterans Affairs") is the EMPLOYING DEPARTMENT, and
+                # it rode in the deprecated `department` until that field was cut. Of
+                # nineteen adapters this is the only one whose value is not recoverable
+                # from the two keys below: `team` is `SubAgency`, a FACILITY (77 of 82
+                # live federal rows carry one, e.g. "Central Virginia VA Health Care
+                # System"), and `category` is the OPM series. `parent_company` was the
+                # documented recovery and went earlier in the same release. So the
+                # employing department is now simply unmapped here -- accepted, not
+                # overlooked, and asserted in the parser test so it stays visible.
+                # Pouring it into a category column is how a downstream store ended up
+                # with employer names among its most common "categories"; the two keys
+                # below say what each thing actually is.
                 "team": d.get("SubAgency") or None,
                 # OPM occupational series -- a real, coded job family.
                 "category": ", ".join(

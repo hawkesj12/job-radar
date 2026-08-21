@@ -40,7 +40,7 @@ _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Greenhouse board ranked EQUAL to a RemoteOK redirect — the one distinction the
 # product is built on, absent from the table that exists to express it. A DEPTH
 # source IS the employer's applicant-tracking system, so its copy is the canonical
-# record: the real apply URL, the full description, the accurate department. Google
+# record: the real apply URL, the full description, the employer's own team. Google
 # for Jobs sits in the middle because its apply_options resolve to direct-to-company
 # links. Everything else is an aggregator serving a redirect.
 _DEPTH_PREF, _GOOGLE_PREF, _AGGREGATOR_PREF = 2, 1, 0
@@ -88,9 +88,9 @@ _CONTRACT_FIELDS = (
     "title_level",  # I | II | III | IV
     "title_qualifiers",  # list[str] | None -- domain/geo decoration
     # `category` is the catalog's `function` -- the JOB FAMILY ("Data Science"), free
-    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` (and its
-    # deprecated alias `department`) is the catalog's `org_unit` -- the EMPLOYER'S OWN
-    # group name ("Field Engineering"). `catalog/_SCHEMA.md` splits `function` /
+    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` is the
+    # catalog's `org_unit` -- the EMPLOYER'S OWN group name ("Field Engineering"). It
+    # had a deprecated alias, `department`, removed at 0.9.0. `catalog/_SCHEMA.md` splits `function` /
     # `org_unit` / `employer_org` precisely because five adapters were pouring all
     # three into one column, and it records the cost: 5,050 distinct values including
     # employer names.
@@ -214,7 +214,8 @@ _CONTRACT_FIELDS = (
 # and a posting with no title is not a posting.
 # `text` deliberately keeps its name. `body` reads better, but it is a released,
 # README-documented field with call sites in the only consumer, and renaming it buys
-# a nicer word and nothing else. If it ever moves it moves at 1.0 with `department`.
+# a nicer word and nothing else. If it ever moves, it moves at 1.0; `department`,
+# which used to be the other half of that sentence, went at 0.9.0 instead.
 _NULLABLE_TEXT = (
     "posted", "salary", "text", "location", "employment_type",
 )  # fmt: skip
