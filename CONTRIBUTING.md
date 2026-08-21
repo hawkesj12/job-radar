@@ -216,6 +216,26 @@ real measurement is involved in each.
   valid checks are runtime membership (`X in module.Y`) or reading the literal. Grep
   answers "does this string appear in this file" — a different question that happens to
   return a number, and the number is what makes it feel like an answer.
+- **A measurement is evidence only about the tree it was taken on. Name that tree, then
+  check what changed between it and the code you are arguing about.** This one has
+  recurred three times in a single release, in three costumes: a field measured empty on
+  a corpus whose *source mix* excluded the only adapter that fills it; a guard
+  mutation-tested on a machine whose *timezone* happened to match it; and a leak measured
+  on the *released version* while two commits earlier in the same unreleased branch had
+  already closed it. Every one was a real number, correctly computed, describing
+  something other than the thing under discussion.
+
+  The mechanical form, and it is two commands:
+
+  ```bash
+  git log --oneline <tree-the-measurement-came-from>..HEAD -- <the-files-it-touches>
+  git merge-base --is-ancestor <the-fix-you-think-is-missing> HEAD && echo "already in"
+  ```
+
+  If anything comes back, the measurement predates the code and cannot justify a change
+  to it. Production is a *tree*: a number from a live store is evidence about the version
+  that store runs, not about `HEAD`.
+
 - **Before reading a number as damage, ask what it would look like if nothing were
   wrong — then measure *that*.** Compare against the prior commit (`git show <rev>^:path`),
   never against your expectation. This is the general form of the wrong-denominator
