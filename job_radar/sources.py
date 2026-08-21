@@ -2306,7 +2306,17 @@ def _himalayas_rows(jobs, out, seen=None):
                 "tags": [x for x in (j.get("categories") or []) if isinstance(x, str)]
                 or None,
                 "employment_type": j.get("employmentType", ""),
-                "salary": salary_range(j.get("minSalary"), j.get("maxSalary")),
+                # THE CURRENCY REACHES THE RECORD AND NOT THE DISPLAY, which is the
+                # half of that discard the 0.8.x fix below did not close: `vocab.salary`
+                # gets `currency` on the very next line while the string a listing page
+                # RENDERS was still built without it, so a Toronto band showed as
+                # `$168,000-$231,000` and a Polish one as `$25,200` for PLN -- about
+                # $6,300. 46 rows [full harvest, 0.9.0]. himalayas is the only one of
+                # `salary_range`'s four call sites this reaches: remoteok and adzuna
+                # hard-code USD and usajobs is US-federal, so a bare `$` is right there.
+                "salary": salary_range(
+                    j.get("minSalary"), j.get("maxSalary"), j.get("currency")
+                ),
                 # `salaryPeriod` ("annual") and `currency` ("USD") are real fields,
                 # confirmed live 2026-08-05 -- 7 of 20 rows carry them. Both were
                 # being discarded while the two numbers beside them were kept.
