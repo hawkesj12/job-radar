@@ -82,10 +82,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `promote`) against 763 carrying it as a word.
 
   **`unspecified` now means NO QUANTITY WORD IN THE WINDOW** — not a word judged
-  insufficiently specific. 41.9% of rows with a salary display, and most of those are the
-  **28.0% whose display string cannot be found in their own body at all**, leaving no
-  window to read; those rows already get no currency and no period either. **A kind is
-  still never inferred from nothing.**
+  insufficiently specific. **41.8%** of rows with a salary display, re-derived on the
+  shipped tree.
+
+  **The 28.0% floor under it is a SEPARATE fact and is kept separate deliberately.**
+  Those rows cannot locate their display string in their own body at all, so there is no
+  window to read and no cue rule can touch them — they already get no currency and no
+  period either. It is the one figure in this set that does not move when the rules
+  change, and conflating it with the `unspecified` rate is exactly what hid both numbers
+  drifting across three commits. **A kind is still never inferred from nothing.**
 
   **There is deliberately no `hourly_rate`.** An hourly rate is base pay expressed per
   hour: the quantity is base, the interval is `salary_period == "hour"`, already
