@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Seventeen ways a check comes back clean for the wrong reason
+## Eighteen ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -209,8 +209,9 @@ Every one of these produced a confident, wrong number in this repo:
 | 16 | **a number that describes the right code and the wrong rows** | every figure was derived from the correct tree by the correct implementation — ablations, transition counts, corpus totals — and every one described the population AS A WHOLE rather than the population under dispute. The 86 rows that decided the question were readable at any point and nobody read them. Form 14 stopped describing the tree; form 15 never described your code; this one describes both correctly and answers a different question |
 | 17 | **a ratio whose halves come from different instruments** | *"set the field on 411 of 41,665 rows"*. `411` was the population that could REACH the call, not the number labelled (222). `41,665` came from the fingerprint harness's `salary_min` count and matches no population in this corpus — the real denominator is 42,072. **Each half is individually real, so there is no wrong number to spot**, and neither can be checked against the other because they were never in the same frame. Worse than form 15: the surviving half lends the borrowed one credibility |
 | 18 | **a verification that REIMPLEMENTS the thing under test** | three gate variants were compared against the shipped classifier and all three differed by **exactly 60 rows**. The gate was never the variable — the harness had drifted from the shipped function and would have reported 60 phantom differences whatever it tested. **A reimplementing verification measures two implementations at once and cannot say which one moved.** Also the subtlest place it hides: a SAMPLE drawn against a reimplementation is a sample of the wrong population, and every rate computed on it is exact and about something else |
+| 19 | **the requester leaked the answer into the instruction** | *"`bonus` precision is 0 of 25... now label the sample blind."* Every blinding protocol guarded the two labellers from **each other**; nobody guarded them from the **orchestrator**, who sees every result first and writes every instruction. The second label set could then only DISCONFIRM — agreement was worth nothing, and agreement is what it produced. **Raised by the labeller, about its own compromised work, not by the person who caused it** |
 
-Forms 8, 9, 11, 14, 15, 16, 17 and 18 are the dangerous ones, because all eight look like good
+Forms 8, 9, 11, 14, 15, 16, 17, 18 and 19 are the dangerous ones, because all nine look like good
 work — a real measurement is involved in each. **16 is the worst of them:** nothing about
 it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
@@ -257,6 +258,14 @@ append-only so an existing reference never changes meaning.)
   auditor to "read the sentence around each hit" depends on care at exactly the moment
   the convention has trained them to skim. **Apply the marker as you touch a site — never
   as a dedicated pass**, which buries real changes in churn.
+
+- **Whoever requests a blind measurement must not state the expected answer, or any part of
+  it, in the request.** Blinding protocols are written to keep independent measurers away
+  from each other's results — and then the person coordinating them, who has seen every
+  result and writes every instruction, hands one over in the preamble. **A measurement made
+  against a known answer can only disconfirm it**; when it agrees, it has added nothing, and
+  that is the outcome you will usually get. **Say what to measure and why it matters. Never
+  what the other reader found.**
 
 - **A NARROWED VIEW FAILS AS CONFIDENCE, NOT AS SILENCE.** *A reader with no evidence
   hesitates; a reader with half the evidence commits.* An agent labelled 150 rows through a
