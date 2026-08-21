@@ -477,6 +477,16 @@ output. Staring harder at a grep result has never once worked here.
 
 ## Measurements
 
+**A percentage about a PIPELINE STAGE is meaningless without the config named in the same
+sentence.** A gate's drop rate is a property of the configuration, not of the corpus, and the
+two configs in play can sit at opposite ends. Measured: `engine._consume`'s remote gate
+discards **82.0% of relevance-surviving rows under the shipped defaults**
+(`remote_only=True`) and is a **no-op returning True unconditionally** under the config that
+produced our corpus (`remote_only=False`). **Both readings of "is this placement cosmetic?"
+are true of some real configuration.** Write *"82.0% under the shipped defaults; a no-op
+under `remote_only=False`"* — never a bare percentage. The by-source spread is as wide:
+smartrecruiters 97.4% dropped, greenhouse 85.0%, lever 56.7%, remoteok 11.8%.
+
 **Tag every number with where it came from**, inline and next to the number:
 `[local 94-board harvest, 0.9.0]`, `[live prod]`, `[fresh harvest]`. An untagged count
 should be read as sloppy.
