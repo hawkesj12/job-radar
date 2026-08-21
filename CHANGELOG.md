@@ -187,6 +187,68 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rows with no header at all. Comment corrected; redesign filed.
 
 
+- **A job SEEKER's post was ingested as a job, republishing a private individual's
+  contact details.** One row carried a personal email address **and** a GitHub profile
+  in `title`, with their location line in `company` and the same details again in the
+  1,126 characters of `text`. `search_hn_whoishiring` already filters *threads* to
+  "who is hiring", so this is a seeker using the seeker template **inside a hiring
+  thread** — no thread-level filter can reach it, and it needs a per-comment shape
+  test. `_hn_rows` now drops a comment carrying **three or more** of the seven seeker
+  labels (`Willing to relocate:`, `Résumé/CV:`, `Location:`, `Remote:`, `Email:`,
+  `Technologies:`, `Seeking:`).
+
+  **Three, not one, and the threshold is measured.** Scored over every hn row in a
+  102,799-row harvest — 219 comments, of which 1 is a seeker: the three-label rule and
+  `Willing to relocate:` alone each fire on exactly that row, while
+  `résumé/cv OR relocate` fires **twice** — the second a genuine listing that said
+  "Resume:" because it was *asking* for one. So no single label may decide, including
+  the most seeker-specific.
+
+  **What the zero does not mean.** 0 of 218 genuine hiring posts is an upper bound of
+  roughly **1.4% at 95% confidence**, not proof of zero — though no hiring post in that
+  corpus reached even two labels, so the margin is real. **Recall rests on n=1:** the
+  corpus contains exactly one seeker row, so the rule is measured against a single
+  example of what it exists to catch, and a seeker using a different template is not
+  covered. The whole comment is dropped rather than the fields scrubbed, because the
+  details appear in `text` as well.
+
+- **A Lever posting with no body at all claimed both "no body" and "a body with no
+  headers".** `sections: []` means "we read a body and it had no headers" — a claim
+  *about* a body. With every Lever field empty there is no body for it to be about:
+  `clean_with_sections("")` returns `("", [])`, `""` normalizes to `None` at the engine
+  boundary, and the row then asserted both states at once. **21 rows**
+  `[102,799-row harvest, 2026-08-20]`, all Lever, because it is the only adapter that
+  *builds* a body out of parts that can all be absent. Fixed in the adapter, not in
+  `clean_with_sections`, which must keep returning `[]` for the **1,137** rows that
+  genuinely carry a body with no headers — from inside that function the two cases are
+  indistinguishable, and only the caller knows whether a body existed.
+
+- **A section header was built by a second, disagreeing copy of the text pipeline.**
+  `sections._detag` replaced every tag with a space — including an inline tag sitting
+  **inside a word** — while `util._clean_decoded` deletes an inline run followed by
+  lower case. Two pipelines over the same bytes, and `clean_with_sections` locates a
+  section by searching for its header **in that text**, so the disagreement broke the
+  lookup: the record published `"About t he Role"` beside a body reading
+  `"About the Role"`, and `"Health can't wait ."` beside `"Health can't wait."`
+  Measured `[20 live boards, 6,267 postings, 67,678 sections, 2026-08-21]`: **3,962
+  headers were absent from their own text; 3,882 are repaired and 0 are lost.**
+
+  **The spans were the real cost.** A header that cannot be found leaves the search
+  position un-advanced, so the next section is searched for from too far back —
+  **2,372 spans move**, 2,248 of them zero-length, i.e. empty sections anchored to the
+  wrong place entirely. The guard that steps past a header was never broken; it was
+  being handed a key that did not fit the lock, and its fixture uses a findable header
+  so it could not reach this. Classification barely moves, which is the expected shape
+  rather than a weak result — `classify` lowercases and strips before matching, so
+  exactly **1 of 67,678** changes (`"A bout the Team:"` → `about_company`).
+
+  **Named residual: 80 headers are still unfindable, and 50 of those are deliberate.**
+  `_clean_decoded` turns a block end into a newline; adopting that here would find
+  those 50 and put a literal newline inside a published `header` string in the NDJSON
+  and the CSV. A header is one line by construction. The other 30 are a separate
+  defect in `_header_at`'s tail absorption, not fixed here and not folded into the
+  figures above.
+
 - **`title` and `location` shipped with the vendor's edge whitespace on them.**
   `engine._coerce` forced every text field to `str` and never stripped one, so
   **9,874 titles (9.6%) and 1,894 locations** carried leading or trailing whitespace
