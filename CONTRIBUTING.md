@@ -258,6 +258,33 @@ append-only so an existing reference never changes meaning.)
   the convention has trained them to skim. **Apply the marker as you touch a site — never
   as a dedicated pass**, which buries real changes in churn.
 
+- **A NARROWED VIEW FAILS AS CONFIDENCE, NOT AS SILENCE.** *A reader with no evidence
+  hesitates; a reader with half the evidence commits.* An agent labelled 150 rows through a
+  view showing only the text BEFORE each figure. Three of its four errors were not the
+  empty-view case — the truncation showed them `base` and stopped, when the deciding phrase
+  sat after the figure:
+
+  ```
+  #37  before=[base]  after=[ote]       truth=ote
+  #42  before=[base]  after=[base,ote]  truth=ote
+  #72  before=[base]  after=[bonus]     truth=ote
+  ```
+
+  **Applies to every window, excerpt, `head -n` and truncated log in this repo**, not just
+  to labelling. When you narrow a view, the risk is not that you will see nothing — it is
+  that you will see something coherent and wrong. **State your window, on both sides.**
+
+- **Exposure is not error, and an exposure figure quoted alone reads as an error rate.**
+  45 of 150 rows were exposed to that truncated view; **4 were actually wrong.** Report both
+  and in that order. Quoting 45 alone would be overstating a limitation — the rule below,
+  failing in the direction that looks rigorous.
+
+- **A count over a derived population names the instrument that derived it, in the same
+  sentence as the count.** Two agents each scanned "the same" 150 rows for post-figure cues,
+  using different cue lists, and got `{49,55,57,58,70}` and `{31,37,42,58,59,66,67,70,72,95}`
+  — overlapping by two. **Neither disclosed its list, so the numbers looked comparable and
+  were not**, and nothing in either report would have revealed it.
+
 - **Overstating a limitation is the same failure as understating it — it just fails in the
   direction that looks humble.** Everything else in this file guards against claiming too
   much. This guards the reflex of accepting the harshest available reading of your own
