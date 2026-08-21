@@ -6,6 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`sections.section_text(record, kind)` — the reader for the spans the record already
+  carries.** Everything that parses a posting's prose for one fact (pay, requirements,
+  travel) should read the section that fact lives in rather than the whole body; this is
+  that surface. Returns **three states**, and the middle one is the point: `None` when
+  there is no section of that kind **or** its span could not be located, `""` when the
+  section is present and **genuinely empty**, and the text otherwise.
+
+  **`""` is not a near-miss for `None`.** `clean_with_sections` gives a header with
+  nothing under it a zero-length span deliberately — "an empty section, not a failed
+  lookup" — and that is **93,054 of 981,857 located spans** `[102,799-row harvest,
+  2026-08-20]`. Collapsing them into `None` would destroy the same two-state distinction
+  `sections: []` keeps against `sections: null`.
+
+  **The collapse it DOES make is stated in the docstring with its count:** "no such
+  section" and "the section exists but could not be located" both return `None` —
+  **4,667 spans across 3,098 rows** — because a caller wanting to read that section
+  behaves identically either way. A caller needing to tell them apart reads
+  `record["sections"]` directly.
+
+  **Bounds-checked, not just key-checked, and the silent failure is the reason.** The
+  obvious guard is the missing `start` key, which raises. The dangerous one does not:
+  `text[start:end]` with `end` past the end of `text` **returns a short slice, or `""`
+  when `start` is also past** — indistinguishable from an empty section. That is **0
+  spans against a body this engine produced and 36,270 against a downstream copy that
+  truncated `text` without the spans that index it**, so it arrives from a consumer's
+  data. A span that does not fit its text is a disagreement, and `None` is the honest
+  answer to a disagreement.
+
+  **KNOWN CEILING, inherited by every consumer:** `type` is `None` on **492,909 of
+  986,524 spans — almost exactly half.** Those are real headers the classifier could not
+  name, so a `kind` lookup reaches at most half the structure a posting has, and a `None`
+  often means "we found a header and could not classify it" rather than "the employer
+  wrote none". Published per-kind coverage (`requirements` 83.8%, `compensation` 22.5%)
+  is a share of ROWS, not a claim about the other half of the spans.
+
 ### Fixed
 
 - **`title` and `location` shipped with the vendor's edge whitespace on them.**

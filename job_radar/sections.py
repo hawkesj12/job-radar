@@ -381,3 +381,64 @@ def split(body: str) -> list[tuple[str | None, str, str]]:
         end = marks[i + 1][0] if i + 1 < len(marks) else len(body)
         out.append((classify(head), head, body[e:end]))
     return out
+
+
+def section_text(p: dict, kind: str) -> str | None:
+    """The text of the FIRST section of `kind` in a harvested record, or None.
+
+    THE READER for the spans `clean_with_sections` produces. Everything that parses a
+    posting's prose for one specific fact -- pay, requirements, travel -- should read
+    the section that fact lives in rather than the whole body, and this is that
+    surface.
+
+    THREE RETURN STATES, and the middle one is the point:
+
+        None   there is no section of this kind, OR its span could not be located
+        ""     the section IS present and is genuinely EMPTY
+        str    the section's text
+
+    `""` IS NOT A NEAR-MISS FOR None. `clean_with_sections` gives a header with nothing
+    under it -- one bold line immediately followed by the next -- a ZERO-LENGTH span at
+    the right place, deliberately, "an empty section, not a failed lookup". 93,054 of
+    981,857 located spans are zero-length [102,799-row harvest, 2026-08-20]. Collapsing
+    those into None would destroy the same two-state distinction `sections: []` (we read
+    the body, it had no headers) keeps against `sections: null` (nobody said).
+
+    THE COLLAPSE THIS DOES MAKE, stated because a None must not be read as more than it
+    is: "no such section" and "the section exists but we could not locate its text" both
+    return None. A section whose text could not be found emits NO offsets rather than
+    guessed ones -- 4,667 spans across 3,098 rows -- and a caller wanting to read that
+    section behaves identically in both cases, so they are one answer here. A caller that
+    needs to tell them apart must read `p["sections"]` itself and look for an entry with
+    a matching `type` and no `start`.
+
+    KNOWN CEILING, and every consumer of this inherits it: `type` is None on 492,909 of
+    986,524 spans -- almost exactly half. Those are real headers the classifier could not
+    put a name to, so a `kind` lookup reaches at most half the structure a posting
+    actually has, and a None here often means "we found a header and could not classify
+    it" rather than "the employer did not write one". Published per-kind coverage
+    (`requirements` 83.8%, `compensation` 22.5%) is a share of ROWS, not a claim that the
+    other half of the spans is empty.
+
+    BOUNDS-CHECKED, NOT JUST KEY-CHECKED. The obvious guard is for the missing `start`
+    key, which raises. The dangerous one is silent: `text[start:end]` with `end` past the
+    end of `text` does NOT raise in Python -- it returns a short slice, or "" when
+    `start` is also past the end. That is 0 rows against a body this engine produced and
+    36,270 spans against a downstream copy that truncated `text` without the spans that
+    index it, so the failure arrives from a CONSUMER's data and looks exactly like an
+    empty section. A span that does not fit its text is a disagreement, and the honest
+    answer to a disagreement is None.
+    """
+    text = p.get("text")
+    if not isinstance(text, str):
+        return None
+    for s in p.get("sections") or ():
+        if not isinstance(s, dict) or s.get("type") != kind:
+            continue
+        start, end = s.get("start"), s.get("end")
+        if not isinstance(start, int) or not isinstance(end, int):
+            return None  # the documented "could not locate" state
+        if start < 0 or end < start or end > len(text):
+            return None  # the span and the text disagree; do not guess
+        return text[start:end]
+    return None

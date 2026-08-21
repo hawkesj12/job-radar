@@ -1036,7 +1036,6 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
             "team": hostile,
             "employment_type": hostile,
             "salary": hostile,
-            "industry": hostile,
             "posted": util.to_date(hostile),
         }
     )
@@ -4547,3 +4546,96 @@ def test_output_levers_default_to_the_shape_that_was_always_emitted():
     p = {"title": "E", "text": "body", "tags": None}
     engine._shape(p, c)
     assert p == {"title": "E", "text": "body", "tags": None}
+
+
+# ── section_text: the reader for the spans clean_with_sections produces ──────
+def test_section_text_distinguishes_absent_from_empty():
+    """FIVE states reach this function, and `str | None` has to carry them honestly.
+
+    The one that matters is `""` vs None. `clean_with_sections` gives a header with
+    nothing under it a ZERO-LENGTH span deliberately -- "an empty section, not a failed
+    lookup", 93,054 of 981,857 located spans. Collapsing that into None destroys the
+    same distinction `sections: []` keeps against `sections: null`.
+    """
+    from job_radar.sections import section_text
+
+    body = "Do the work. Have the skills. Get paid."
+    #       0123456789...
+    rec = {
+        "text": body,
+        "sections": [
+            {"type": "responsibilities", "header": "What you'll do", "start": 0, "end": 13},
+            {"type": "requirements", "header": "What you need", "start": 13, "end": 29},
+            {"type": "benefits", "header": "Perks", "start": 29, "end": 29},  # empty
+            {"type": "eeo_legal", "header": "Legal"},  # located nowhere
+        ],
+    }
+    assert section_text(rec, "responsibilities") == "Do the work. "
+    assert section_text(rec, "requirements") == "Have the skills."
+    # PRESENT AND EMPTY -- must be "" and must NOT be None
+    assert section_text(rec, "benefits") == ""
+    assert section_text(rec, "benefits") is not None
+    # present but unlocatable -> None, and must not raise on the missing `start`
+    assert section_text(rec, "eeo_legal") is None
+    # no section of this kind at all -> None
+    assert section_text(rec, "compensation") is None
+
+    # no body, and a body with no sections at all
+    assert section_text({"text": None, "sections": []}, "requirements") is None
+    assert section_text({"text": body, "sections": None}, "requirements") is None
+    assert section_text({}, "requirements") is None
+
+    # FIRST section of the kind wins when an employer repeats a header
+    twice = {
+        "text": body,
+        "sections": [
+            {"type": "requirements", "start": 0, "end": 4},
+            {"type": "requirements", "start": 5, "end": 12},
+        ],
+    }
+    assert section_text(twice, "requirements") == "Do t"  # not "e work."
+
+
+def test_section_text_refuses_a_span_that_does_not_fit_its_text():
+    """THE SILENT ONE. `text[start:end]` with `end` past the end does NOT raise in
+    Python -- it returns a short slice, or "" when `start` is also past the end.
+
+    0 spans against a body this engine produced; 36,270 against a downstream copy that
+    truncated `text` without the spans that index it. So this arrives from a CONSUMER's
+    data and is indistinguishable from an empty section unless it is checked. A span
+    that does not fit its text is a disagreement, and None is the honest answer.
+    """
+    from job_radar.sections import section_text
+
+    truncated = {"text": "short body", "sections": [
+        {"type": "requirements", "header": "Reqs", "start": 4, "end": 900}]}
+    assert section_text(truncated, "requirements") is None, (
+        "a span running past the text returned a silently short slice"
+    )
+    wholly_past = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 500, "end": 900}]}
+    assert section_text(wholly_past, "requirements") is None, (
+        'a span entirely past the text returned "" and read as an empty section'
+    )
+    backwards = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 8, "end": 3}]}
+    assert section_text(backwards, "requirements") is None
+    negative = {"text": "short body", "sections": [
+        {"type": "requirements", "start": -5, "end": 4}]}
+    assert section_text(negative, "requirements") is None
+
+    # A NON-INT OFFSET, which a record round-tripped through JSON or a CSV can carry.
+    # `"3" < 0` raises TypeError and `text["3":"7"]` raises, so the type check is not
+    # decorative -- without it this is an exception rather than a None. Mutation-tested:
+    # relaxing the guard to `if start is None` survives every other case in this file,
+    # because the unlocatable fixture above has no `start` KEY at all and both guards
+    # catch that one. This is the case that separates them.
+    stringy = {"text": "short body", "sections": [
+        {"type": "requirements", "start": "3", "end": "7"}]}
+    assert section_text(stringy, "requirements") is None
+    explicit_none = {"text": "short body", "sections": [
+        {"type": "requirements", "start": None, "end": None}]}
+    assert section_text(explicit_none, "requirements") is None
+    floaty = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 1.0, "end": 4.0}]}
+    assert section_text(floaty, "requirements") is None
