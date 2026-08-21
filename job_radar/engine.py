@@ -750,7 +750,9 @@ def derive_salary(p: dict) -> dict:
     # here when they were set. Those columns were removed at 0.9.0, and the reason is
     # worth keeping, and stating carefully. On the last release that SHIPPED those
     # columns the separation leaked: all 6,633 rows carrying an estimate also rendered
-    # it as "$129,584-$129,584" with 0 carrying a commitment figure
+    # it as "$129,584–$129,584" -- EN-DASH, U+2013, which is what the store holds;
+    # a LIKE '%-%' on an ASCII hyphen returns 0 of 6,633 and reads as a refutation --
+    # with 0 carrying a commitment figure
     # `[live prod, engine 0.8.2]`. That is the HISTORY, not the reason they went --
     # `fa0cee3` and `9907e55` closed the leak earlier in 0.9.0, so by the removal the
     # quarantine was already intact. They went because nothing downstream ever read

@@ -2345,7 +2345,9 @@ def _adzuna_pay(j: dict) -> dict:
     WHY THEY WERE REMOVABLE, stated carefully because the obvious argument is wrong.
     The columns existed so a model's guess could never sit beside a commitment, and on
     the last release that shipped them the separation leaked anyway: all 6,633 rows
-    holding an estimate also rendered it as `$129,584-$129,584`, a point estimate shaped
+    holding an estimate also rendered it as `$129,584–$129,584` -- the separator is an
+    EN-DASH (U+2013), which is what the store holds and what a re-verification has to
+    match; an ASCII hyphen returns 0 of 6,633. A point estimate shaped
     like a posted range, with 0 of them carrying a commitment figure
     `[live prod, engine 0.8.2]`. But `fa0cee3` and `9907e55` closed that leak EARLIER IN
     0.9.0 -- by the commit that removed the columns, a predicted row already emitted no
