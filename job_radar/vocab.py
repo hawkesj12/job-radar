@@ -1691,7 +1691,42 @@ _ROLE_NOUN = frozenset(
     }
 )
 
-_WORD_RE = re.compile(r"[A-Za-z0-9+#/&]+")
+# THE CHARACTER CLASS IS THE TOKENIZER, and `title_root` is REBUILT by joining what
+# it finds -- so a character missing here is not ignored, it is DELETED, and the word
+# splits at the hole. This was ASCII-only, which meant `Sênior Security Engineer` came
+# out as `S nior Security Engineer`: a string no employer wrote, emitted as the
+# matchable form of the role. 155 rows / 115 distinct titles, 101 of them getting a
+# corrected root [102,799-row harvest, 2026-08-20]. It is the only field in the record
+# that was manufacturing text rather than dropping it.
+#
+# LATIN ONLY, DELIBERATELY, and the obvious fix is the wrong one. `[\w+#/&]+` is
+# Unicode-wide and also un-drops CJK, Hangul, Katakana and Cyrillic -- which sounds
+# strictly better and is not, because on a BILINGUAL title the ASCII-only class was
+# accidentally acting as an English extractor and doing it well. Measured over all 450
+# distinct non-ASCII titles: Latin-only changes 115, full `\w` changes 200, and all 85
+# extra are regressions -- `Cloud Infrastructure Engineer / クラウドインフラエンジニア`
+# roots at `Cloud Infrastructure Engineer` today and would root at the whole bilingual
+# string. The cost of scoping it this way is real and small: 8 titles in that corpus
+# have a root that is the entire unparsed title, and full `\w` repairs 6 of them where
+# this repairs 0. 6 forgone against 85 avoided.
+#
+# `×` (U+00D7) AND `÷` (U+00F7) ARE EXCLUDED by the two range breaks. Both sit inside
+# the Latin-1 Supplement letter block and are math operators, not letters.
+# U+0300-036F (combining diacritics) is in the class for NFD input, where `Sênior` is
+# `S` + `e` + a combining circumflex: without it the class splits at the mark and
+# reproduces the exact bug above. Zero rows in this corpus are NFD -- it is here
+# because a corpus covering 11 of 19 sources cannot prove a vendor never sends it, and
+# it was verified to change nothing that is measurable (115 either way, byte-identical
+# `decompose_title` output on all 450).
+#
+# `+#/&` PREDATE ALL OF THIS and must not be lost: they keep `C++`, `C#`, `and/or` and
+# `R&D` as single tokens. `_` stays OUT -- it is a separator here, which is why the
+# class is a union rather than `\w`.
+#
+# THIS DOES NOT FIX `seniority`. `_SENIORITY` is keyed on ASCII, so `sênior` is still
+# not a member and the seniority of those rows stays None -- measured, 7 non-null
+# before and 7 after. Accent-folding the lookup is a separate change.
+_WORD_RE = re.compile(r"[A-Za-z0-9À-ÖØ-öø-ɏ̀-ͯḀ-ỿ+#/&]+")
 
 
 def decompose_title(title: str) -> dict:

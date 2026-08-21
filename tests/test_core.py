@@ -3858,6 +3858,57 @@ def test_the_delimiter_no_longer_decides_whether_decoration_is_captured():
     )
 
 
+
+def test_title_root_never_manufactures_a_word_no_employer_wrote():
+    """`vocab._WORD_RE` is the tokenizer AND `title_root` is rebuilt by joining what it
+    finds, so a character absent from the class is DELETED and the word splits at the
+    hole. Until 0.9.0 the class was ASCII-only and `Sênior` came out `S nior` -- the
+    only field in the record that manufactured text rather than dropping it.
+
+    THIS TEST EXISTED NOWHERE BEFORE. The full suite was green on both sides of this
+    bug, so the fix arrived with no coverage at all and these assertions are the first
+    thing that would notice it coming back.
+    """
+    # the bug itself, in four scripts an employer actually used
+    for title, root in [
+        ("Sênior Security Engineer", "Sênior Security Engineer"),
+        ("Développeur Full Stack", "Développeur Full Stack"),
+        ("Ingénieur DevOps", "Ingénieur DevOps"),
+        ("Müşteri Temsilcisi", "Müşteri Temsilcisi"),
+    ]:
+        assert vocab.decompose_title(title)["title_root"] == root, title
+
+    # NFD input reaches the same answer. `Sênior` decomposed is `S` + `e` + U+0302,
+    # and without the combining range in the class it splits at the mark -- the exact
+    # bug above, arriving through an encoding the corpus happens not to contain.
+    import unicodedata
+
+    nfd = unicodedata.normalize("NFD", "Sênior Security Engineer")
+    assert nfd != "Sênior Security Engineer"  # the fixture really is decomposed
+    assert vocab.decompose_title(nfd)["title_root"] == nfd
+
+    # LATIN ONLY, ON PURPOSE. A bilingual title must still root at its English half:
+    # the ASCII-only class was accidentally an English extractor, and widening to a
+    # Unicode-wide `\w` regressed 85 titles by welding the other script back in.
+    assert vocab.decompose_title("Data Engineer / データエンジニア")["title_root"] == (
+        "Data Engineer"
+    )
+    assert vocab.decompose_title("Amazon Account Manager 亚马逊运营经理")[
+        "title_root"
+    ] == "Amazon Account Manager"
+
+    # `+#/&` are load-bearing and predate all of this; `_` is still a separator, and
+    # `×`/`÷` sit inside the Latin-1 letter block but are operators, not letters.
+    assert vocab._WORD_RE.findall("C++ C# and/or R&D") == ["C++", "C#", "and/or", "R&D"]
+    assert vocab._WORD_RE.findall("data_engineer") == ["data", "engineer"]
+    assert vocab._WORD_RE.findall("3 × 4 ÷ 2") == ["3", "4", "2"]
+
+    # HONEST LIMIT: this fixes the manufactured string, NOT the seniority. `_SENIORITY`
+    # is keyed on ASCII, so `sênior` is still not a member.
+    assert vocab.decompose_title("Sênior Security Engineer")["seniority"] is None
+    assert vocab.decompose_title("Senior Security Engineer")["seniority"] == "senior"
+
+
 def test_an_intra_word_hyphen_is_not_a_delimiter():
     """222 corpus titles carry one. Splitting on a bare hyphen shatters `Full-Stack`
     and `Go-to-Market`; requiring whitespace on BOTH sides misses the 122 titles

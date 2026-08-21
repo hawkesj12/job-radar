@@ -8,6 +8,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`title_root` emitted a string no employer wrote, on every title with an accented
+  letter.** `vocab._WORD_RE` was `[A-Za-z0-9+#/&]+` and `title_root` is REBUILT by
+  joining the tokens it finds — so a character outside the class is not ignored, it is
+  **deleted, and the word splits at the hole**. `Sênior Security Engineer` came out
+  `S nior Security Engineer`. This was the only field in the record manufacturing text
+  rather than dropping it. **155 rows / 115 distinct titles, 101 getting a corrected
+  root** `[102,799-row harvest, 2026-08-20]`.
+
+  **Latin only, and the obvious fix was the wrong one.** `[\w+#/&]+` is Unicode-wide
+  and also un-drops CJK, Hangul, Katakana and Cyrillic — which sounds strictly better
+  and is not, because on a bilingual title the ASCII-only class had been accidentally
+  acting as an English extractor and doing it well. Over all 450 distinct non-ASCII
+  titles: Latin-only changes 115, full `\w` changes 200, and **all 85 extra are
+  regressions** — `Cloud Infrastructure Engineer / クラウドインフラエンジニア` roots at
+  `Cloud Infrastructure Engineer` today and would have rooted at the whole bilingual
+  string. **The cost of scoping it this way is real:** 8 titles in that corpus have a
+  root that is the entire unparsed title, and full `\w` repairs 6 of them where this
+  repairs 0. Six forgone against eighty-five avoided.
+
+  `×` (U+00D7) and `÷` (U+00F7) are excluded by the range breaks — they sit inside the
+  Latin-1 letter block and are operators. `+#/&` still hold `C++`, `C#`, `and/or` and
+  `R&D` together, and `_` is still a separator. U+0300–036F is included for **NFD**
+  input, where `Sênior` is `S` + `e` + a combining circumflex and the class would
+  otherwise split at the mark: zero rows in this corpus are NFD, and it changes nothing
+  measurable here (115 either way, byte-identical output on all 450) — it is in because
+  a corpus reaching 11 of 19 sources cannot prove no vendor sends it.
+
+  **This does NOT fix `seniority`, and the earlier framing of this bug said it did.**
+  `vocab._SENIORITY` is keyed on ASCII, so `sênior` is still not a member and those
+  rows keep `seniority: None` — measured, **7 non-null before and 7 after**.
+  Accent-folding the lookup is a separate change with its own blast radius.
+
+  **There was no test for any of this.** The full suite was green on both sides of the
+  bug, so a fix could have arrived silently.
+  `test_title_root_never_manufactures_a_word_no_employer_wrote` is the first coverage,
+  and it was mutation-tested three ways — reverting to ASCII, dropping only the
+  combining range, and widening to full `\w` — each of which turns it red on its own.
+  (A substring check for fabricated root words reads 0 both before and after, so it
+  measures that the fix introduces no NEW fabrication; it does not detect the original
+  bug. The 101 corrected roots do.)
+
 - **`posted` was one day too new on every source that sends a UTC timestamp** (and
   `expires` with it, though only braintrust's ten rows actually move).
   `util.to_date`'s epoch branch converted to Eastern; the string branch three lines
