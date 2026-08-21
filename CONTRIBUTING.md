@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Thirteen ways a check comes back clean for the wrong reason
+## Fourteen ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -205,12 +205,22 @@ Every one of these produced a confident, wrong number in this repo:
 | 8 | **a zero accepted because it came with an explanation** | an explained zero reads as *more* rigorous than a bare number. It is not. |
 | 9 | **a correct explanation applied outside the scope it was derived in** | true of every row measured, false for a class that was not |
 | 14 | **an approval invalidated by a later change to its shared input** | a rule was approved on a measurement against the NARROW cue list. Widening the list was a separate, correct change — and against the wider list the same rule cost 5 rows net and moved every stratum it touched the wrong way. Nobody re-opened the approval, because the edit was to a different object |
+| 15 | **a number measured on someone else's implementation** | `1,088 removed / 792 cost` was carried verbatim into a commit message and a code comment. Re-derived under the committed code the same rule measured `688/969` narrow and `116/637` grown. The figure described **no configuration of that code** — it came from another agent's prototype word lists. Worse than a stale number, because no change to the tree could ever have made it true |
 
-Forms 8, 9, 11 and 14 are the dangerous ones, because all four look like good work —
+Forms 8, 9, 11, 14 and 15 are the dangerous ones, because all five look like good work —
 a real measurement is involved in each. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
+
+- **A number's provenance includes WHICH IMPLEMENTATION produced it.** Re-derive a
+  measurement under your own code before it goes in your commit message or comment — even
+  when the number is right and the person you took it from is careful. Especially then: the
+  borrowed figure above passed unquestioned through three handoffs and into a ruling
+  precisely because its source was trustworthy. Form 14's sibling and the more dangerous
+  of the two — a stale number becomes false at a knowable moment, and a borrowed one was
+  never about your code at all, so re-running your code cannot reproduce it and nothing
+  points at the discrepancy.
 
 - **When you rule that two error classes are NOT equally bad, every metric from that
   point on must separate them.** A composite score silently re-equalises exactly what the
