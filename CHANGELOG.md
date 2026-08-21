@@ -79,8 +79,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **`omit_empty` defaults OFF** and is the one to think about before enabling: removing
   a key changes `"x" in record` and `record.keys()`, so a consumer written against the
-  full key set can break on it, and `_CONTRACT_FIELDS` are ensured-present-and-`None`
-  precisely so `WHERE remote_type IS NOT NULL` means something. **`[]` and `{}` always
+  full key set can break on it — one record type becomes many shapes (1 distinct key-set
+  across a 102,799-row corpus as emitted, **1,883** under `omit_empty`), and `_shape`
+  runs inside `engine.harvest` rather than in `emit`, so this is a **library** contract a
+  caller receives and not an output format. It is *not* about SQL: measured both ways,
+  DuckDB reads a missing key as NULL, so `count(remote_type)` is identical whether the
+  key was omitted or explicitly null. An earlier draft of this entry claimed otherwise. **`[]` and `{}` always
   survive** — `remote_areas: []` means the posting *stated* it is open anywhere and
   `sections: []` means the body carried no headers. Those are facts, not absences.
 

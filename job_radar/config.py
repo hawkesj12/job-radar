@@ -448,10 +448,22 @@ class Config:
     # keys that are null on a median row. Ordering makes what survives scannable and
     # removes nothing -- these two are what remove the wall, and neither works alone.
     include_text: bool = True
-    # DEFAULT OFF, deliberately. `_CONTRACT_FIELDS` are ensured-present-and-None on
-    # purpose so a consumer can write `WHERE remote_type IS NOT NULL` and mean it;
-    # dropping a key changes `k in record` and `.keys()`, which is a contract change
-    # rather than a display choice. Opt in when a human is going to read it.
+    # DEFAULT OFF, deliberately -- and NOT for the reason this comment used to give.
+    # It claimed the ensured-present-and-None contract lets a consumer "write
+    # `WHERE remote_type IS NOT NULL` and mean it". That is false, measured both ways
+    # over the same 102,799 rows: DuckDB reads a MISSING key as NULL, so
+    # `count(remote_type)` returns an identical figure whether the key was omitted or
+    # explicitly null. SQL cannot tell absence from a stated absence and no default
+    # here changes that.
+    #
+    # What IS true, and is the reason: dropping a key changes `k in record` and
+    # `.keys()`, so one record type becomes many shapes -- 1 distinct key-set across
+    # the corpus as emitted, 1,883 under omit_empty, the most common covering 3.7%.
+    # And `_shape` runs inside `engine.harvest`, not in `emit`, so this is a LIBRARY
+    # contract a caller receives, not an output format. Opt in when a human is going
+    # to read it; the surface that wants it should choose it, which is what
+    # `_reports/bin/harvest.py` does by writing an audit copy and a readable copy
+    # side by side rather than picking one globally.
     omit_empty: bool = False
     # ai
     llm: LLMConfig = field(default_factory=LLMConfig)
