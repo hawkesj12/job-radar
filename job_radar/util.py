@@ -186,8 +186,24 @@ _TAG = re.compile(r"</?[A-Za-z][^>]*>")
 # glue two real words together -- `<strong>Requirements</strong>Must have` -> the single
 # token `RequirementsMust`. A word split by a tag always CONTINUES in lower case, and two
 # distinct words do not, so an uppercase letter after the run means "these were two
-# words, keep the space". Measured: 4,580 -> 62 space-before-punctuation with zero words
-# glued, against a camel-case proxy that stayed at exactly 3,099 either way.
+# words, keep the space". Measured: 4,580 -> 62 space-before-punctuation, and the
+# direction is not in doubt -- across 390 headers carrying 445 alphanumeric joins, 166
+# were header corruptions this repairs.
+#
+# AN EARLIER VERSION OF THIS COMMENT CLAIMED "WITH ZERO WORDS GLUED". That zero was
+# never measured. It came from a camel-case proxy that stayed at exactly 3,099 either
+# way -- and that proxy CANNOT SEE the failures, because a glue between two capitalised
+# words is itself camel-case. Labelled against each posting's own vocabulary, the same
+# 445 joins contain at least 4 confirmed glues of genuinely separate words:
+# 'About you' -> 'Aboutyou', 'Apply button' -> 'Applybutton', 'ICF cleared' ->
+# 'ICFcleared'; 277 were undecidable. A guard measuring something narrower than its
+# comment claimed, which is the same shape as a mutation filter that excludes its own
+# target.
+#
+# AND THE LARGER CLASS IS UNMEASURABLE HERE: the same glue lands in `text` on rows with
+# NO header at all, where nothing in this corpus can detect it. 166-to-4 is why the
+# behaviour is unchanged for now; the redesign is filed for the next release rather
+# than made at this hour on four counterexamples.
 #
 # THE `(?i:)` IS SCOPED ON PURPOSE AND MUST STAY THAT WAY. A module-level `re.I` here
 # case-folds the `(?![A-Z])` lookahead too, so it rejects lower case as well, the guard
@@ -463,7 +479,37 @@ def salary_from_text(text: str) -> str:
     return re.sub(r"\s+", " ", matched).strip()
 
 
-def salary_range(lo, hi) -> str:
+def _money(n: int, currency) -> str:
+    """`$1,234` for USD or an unknown currency, `CAD 1,234` for anything else."""
+    code = str(currency).upper() if currency else ""
+    return f"${n:,}" if code in ("", "USD") else f"{code} {n:,}"
+
+
+def salary_range(lo, hi, currency=None) -> str:
+    """Two numbers -> the human-readable `salary` string, in the right money.
+
+    THE CURRENCY PARAMETER EXISTS BECAUSE THIS FUNCTION HARD-CODED A DOLLAR SIGN, so
+    a Toronto role rendered `$168,000-$231,000` for CAD and a Warsaw one `$25,200`
+    for PLN -- about a quarter of a real salary. It could not be fixed at a call
+    site: there was no way to tell it what the money was.
+
+    SCOPE, measured rather than assumed [102,799-row harvest, corpus tree 515521d].
+    1,147 rows show a non-USD figure behind a bare `$`, and it is tempting to read
+    that as this function's blast radius. It is not. Of the four callers, three pass
+    a currency that is USD by construction -- remoteok and adzuna hard-code
+    `currency="USD"`, and usajobs has no currency field at all because US federal
+    postings are structurally USD. Only `_himalayas_rows` has a real vendor currency,
+    and it was handing it to `vocab.salary` while giving this function nothing. That
+    is 46 rows. The other ~1,101 are greenhouse and lever strings where the EMPLOYER
+    typed the dollar sign into their own pay text; rewriting a vendor's verbatim
+    string is a different act, it is not this function's output, and several of those
+    strings already name their currency (`$115,000-$130,000 CAD`). `salary_currency`
+    is correct on all of them -- it is the display string alone that is ambiguous.
+
+    Unknown or USD keeps the bare `$`, so no US row changes; anything else is
+    prefixed with the ISO code, which is what the vendors that get this right
+    already do (`PLN 188 - PLN 187,000`, `CZK 150K - CZK 300K`).
+    """
     try:
         lo = int(float(lo or 0))
         hi = int(float(hi or 0))
@@ -478,9 +524,9 @@ def salary_range(lo, hi) -> str:
         # value, which this formatting rounds away. `_adzuna_pay` is careful to keep
         # the prediction out of the commitment columns, and then the display string
         # gave it back the appearance of one.
-        return f"${lo:,}" if lo == hi else f"${lo:,}–${hi:,}"
+        return _money(lo, currency) if lo == hi else f"{_money(lo, currency)}–{_money(hi, currency)}"
     if lo or hi:
-        return f"${(lo or hi):,}"
+        return _money(lo or hi, currency)
     return ""
 
 
