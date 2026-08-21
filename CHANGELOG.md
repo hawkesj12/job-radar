@@ -84,6 +84,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   well as recall, because a bare cue on the near side of a sentence break is the right
   answer and having one is what finally suppressed the eligibility-prose class.
 
+  **It is deliberately NOT a `shortlist.csv` column.** The CSV is a curated human subset —
+  `seniority`, `category`, `team` and `tags` are absent for the same reason — and adding a
+  column is a schema change for every existing store. **So a CSV reader cannot see that a
+  figure is an equity grant rather than base pay**, which is the one case where that
+  omission costs something real: the Affirm \$32,000–\$48,000 new-hire equity grant reads
+  in the CSV as an ordinary salary.
+
+  **The machine feed carries it. `job-radar scan --format ndjson` emits it as
+  `salary.kind`**, joined onto the store row because `salary_kind` is in
+  `engine._CONTRACT_FIELDS` and that join loops over exactly that tuple — the same
+  structural reason every contract field rides, and unlike `text`, which needs a
+  hand-written graft because it is not one. Under `--drop-empty` the key survives as
+  `"unspecified"` when a figure could not be labelled and is **dropped entirely** when
+  there was no figure at all, so those two stay distinguishable through the wire format.
+
 - **`sections.section_text(record, kind)` — the reader for the spans the record already
   carries.** Everything that parses a posting's prose for one fact (pay, requirements,
   travel) should read the section that fact lives in rather than the whole body; this is
