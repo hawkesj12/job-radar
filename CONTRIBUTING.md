@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Nineteen ways a check comes back clean for the wrong reason
+## Twenty ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -211,8 +211,9 @@ Every one of these produced a confident, wrong number in this repo:
 | 18 | **a verification that REIMPLEMENTS the thing under test** | three gate variants were compared against the shipped classifier and all three differed by **exactly 60 rows**. The gate was never the variable — the harness had drifted from the shipped function and would have reported 60 phantom differences whatever it tested. **A reimplementing verification measures two implementations at once and cannot say which one moved.** Also the subtlest place it hides: a SAMPLE drawn against a reimplementation is a sample of the wrong population, and every rate computed on it is exact and about something else |
 | 19 | **the requester leaked the answer into the instruction** | *"`bonus` precision is 0 of 25... now label the sample blind."* Every blinding protocol guarded the two labellers from **each other**; nobody guarded them from the **orchestrator**, who sees every result first and writes every instruction. The second label set could then only DISCONFIRM — agreement was worth nothing, and agreement is what it produced. **Raised by the labeller, about its own compromised work, not by the person who caused it** |
 | 20 | **a mutation run that never selected the guarding test** | a mutant was disarmed and the suite came back GREEN. The filter was `-k salary_kind`; the test written to guard that exact change was named `test_equity_fires_only_inside_the_figures_own_clause`, which does not contain the string. **The selector excluded its own target.** Re-run as `-k "salary_kind or equity_fires"` and both mutants went red. A green mutation run proves nothing unless you can show the guarding test RAN |
+| 21 | **a failure form applied by pattern-match instead of by measurement** | THIS CATALOGUE causing a failure. An agent recognised form 14's shape — two decisions in one lane, one arming the other — and reported it, minutes after being told form 14 was working forward for the first time. Measured, the intersection was **exactly zero**, and **the disconfirming evidence was in its own earlier message**: it had defined the population by "has a non-USD currency" and then argued the fix would give it one. **Recognition is fast and cheap, which is what lets it substitute for measurement without anyone noticing** |
 
-Forms 8, 9, 11, 14, 15, 16, 17, 18, 19 and 20 are the dangerous ones, because all ten look like good
+Forms 8, 9, 11, 14, 15, 16, 17, 18, 19, 20 and 21 are the dangerous ones, because all eleven look like good
 work — a real measurement is involved in each. **16 is the worst of them:** nothing about
 it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
@@ -315,6 +316,15 @@ append-only so an existing reference never changes meaning.)
   back. Six labels were **single-reader-verified**, which is weaker than double-verified and
   much stronger than luck. **Report the accurate degradation, not the most self-critical
   one**, and name which of the two a reader is getting.
+
+- **A PATTERN THAT FITS IS NOT A MEASUREMENT — and this file is where that goes wrong.**
+  Twenty-one forms is twenty-one shapes you learn to recognise, and recognition is fast,
+  cheap and satisfying in a way that measuring is not. **The moment a situation *looks like*
+  a form, check the mechanism anyway.** The instance: an agent applied form 14 to a shape
+  that matched it perfectly and was wrong on three independent counts, one of which was
+  already sitting in a message it had sent an hour earlier. **A claim that costs someone
+  else work has a higher bar than one that only costs you** — if a ruling lands on your
+  claim, go verify it before the work starts.
 
 - **Quote the collected-test count from every mutation run, and name the guarding test.**
   `assert old in src` proves the mutant applied; it says nothing about whether the test that
