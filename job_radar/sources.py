@@ -1794,8 +1794,6 @@ def fetch_teamtailor(slug: str):
                 or None,
                 # The only WORKING expires on the depth lane -- 8 of 53 measured.
                 "expires": to_date((jp.get("validThrough") or "")[:10]),
-                "parent_company": (jp.get("hiringOrganization") or {}).get("name")
-                or None,
                 "employment_type": jp.get("employmentType") or "",
                 "salary": salary_from_text(text),
                 "text": text,
@@ -2355,11 +2353,16 @@ def _adzuna_pay(j: dict) -> dict:
             except (TypeError, ValueError):
                 return None
 
-        return {
-            "salary": "",
-            "salary_estimated_min": _n(lo),
-            "salary_estimated_max": _n(hi),
-        }
+        # NOTHING IS EMITTED FOR A PREDICTED ROW. The estimate columns this used to
+        # write were removed at 0.9.0 -- empty on 102,799 of 102,799 rows of a harvest
+        # whose source mix excludes the one adapter that filled them, and the record
+        # already refuses to put a model's guess anywhere a commitment could be read.
+        # The prediction is DISCARDED, deliberately: `salary` stays empty so
+        # `engine.derive_salary` returns at its display-string check and can never
+        # parse the figure back into salary_min. That is the same protection the
+        # estimate columns bought, carried by the empty string instead of by a column
+        # nobody could fill.
+        return {"salary": ""}
     return {
         "salary": salary_range(lo, hi),
         **vocab.salary(lo, hi, currency="USD", period=None, basis="stated"),
@@ -3147,7 +3150,6 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # downstream store ended up with employer names among its most
                 # common "categories". The three keys below say what each thing is.
                 "department": d.get("DepartmentName", ""),
-                "parent_company": d.get("DepartmentName") or None,
                 "team": d.get("SubAgency") or None,
                 # OPM occupational series -- a real, coded job family.
                 "category": ", ".join(

@@ -1376,12 +1376,14 @@ SENIORITY_BASES = frozenset({"stated", "title"})
 # `posted_basis` -- see util.posted_from / sources.posted_from_relative.
 POSTED_BASES = frozenset({"stated", "relative"})
 
-# `salary_basis` -- `estimated` rides in salary_estimated_* rather than here, so a
-# figure in salary_min is always one an employer committed to.
+# `salary_basis` -- there is deliberately no `estimated` member, so a figure in
+# salary_min is always one an employer committed to.
 # `parsed` = read out of a vendor's free-text salary string (google_jobs' "47-55 an
 # hour"); `stated` = the vendor sent real numeric fields. `estimated` is deliberately
-# absent -- a model's guess rides in salary_estimated_* instead, so a figure in
-# salary_min is always one an employer committed to.
+# absent -- a model's guess is DISCARDED rather than given a column, so a figure in
+# salary_min is always one an employer committed to. The salary_estimated_* pair that
+# used to carry them was removed at 0.9.0: it was empty on 102,799 of 102,799 rows and
+# the protection now rides on the adapter emitting no display string at all.
 SALARY_BASES = frozenset({"stated", "parsed"})
 
 # `text_basis` -- what KIND of body this is, when it is not an ordinary one.

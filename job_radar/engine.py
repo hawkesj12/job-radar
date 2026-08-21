@@ -67,7 +67,7 @@ def _src_pref(p) -> int:
 # vocab.EMPLOYMENT_TYPES. It is the exact None-vs-empty lie the contract exists to
 # remove, and it was invisible from the NDJSON because emit masks it with `or None`;
 # only the flat dict a library consumer receives carried it.
-_REQUIRED_TEXT = ("title", "company", "url", "source", "industry")
+_REQUIRED_TEXT = ("title", "company", "url", "source")
 
 
 # The keys added in 0.7.0, and their UNKNOWN value. `None` is the default on every
@@ -112,7 +112,6 @@ _CONTRACT_FIELDS = (
     "category",
     "tags",  # list[str] | None -- skills the source itself extracted
     # who
-    "parent_company",  # umbrella org, when the source distinguishes one
     "team",  # the employer's own group -- the catalog's `org_unit`, see `category`
     # where
     # list[dict] | None -- every place ONE posting names, each {raw, city, state,
@@ -162,8 +161,6 @@ _CONTRACT_FIELDS = (
     # token -- vocab.SALARY_BASES is frozenset({"stated", "parsed"}) and this comment
     # named a third for as long as it existed.
     "salary_basis",  # stated | parsed | None -- vocab.SALARY_BASES
-    "salary_estimated_min",  # a MODEL's guess. Never the same column as a commitment.
-    "salary_estimated_max",
     # terms
     "employment_type_raw",  # what the vendor actually said
     "seniority",
@@ -754,11 +751,6 @@ def derive_salary(p: dict) -> dict:
     # basis="parsed" on a row whose 109106.69 was a model output. One forgotten
     # WHERE clause downstream and every average built on the corpus is poisoned,
     # which is the failure `_adzuna_pay`'s own comment records.
-    if (
-        p.get("salary_estimated_min") is not None
-        or p.get("salary_estimated_max") is not None
-    ):
-        return p
     display = p.get("salary")
     if not display:
         return p
@@ -864,7 +856,7 @@ _READING_ORDER = (
     # what the role is
     "title", "title_root", "title_level", "title_qualifiers",
     # who is hiring, and for which group
-    "company", "parent_company", "team", "department", "category", "tags",
+    "company", "team", "department", "category", "tags",
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",
@@ -874,7 +866,7 @@ _READING_ORDER = (
     "posted", "posted_basis", "expires", "harvested_at",
     # money -- the commitment, then the model's guess, never interleaved
     "salary", "salary_min", "salary_max", "salary_currency", "salary_period",
-    "salary_basis", "salary_estimated_min", "salary_estimated_max",
+    "salary_basis",
     # terms
     "employment_type", "employment_type_raw",
     # how to apply
@@ -882,7 +874,7 @@ _READING_ORDER = (
     # what we made of it
     "score", "signals",
     # where it came from
-    "source", "sources", "source_extra", "industry", "dedup_key",
+    "source", "sources", "source_extra", "dedup_key",
     # the body LAST: 72% of the record, and everything after it is unreadable
     "text", "text_basis", "sections",
 )  # fmt: skip
@@ -958,7 +950,6 @@ def _consume(postings, hits, blocks, cfg, meta):
             continue
         p.setdefault("company", "")
         p.setdefault("source", "")
-        p.setdefault("industry", "")
         m = meta.get(norm(p["company"]))
         sc, sig = score_and_signals(p, cfg=cfg)  # one keyword scan for both
         tl = p["title"].lower()
@@ -971,8 +962,6 @@ def _consume(postings, hits, blocks, cfg, meta):
         if age is not None and age > cfg.stale_after_days:
             sc -= min(12, ((age - cfg.stale_after_days) // 10) * 2)
             sig = (sig + ", " if sig else "") + f"{age}d-old"
-        if m and m.get("industry") and not p["industry"]:
-            p["industry"] = m["industry"]
         p["score"] = sc
         p["signals"] = sig
         p["sources"] = {p["source"]} if p["source"] else set()
@@ -1147,10 +1136,9 @@ def _harvest(cfg, watchlist_path, companies):
                         continue
                     name, ats = c.get("name", c.get("slug") or "?"), c.get("ats")
                     for p in ps:
-                        p["company"], p["source"], p["industry"] = (
+                        p["company"], p["source"] = (
                             name,
                             ats,
-                            c.get("industry", ""),
                         )
                     _consume(ps, hits, blocks, cfg, meta)
 

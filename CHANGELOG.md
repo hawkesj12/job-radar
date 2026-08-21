@@ -174,6 +174,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
+- **`industry`, `parent_company`, `salary_estimated_min` and `salary_estimated_max` are
+  gone.** All four were empty on **102,799 of 102,799 rows** of a harvest across 7,360
+  boards and eleven sources. The record is **49 fields → 45**.
+
+  They were not empty for the same reason, and the difference is the argument for
+  cutting them anyway:
+
+  - **`industry` could never be filled from a posting.** It came from a *watchlist
+    annotation* — `engine` copied it off the caller's company entry — so a consumer that
+    keeps its universe anywhere but a curated JSON file got nothing, forever. It was
+    also the record's only field using `""` rather than `null` for absent (it sat in
+    `_REQUIRED_TEXT`, so it was str-coerced), which quietly broke the contract's own
+    rule that `None` means "the source did not say" on every row. And it appeared
+    nowhere in this README's field table. `funnel` and `seed` no longer stamp
+    `"(discovered)"` / `"(seeded)"` into watchlist entries, and `shortlist.csv` loses a
+    column.
+  - **`parent_company` and the estimate pair were fillable, by adapters that are simply
+    rare** — teamtailor and usajobs for the first, adzuna for the second. Cut on the
+    judgement that two live columns beat four columns where two are theoretical.
+
+  **The prediction protection survives the estimate columns.** `_adzuna_pay` used to
+  route a `salary_is_predicted` row into `salary_estimated_*`, and `derive_salary`
+  returned early when it saw one — that guard existed because the parser once wrote
+  `109106.0` into `salary_min` on a row whose `109106.69` was a model output. A
+  predicted row now emits **no salary at all**: `salary` stays `""`, so `derive_salary`
+  returns at its display-string check and can never parse the figure into a commitment
+  column. Same property, one fewer column, and both tests were re-pointed at the new
+  mechanism rather than deleted. **The prediction is discarded, not relocated** — if you
+  were reading Adzuna's estimates, they are gone.
+
+  **One migration path broke and it is called out above:** the `department`
+  deprecation note recommended `parent_company` as the recovery on USAJOBS, because that
+  adapter assigned `DepartmentName` to both. With `parent_company` removed, USAJOBS rows
+  carry the employing department **only** in `department` — so it disappears at 1.0 with
+  nothing to fall back to. Copy it first if you consume federal postings.
+
 - **The `remote` boolean is gone; use `remote_type`.** It was exactly
   `None if remote_type is None else remote_type == "remote"` on **7,568 of 7,568 rows**
   `[local 94-board harvest, 0.9.0]` — two homes for one fact, and the bool was the

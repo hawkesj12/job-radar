@@ -113,7 +113,6 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
             "qualifiers": r.get("title_qualifiers"),
         },
         "company": r.get("company") or None,
-        "parent_company": r.get("parent_company"),
         "category": r.get("category"),
         "team": r.get("team"),
         "seniority": r.get("seniority"),
@@ -159,8 +158,6 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
             # KEPT APART from min/max on purpose. Adzuna predicts a salary with a
             # model on 93% of its rows; merging those into the same keys would make
             # a guess indistinguishable from a figure an employer committed to.
-            "estimated_min": r.get("salary_estimated_min"),
-            "estimated_max": r.get("salary_estimated_max"),
         },
         "url": r.get("url") or None,
         "direct_apply": r.get("direct_apply"),

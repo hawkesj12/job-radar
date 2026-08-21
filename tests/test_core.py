@@ -3740,21 +3740,23 @@ def test_two_currencies_in_the_window_is_a_refusal_not_a_coin_flip():
 
 
 def test_a_model_prediction_is_never_written_into_the_commitment_columns():
-    """CAUGHT BY MEASURING, NOT BY REVIEW. A predicted row has NULL commitment
-    columns by design (`_adzuna_pay` splits them precisely so a guess never sits
-    beside a real figure), so a fill-only test waves it through -- and the display
-    string is right there to parse. This wrote 109106.0 into salary_min with
-    basis='parsed' on a row whose 109106.69 was a model output."""
+    """CAUGHT BY MEASURING, NOT BY REVIEW. This once wrote 109106.0 into salary_min
+    with basis='parsed' on a row whose 109106.69 was a model output.
+
+    THE MECHANISM CHANGED AT 0.9.0 AND THE PROTECTION DID NOT. It used to rest on the
+    salary_estimated_* columns: `_adzuna_pay` put a prediction there, and
+    `derive_salary` returned early when it saw one. Those columns were removed -- empty
+    on 102,799 of 102,799 rows -- so the guard is now the EMPTY DISPLAY STRING. A
+    predicted row carries `salary: ""`, and `derive_salary` returns at its display
+    check before it can parse anything. Same property, one fewer column, and this test
+    exists to keep it true however it is implemented."""
     p = {
-        "salary": "$109,106–$109,106",
-        "text": "$109,106–$109,106 a year",
-        "salary_estimated_min": 109106.69,
-        "salary_estimated_max": 109106.69,
+        "salary": "",  # what _adzuna_pay emits for a predicted row
+        "text": "$109,106\u2013$109,106 a year",
     }
     engine.derive_salary(p)
     assert p.get("salary_min") is None, "a prediction reached the commitment column"
     assert p.get("salary_basis") is None
-
 
 def test_derive_salary_fills_but_never_overwrites_a_vendors_own_figures():
     """A vendor's structured object is better evidence than our parse of its prose,

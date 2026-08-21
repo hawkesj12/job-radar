@@ -2285,9 +2285,15 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
     out = [engine._coerce(r) for r in sources.search_adzuna(["x"])]
     predicted, real = out[0], out[1]
     assert predicted["salary_min"] is None, "a prediction reached the commitment column"
-    assert predicted["salary_estimated_min"] == 61482.41
+    assert predicted["salary_max"] is None
+    assert predicted["salary_basis"] is None
+    # THE PREDICTION IS DISCARDED, not relocated. The salary_estimated_* columns that
+    # used to receive it were removed at 0.9.0 (empty on 102,799 of 102,799 rows of a
+    # harvest whose source mix excluded the one adapter filling them). The empty
+    # display string below is now the whole protection: `engine.derive_salary` returns
+    # at its `if not display` check and can never parse the figure into salary_min.
+    assert "salary_estimated_min" not in predicted
     assert real["salary_min"] == 115000.0 and real["salary_basis"] == "stated"
-    assert real.get("salary_estimated_min") is None
 
     # THE DISPLAY STRING IS INSIDE THE SPLIT, NOT BESIDE IT. The commitment columns
     # were already null on a predicted row while `salary` still rendered "$61,482" --
