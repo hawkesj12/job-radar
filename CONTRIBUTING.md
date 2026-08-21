@@ -259,6 +259,16 @@ append-only so an existing reference never changes meaning.)
   the convention has trained them to skim. **Apply the marker as you touch a site — never
   as a dedicated pass**, which buries real changes in churn.
 
+- **A single rate over a bimodal population describes neither half — check for uniformity
+  BEFORE applying a threshold.** A vocabulary member scored 18.5% precision against a
+  "remove below 40%" gate. Split by shape it was **15/15 (100%)** where the cue sat in the
+  same clause as the figure and **0/66** where it sat in a following sentence. **18.5% is
+  the average of perfect and useless.** Applying the threshold would have deleted a member
+  that is flawless on the shape it was built for; the correct action was to restrict its
+  scope, which no blended number could have suggested. **Thresholds silently assume the
+  thing they measure is one population.** Before you set one, ask what would make it
+  bimodal — and report the sub-rates with their n, never the blend.
+
 - **Whoever requests a blind measurement must not state the expected answer, or any part of
   it, in the request.** Blinding protocols are written to keep independent measurers away
   from each other's results — and then the person coordinating them, who has seen every
