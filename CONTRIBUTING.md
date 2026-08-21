@@ -213,6 +213,14 @@ append-only so an existing reference never changes meaning.)
 
 **Two rules that fall out, narrow enough to actually follow:**
 
+- **While a decision is provisional, take the branch you can walk back.** Deleting a rule
+  writes a CHANGELOG entry, removes the code and the tests, and makes re-adding it a fresh
+  argument; keeping it costs nothing but a comment. The instance: a rule was ruled out
+  twice on provisional evidence and removed in the working tree, when the same evidence
+  would have justified *waiting* at zero cost — and it was then reversed by a measurement
+  taken an hour later. **Provisional plus irreversible is the combination to refuse.** Ask
+  which branch is cheap to undo before asking which looks right.
+
 - **To evaluate a RULE, sample the rows that rule CHANGES — not a stratified draw over
   the whole population.** A general sample can be well-constructed, honestly reported, and
   structurally blind to the question. The instance: a 150-row sample stratified on cue
