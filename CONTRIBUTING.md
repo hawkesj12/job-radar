@@ -252,6 +252,15 @@ committed and CI-gated, and it is documentation the same way a docstring is. Sco
 sweep to `job_radar/` produced three doc-only follow-up commits in one phase, from one
 mistake made twice.
 
+**And grep the VOCABULARY that pointed at the removed field, not only its name.** A
+removal orphans the words that referred to it, and those words are a different search. The
+name-sweep above is necessary and it would not have found this: `catalog/`'s `employer_org`
+slot contains no instance of the string `department`, yet removing `department` left
+USAJOBS' `DepartmentName` with nowhere to go. Swept across 22 profiles, eight map something
+into `employer_org` and seven of those are the company name, which still has a home in
+`company` — **one of eight was made homeless by the removal, and only a vocabulary sweep
+surfaces which.**
+
 **A passing gate is not evidence about anything the gate does not read.** Both catalog
 gates stayed green across a profile that was wrong in five places, one of them inside
 machine-readable frontmatter — `_scaffold.py --check` validates frontmatter *keys* and
