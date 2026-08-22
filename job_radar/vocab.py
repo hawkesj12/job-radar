@@ -509,6 +509,31 @@ def salary_from_display(raw, period=None, currency=None) -> dict:
     # units someone thought of. The ceiling applies to SUB-annual periods only, so a
     # genuine $1.5M/yr package is not vetoed for being large. Behaviour in THIS lane
     # is unchanged by the move: measured byte-exact on 29,712 parsed rows.
+    #
+    # WAS: that byte-exact claim, and an independent re-run over 30,157 rows found TWO.
+    # Net 1 fixed / 1 damaged, and the damaged one matters more than the count:
+    #
+    #   Airbnb MX  `$100,000-$125,000` MXN, body says "Mexico MONTHLY Pay Range".
+    #              The unscaled ceiling deleted a period the employer stated. Fixed.
+    #   Convera HK `$240K - $325K HKD ($20K - $27K per month)`. The band is ANNUAL;
+    #              `_adjacent_evidence` took `month` out of the PARENTHETICAL. The
+    #              unscaled ceiling killed that wrong period BY ACCIDENT -- 2.88M HKD
+    #              exceeds 1M. Scaled, 2.88M / 7.8 = $369K, so it survives and the
+    #              record now reads HKD 240,000-325,000 per MONTH, off by 12x and
+    #              contradicted by the posting's own next clause.
+    #
+    # SO THE SAFETY ARGUMENT ABOVE WAS ONLY EVER CHECKED AT ONE SCALE. "CAD 160,000
+    # per week is still $6.1M implied and still vetoed" is true at CAD's 1.37 and
+    # false at HKD's 7.8: scaling weakens the ceiling BY THE SCALE FACTOR, so the
+    # further a currency is from the dollar the less the ceiling catches. That is the
+    # cost of the fix, not a counter-example to it -- 18 monthly bands filed as annual
+    # are worth one accidental catch lost.
+    #
+    # A scale CAP was measured and rejected: it separates the two rows only at <= 2.5,
+    # it must be ceiling-only (a capped floor un-fixes all 18), and 2.5 tuned on n=2 is
+    # a constant nobody can defend. The Convera row's real defect is upstream and
+    # already registered -- `_adjacent_evidence` reads a parenthetical as adjacency,
+    # which is the same shape that hid OTE inside `(base + commission)` at 0.9.0.
     return salary(lo, hi, currency=currency, period=period, basis="parsed")
 
 
@@ -1555,6 +1580,12 @@ CLEARANCES = frozenset({"required", "obtainable", "mentioned"})
 # `clearance_basis` -- here the section vocabulary DOES do real work, unlike
 # sponsorship's: 64.7% of the preference cues that decide a clearance's state are the
 # enclosing `requirements` section's own heading rather than anything in the sentence.
+# THAT 64.7% IS ABOUT WHERE `_PREFERRED` CUES SIT, and it must not be restated as
+# "the cues that decide the state" -- the README said exactly that and it was a
+# different quantity. Measured on the shipped detector: `requirements` is the basis
+# on 3,262 of 5,623 labelled rows (58.0%), and on 66.8% of clearance EVENTS. Both
+# are real, neither is 64.7%, and a true number re-framed into a claim it was never
+# measured for is how a correct figure becomes a false sentence.
 CLEARANCE_BASES = frozenset({"requirements", "body"})
 
 

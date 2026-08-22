@@ -415,8 +415,14 @@ _CLEAR_NOISE = re.compile(r"""(?xi)
 """)
 
 # `able to obtain` IS ITS OWN STATE, and folding it into `required` is a sign flip in
-# the direction that closes a job to someone who could take it: 2,191 of 5,585 clearance
-# rows (39.2%) say a candidate must be ABLE TO OBTAIN a clearance, not that they must
+# the direction that closes a job to someone who could take it: **1,709 of 5,623 rows
+# the SHIPPED detector labels (30.4%)** say a candidate must be ABLE TO OBTAIN a
+# clearance, not that they must
+# WAS: "2,191 of 5,585 (39.2%)". That was a pre-build recon count from a WIDER regex
+# than the one that shipped, and it reproduces on no tree in the range -- the shipped
+# detector raises an `obtainable` EVENT on 2,083 rows (37.0%) and LABELS 1,709 (30.4%),
+# because a competing `required` cue outranks it on the rest. A recon number measured
+# before the code existed cannot describe the code.
 # already hold one. `"Must be able to obtain and maintain a U.S. Secret clearance"`
 # carries `must` AND `able to obtain`, so OBTAINABLE IS TESTED FIRST -- the modal belongs
 # to the obtaining, not to the holding.
@@ -521,7 +527,20 @@ def enrich(p: dict) -> dict:
     nothing here feeds a gate, so running it last does identical work on strictly fewer
     rows -- the remote, age and url gates all `continue` before it.
 
-    THE POSTING'S OWN BODY IS THE ONLY INPUT, and that is worth stating because the
+    `p["sections"]` IS A SECOND INPUT AND OMITTING IT IS A SIGN FLIP. `clearance` reads
+    the typed spans to tell a section HEADING from a sentence, because the word that
+    decides `required` vs `mentioned` is usually the next section's title -- "Must be
+    able to obtain and maintain a clearance. PREFERRED SKILLS AND EXPERIENCE ...". With
+    no spans that heading reads as prose. Measured over 25,000 rows: 51 rows gain
+    `required` (297 -> 348), 33 of them from `obtainable` and 18 from `mentioned`. That
+    is the direction `obtainable` exists to prevent -- it tells an eligible US citizen a
+    job is closed to them. `sponsorship` is unaffected; it is sentence-scoped.
+
+    WAS: "the posting's own body is the only input". `engine._consume` always passes a
+    full record so the pipeline was never wrong, but the sentence invited
+    `enrich({"text": body})` from a library caller, which silently over-claims.
+
+    THE BODY IS STILL THE ONLY *PROSE* INPUT, and that is worth stating because the
     sponsorship clause is END-LOADED: 65% of statements sit in the last three deciles of
     the body as trailing legal notes, and 477 occurrences across 411 rows sit past
     character 8,000 -- invisible to a consumer that truncates at 8k, visible to the

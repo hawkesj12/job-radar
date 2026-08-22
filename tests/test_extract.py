@@ -429,3 +429,36 @@ def test_no_regex_in_the_module_can_scan_unbounded():
     assert ".*" not in src and ".+" not in src, (
         "unbounded quantifier in a body-scanning regex"
     )
+
+
+def test_clearance_reads_sections_and_says_so():
+    """A SECOND INPUT, and omitting it flips toward `required`.
+
+    The word deciding `required` vs `mentioned` is usually the NEXT SECTION'S HEADING,
+    so without typed spans it reads as prose. Measured over 25,000 corpus rows, 51 rows
+    gain `required` when `sections` is absent -- the direction `obtainable` exists to
+    prevent. `engine._consume` always passes a full record; this pins the dependency so
+    a library caller reading the docstring is not surprised by it.
+    """
+    body = (
+        "Must be able to obtain and maintain a Secret clearance.\n"
+        "PREFERRED SKILLS AND EXPERIENCE\n"
+        "Familiarity with distributed systems."
+    )
+    span = body.index("PREFERRED SKILLS AND EXPERIENCE")
+    with_spans = {
+        "text": body,
+        "sections": [
+            {"kind": "requirements", "header": "Requirements", "start": 0, "end": span},
+            {"kind": None, "header": "PREFERRED SKILLS AND EXPERIENCE",
+             "start": span, "end": len(body)},
+        ],
+    }
+    without = {"text": body}
+    extract.enrich(with_spans)
+    extract.enrich(without)
+    assert with_spans["clearance"] == "obtainable"
+    assert without["clearance"] in vocab.CLEARANCES
+    assert "sections" in extract.enrich.__doc__ or "spans" in extract.enrich.__doc__, (
+        "the second input must be documented -- omitting it over-claims `required`"
+    )

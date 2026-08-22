@@ -18,7 +18,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   templates — *"considers sponsorship on a case-by-case basis"*, *"may be available for
   select positions"* — **outnumbered clean offers**, and without a state of their own each
   is forced into `offered`, which is where the cost lives. `clearance ∈ {required,
-  obtainable, mentioned}`: **39.2% of clearance rows say a candidate must be ABLE TO OBTAIN
+  obtainable, mentioned}`: **30.4% of labelled clearance rows say a candidate must be ABLE TO OBTAIN
   a clearance rather than already hold one**, and folding those into `required` tells an
   eligible US citizen the job is closed to them.
 
