@@ -211,6 +211,7 @@ def test_himalayas_parser_maps_fields(monkeypatch):
                 "employmentType": "Full Time",
                 "minSalary": 150000,
                 "maxSalary": 200000,
+                "currency": "CAD",
                 "excerpt": "Agentic systems.",
             }
         ]
@@ -222,7 +223,14 @@ def test_himalayas_parser_maps_fields(monkeypatch):
     assert j["title"] == "LLM Engineer" and j["company"] == "Hooli"
     assert j["location"] == "United States, Canada (Remote)"
     assert j["url"] == "https://hooli.com/apply/1"  # direct link beats the guid
+    # THE CURRENCY MUST REACH THE DISPLAY, not only the record. Asserting the digits
+    # alone passed for `$150,000` and `CAD 150,000` alike, so deleting the third
+    # argument from THIS call site left the suite green while a Toronto band rendered
+    # as dollars -- three passing assertions on `util.salary_range` were testing the
+    # helper, never the caller.
     assert "150,000" in j["salary"] and "200,000" in j["salary"]
+    assert "CAD" in j["salary"], "the vendor currency was dropped on the display path"
+    assert j["salary_currency"] == "CAD"
     _assert_contract(out, "himalayas")
 
 

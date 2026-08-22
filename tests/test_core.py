@@ -4566,7 +4566,10 @@ def test_harvest_actually_orders_the_rows_it_returns(monkeypatch):
         return [
             {
                 "title": "AI Engineer",
-                "text": "Build things with LLMs. Remote.",
+                "text": (
+                    "Build things with LLMs. Remote. "
+                    "We are unable to sponsor visas for this role."
+                ),
                 "location": "Remote",
                 "url": "https://x/1",
                 "posted": "2026-08-01",
@@ -4590,6 +4593,16 @@ def test_harvest_actually_orders_the_rows_it_returns(monkeypatch):
         "harvest returned a row in adapter order -- the _reorder call site is missing"
     )
     assert keys[-1] == "sections", "the body must be last in a delivered row"
+    # AND THE ENRICHMENT HOOK ACTUALLY RAN. Deleting `extract.enrich(p)` from
+    # `_consume` left the whole suite green: every sponsorship test calls the module
+    # directly, and `_coerce` still ensures the four keys present-and-`None`, so the
+    # contract test passes and the feed emits `{"state": null}` on every row forever.
+    # That is 0.7.0's `employer_org` failure one layer up -- a field that is wired to
+    # nothing and looks identical to a field with nothing to say.
+    assert rows[0]["sponsorship"] == "not_offered", (
+        "extract.enrich did not run inside _consume -- the hook is missing"
+    )
+    assert rows[0]["sponsorship_basis"] == "sentence"
 
 
 def test_the_output_shape_levers_reach_a_library_caller(monkeypatch):
