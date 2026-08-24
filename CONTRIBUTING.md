@@ -369,6 +369,15 @@ append-only so an existing reference never changes meaning.)
   fix it. **Print `job_radar.__file__` from inside the run** if you want proof rather than
   faith about which tree you just measured.
 
+- **RUN A NO-OP MUTANT AS A CONTROL.** A mutation run proves the guard holds only if you
+  know the harness actually edited the file the tests imported. **A no-op edit that must come
+  back GREEN is the control**, and without it a red result and a broken harness are
+  indistinguishable — as are a green result and a mutation that never applied. `assert old in
+  src` proves the patch went into *a* file; the no-op control proves the tests read *that*
+  file. Costs one run. **And prefer the full suite over any `-k` selector** — a filter that
+  excludes its own target is form 20, and running everything makes that structurally
+  unavailable rather than something to remember.
+
 - **Quote the collected-test count from every mutation run, and name the guarding test.**
   `assert old in src` proves the mutant applied; it says nothing about whether the test that
   would catch it was selected. A `-k` filter that misses its own target produces a green run
