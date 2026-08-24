@@ -3794,18 +3794,137 @@ def test_a_model_prediction_is_never_written_into_the_commitment_columns():
     """CAUGHT BY MEASURING, NOT BY REVIEW. This once wrote 109106.0 into salary_min
     with basis='parsed' on a row whose 109106.69 was a model output.
 
-    THE MECHANISM CHANGED AT 0.9.0 AND THE PROTECTION DID NOT. It used to rest on the
-    salary_estimated_* columns: `_adzuna_pay` put a prediction there, and
-    `derive_salary` returned early when it saw one. Those columns were removed because
-    nothing downstream ever read them -- NOT for being empty; they read 0 of 102,799
-    only on a harvest with no Adzuna keys, while the live consumer's store holds 6,633.
-    So the guard is now the EMPTY DISPLAY STRING. A
-    predicted row carries `salary: ""`, and `derive_salary` returns at its display
-    check before it can parse anything. Same property, one fewer column, and this test
-    exists to keep it true however it is implemented."""
+    THIS TEST WAS INERT UNTIL 0.9.0 AND ITS OWN DOCSTRING WAS PART OF THE PROBLEM. It
+    said the guard was the EMPTY DISPLAY STRING -- a predicted row carries `salary: ""`
+    and `derive_salary` returns at its display check. Four other sites said the same.
+    Deleting that display check in an isolated export left this test GREEN
+    (`1/710 tests collected`, this test named): the fixture below used to be
+    `{"salary": "", "text": ...}`, and with the check gone `salary_from_display("")`
+    returns all-None and the NEXT line returns. The test never exercised the guard it
+    was named for, and a guard that quietly does not run reads as assurance.
+
+    THE FIXTURE IS NOW THE SHAPE THAT ACTUALLY LEAKED. Measured on 1a1414d,
+    `derive_salary` had no quarantine of its own: handed a predicted row still carrying
+    `$129,584–$129,584` -- EN-DASH, U+2013, the exact rendering 6,633 rows held
+    [live prod, engine 0.8.2] -- it wrote `salary_min=129584.0, salary_basis='parsed',
+    salary_kind='base'`. `salary_from_display` accepts that string: it is a range, ratio
+    1.0. It refuses the modern point form `$109,106` only because `util.salary_range`
+    stopped rendering `$X–$X`, which is a second upstream behaviour and not a guard here
+    either. So this fixture is not a contrivance -- it is what production emitted, and
+    it is the case no test covered.
+
+    NOT A LIVE LEAK, AND THE DISTINCTION IS THE POINT. At HEAD no adapter can emit that
+    string: `util.salary_range` renders a point estimate as `$129,584`, dashless. This
+    pins the property against a RE-INTRODUCTION of the 0.8.2 rendering and against a
+    library caller passing `derive_salary` rows from its own 0.8.2-era store -- a real
+    caller, since this is a public library function. Overstating it as a live leak is
+    the failure that reads as rigour.
+
+    The guard is now `engine.derive_salary`'s PREDICTED_PAY_SOURCES branch, keyed on the
+    source name because nothing else in the record separates a prediction from an honest
+    absence. This test exists to keep the PROPERTY true however it is implemented, so it
+    asserts the property and not the mechanism."""
     p = {
-        "salary": "",  # what _adzuna_pay emits for a predicted row
-        "text": "$109,106\u2013$109,106 a year",
+        "source": "adzuna",
+        # What a regression in `_adzuna_pay` would emit -- and what the last release
+        # shipping the estimate columns really did emit, 6,633 times.
+        "salary": "$129,584\u2013$129,584",
+        "text": "Estimated salary $129,584\u2013$129,584 a year",
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_min") is None, "a prediction reached the commitment column"
+    assert p.get("salary_basis") is None
+    # NOT asserting `salary_kind is None`, and the reason is worth a sentence because an
+    # assertion that passes for a reason that has moved is worse than no assertion. The
+    # guard sits below the fill-only return so a non-predicted Adzuna row keeps its kind
+    # (see the test below), and the kind is assigned above that return by a deliberate,
+    # measured decision -- so this fixture DOES come out `salary_kind='base'`. That is
+    # unreachable in production: a real predicted row carries `salary == ""`, the kind is
+    # assigned under `if p.get("salary")`, and it is measured `None` on one. The
+    # commitment column is what this test guards, and it is null either way.
+
+    # AND THE SHAPE THE ADAPTER EMITS TODAY, which is the cheaper half of the same
+    # property: no display string, nothing to parse.
+    q = {"source": "adzuna", "salary": "", "text": "$109,106\u2013$109,106 a year"}
+    engine.derive_salary(q)
+    assert q.get("salary_min") is None and q.get("salary_basis") is None
+
+    # A REAL ADZUNA RANGE IS UNTOUCHED BY THE QUARANTINE. The guard keys on the source
+    # AND on the vendor having sent no numbers, so `basis='stated'` rows keep their
+    # figures and still get a `salary_kind`. Without this assertion the guard could be
+    # widened to "refuse adzuna outright" and no test would notice.
+    r = {
+        "source": "adzuna",
+        "salary": "$115,000\u2013$145,000",
+        "text": "Base salary $115,000\u2013$145,000 a year",
+        "salary_min": 115_000.0,
+        "salary_max": 145_000.0,
+        "salary_basis": "stated",
+    }
+    engine.derive_salary(r)
+    assert r["salary_min"] == 115_000.0 and r["salary_basis"] == "stated"
+    assert r.get("salary_kind") == "base", "a real vendor range lost its kind"
+
+
+def test_the_prediction_quarantine_is_scoped_to_sources_that_predict():
+    """THE GUARD MUST NOT BECOME "refuse any row with no vendor figure". Every source
+    that states pay only in prose depends on `derive_salary` reading its display string,
+    and Phase 1's body scan depends on it more. A greenhouse row carrying the identical
+    fake-range shape is parsed, because greenhouse publishes no predictions -- the
+    quarantine is about WHO SAID IT, not what it looks like."""
+    p = {
+        "source": "greenhouse",
+        "salary": "$129,584\u2013$129,584",
+        "text": "The base salary range is $129,584\u2013$129,584 a year",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 129_584.0, "the quarantine leaked past its own source set"
+    assert p["salary_basis"] == "parsed"
+
+
+def test_a_non_predicted_adzuna_row_keeps_its_kind_and_its_parse():
+    """THE COLLATERAL THE FIRST DRAFT OF THE QUARANTINE CAUSED, pinned so it cannot come
+    back. The guard was written above the `salary_kind` assignment, where it fired on any
+    Adzuna row with no structured figures -- including one whose EMPLOYER stated pay as a
+    display string -- and stripped the kind off it.
+
+    Unreachable from `_adzuna_pay` as it stands: enumerated over its branches,
+    `util.salary_range` returns non-empty exactly when `vocab.salary` fills at least one
+    of min/max, so "display string and no numbers" occurs on none of them. It is reachable
+    for a LIBRARY CALLER constructing a row, which is what this test is. Pinning an
+    unreachable case is cheap; discovering that a guard silently widened is not."""
+    p = {
+        "source": "adzuna",
+        "salary": "$115,000\u2013$145,000",
+        "text": "The base salary range for this position is $115,000\u2013$145,000 per year.",
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_kind") == "base", "a stated range lost its kind to the guard"
+    # The figure itself is still quarantined -- the source cannot be trusted for a
+    # commitment, and this row is indistinguishable in the record from a prediction.
+    assert p.get("salary_min") is None
+
+
+def test_the_sections_fixture_a_scoped_body_scan_will_need():
+    """DELIBERATELY INERT UNTIL PHASE 1 EXISTS, AND SAYING SO IS THE POINT OF IT.
+
+    `derive_salary` reads `p["sections"]` NOWHERE today, so nothing below exercises a
+    section-scoped path -- there is not one. This fixture is here so that when the scan
+    lands, the row it will act on is already pinned with a compensation span pointing at
+    a figure a predicted-pay source must never have parsed. The assertion it makes today
+    is real but narrow: the quarantine returns before any reader of `sections` could run.
+
+    Recorded plainly because the alternative is worse. The version of this suite before
+    0.9.0 shipped a fixture that looked like it tested a guard and did not, and nobody
+    noticed for a release. A test that cannot fail yet should say which change will make
+    it able to."""
+    p = {
+        "source": "adzuna",
+        "salary": "",
+        "text": "About us. Compensation. $129,584\u2013$129,584 a year. Benefits.",
+        "sections": [
+            {"type": "compensation", "start": 10, "end": 47, "heading": "Compensation"}
+        ],
     }
     engine.derive_salary(p)
     assert p.get("salary_min") is None, "a prediction reached the commitment column"

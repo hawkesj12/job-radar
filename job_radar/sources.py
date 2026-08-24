@@ -1848,6 +1848,63 @@ DEPTH_ACCEPTS_KEEP = frozenset({"workday", "rippling"})
 DIRECT_APPLY_SOURCES = frozenset({"usajobs", "braintrust"})
 
 
+# ── SOURCES THAT PUBLISH MODEL-PREDICTED PAY ────────────────────────────────
+#
+# `engine.derive_salary` refuses to parse anything for a row from one of these when
+# the vendor sent no numeric figures of its own. A model's guess must never reach
+# `salary_min`, which README.md defines as pay an employer committed to.
+#
+# THE SOURCE NAME IS THE ONLY KEY THE RECORD CARRIES, and that is forced rather than
+# preferred -- do not go looking for a cleaner one. A PREDICTED adzuna row and a
+# genuine NO-FIGURE adzuna row are byte-identical in the record: `_adzuna_pay` returns
+# `{"salary": ""}` for the prediction, and a row with no figures renders
+# `util.salary_range(None, None) == ""` alongside `vocab.salary(None, None, ...)`
+# all-None. `salary_is_predicted` is a vendor field and never enters the record.
+#
+# WHY THE GUARD IS NOT ONLY IN `_adzuna_pay`. Until this set existed the quarantine was
+# entirely upstream and `derive_salary` had none of its own -- measured on 1a1414d,
+# `{"source": "adzuna", "salary": "$129,584–$129,584"}` parsed straight through to
+# `salary_min=129584.0, salary_basis='parsed', salary_kind='base'`. That EN-DASH
+# (U+2013) fake range is the exact shape 6,633 rows carried [live prod, engine 0.8.2],
+# so the one string that had actually reached a production store was the one string
+# with no defence inside the parser. Two independent guards now, mutation-tested apart.
+#
+# THAT STRING IS NOT REACHABLE FROM THIS ADAPTER AT HEAD, and saying so is the
+# difference between a claim that survives re-derivation and one that does not.
+# `util.salary_range` renders a point estimate as `$129,584` -- no dash -- so
+# `salary_from_display` refuses it even if the discard branch below regressed, and that
+# regression would write `salary_min` DIRECTLY via `vocab.salary(...)` rather than
+# through any parse. `$129,584–$129,584` is the 0.8.2 rendering, alive in the live
+# consumer's store and in nothing this tree emits. The guard is defence in depth against
+# re-introducing it, and against a library caller feeding `derive_salary` rows from its
+# own 0.8.2-era store. Not a live pipeline leak.
+#
+# ADZUNA IS THE ONLY MEMBER, and that was established by sweeping the `salary:` field
+# notes of all 22 `catalog/` profiles: `salary_is_predicted` is the only estimate flag
+# in the set, and every other structured salary is a vendor-stated figure. (Two profiles
+# match `predict` as the English word "predicts" in prose -- a grep count is not a
+# membership test.) That sweep is the instrument; no live probe was needed or run.
+#
+# google_jobs was the one worth checking twice, being the least documented adapter, and
+# it is ABSENT for a structural reason rather than a judgement about Google.
+# `vocab.google_salary` fills `salary_min` AT THE ADAPTER whenever
+# `detected_extensions.salary` parses, so `derive_salary` returns at its fill-only guard
+# and never reaches this set: adding google_jobs would be a no-op on precisely the rows
+# it would be added for -- verified by running the shipped functions, not by reading
+# them. If Google is ever found to emit an ESTIMATE there, the defect is `google_salary`
+# writing basis="parsed" onto it at the adapter, and this set is the wrong instrument.
+#
+# WHAT THIS SET DOES NOT COVER, said plainly because a register reads as broader than it
+# is: it keys on WHO PUBLISHED the row, so it cannot see a third-party estimate quoted
+# inside an ordinary source's prose, and it would not catch a second predicting source
+# until someone adds it here. A guard on the SHAPE of the figure -- refusing lo == hi on
+# a body-derived number -- covers both and is the right instrument for the body-scan lane
+# when that lane exists. It must NOT be applied to display strings globally: 212 of
+# 39,849 rows with a display string are genuine employer point values [102,799-row
+# harvest, 2026-08-20], greenhouse 195 and lever 17, and a blanket refusal deletes them.
+PREDICTED_PAY_SOURCES = frozenset({"adzuna"})
+
+
 # ── LIVENESS: does this board exist? -- live_<ats>(slug, **extra) -> int ─────
 #
 # Three callers -- discover.probe, funnel.funnel and seed.seed_universe -- only
@@ -2365,10 +2422,23 @@ def _adzuna_pay(j: dict) -> dict:
     ever read it: the one known consumer writes both columns into its own schema and
     reads them back nowhere.
 
-    `salary` staying empty is now the protection: `engine.derive_salary` returns at its
-    display-string check and can never parse the figure into `salary_min`. (Belt and
-    braces, and worth knowing: `vocab.salary_from_display` also returns all-None for
-    both "" and None, so the parser refuses independently of that early return.)
+    `salary` STAYING EMPTY IS NOT THE PROTECTION, although an earlier version of this
+    paragraph said it was -- and so did engine.py, vocab.py and two tests. Measured on
+    1a1414d, `derive_salary` carried no guard of its own: handed a predicted row that
+    still had the en-dash fake range `$129,584–$129,584`, it wrote
+    `salary_min=129584.0, salary_basis='parsed'`. Emitting "" only avoids handing it
+    one, which is a different thing from refusing it.
+
+    THE PROTECTION IS `engine.derive_salary`'s PREDICTED_PAY_SOURCES guard, which
+    refuses by SOURCE and does not read what this function emits. Said precisely: at
+    HEAD that en-dash range is unreachable from here -- `salary_range` renders a point
+    estimate dashless -- so the guard is defence in depth against re-introducing the
+    0.8.2 rendering and against a caller passing us rows from a 0.8.2-era store, not a
+    patch for a live leak. The two are
+    independent on purpose, so a regression here no longer reaches the commitment
+    columns by itself. (Belt and braces, and worth knowing: `vocab.salary_from_display`
+    also returns all-None for both "" and None -- but it ACCEPTS `$129,584–$129,584`,
+    so that refusal never covered the shape that actually leaked.)
     """
     lo, hi = j.get("salary_min"), j.get("salary_max")
     if str(j.get("salary_is_predicted")) == "1":

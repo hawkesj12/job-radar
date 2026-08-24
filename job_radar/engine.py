@@ -20,6 +20,7 @@ from .sources import (
     DIRECT_APPLY_SOURCES,
     DEPTH_ALL,
     DEPTH_EXTRA_FIELDS,
+    PREDICTED_PAY_SOURCES,
     _is_direct_apply,
     enabled_breadth,
     enabled_depth,
@@ -1082,6 +1083,36 @@ def derive_salary(p: dict) -> dict:
     the ~20-character display string alone would belong in `_coerce`; reading the body
     around it does not.
     """
+    # AN ESTIMATE IS NOT A COMMITMENT, and this guard is where that is enforced. The
+    # function once wrote 109106.0 into `salary_min` with basis="parsed" on a row whose
+    # 109106.69 was a model output -- caught by measuring, not by review.
+    #
+    # THE PROTECTION USED TO BE UPSTREAM AND ONLY UPSTREAM, and five places in this repo
+    # said otherwise. `_adzuna_pay` emits `{"salary": ""}` for a predicted row, and the
+    # `not display` return below was described -- here, in vocab.py, in sources.py and in
+    # two tests -- as "the guard". It was not one. Measured on 1a1414d, before this
+    # branch existed: `{"source": "adzuna", "salary": "$129,584–$129,584"}` parsed
+    # straight through to `salary_min=129584.0, salary_basis='parsed',
+    # salary_kind='base'`. That EN-DASH (U+2013) fake range is the exact shape 6,633 rows
+    # carried [live prod, engine 0.8.2] -- so the one string that had actually reached a
+    # production store was the one string with no defence in this function at all.
+    #
+    # WHAT THIS GUARD IS FOR, STATED SO NOBODY RE-DERIVES IT AND CALLS IT FALSE: that
+    # string is NOT reachable from any shipped adapter at HEAD. `util.salary_range`
+    # renders a point estimate as `$129,584` -- no dash -- so `salary_from_display`
+    # refuses it, and `_adzuna_pay` emits nothing at all anyway. `$129,584–$129,584` is
+    # the 0.8.2 rendering: it exists in the live consumer's store and in nothing this
+    # tree can emit. So this is defence in depth against a RE-INTRODUCTION of that
+    # rendering, and against a library caller handing `derive_salary` 0.8.2-shaped rows
+    # out of its own store -- which is a real caller, not a hypothetical one, because
+    # this is a public library function. It is not a live pipeline leak today.
+    #
+    # THE `salary_min`/`salary_max` HALF IS LOAD-BEARING, not belt-and-braces: a REAL
+    # Adzuna range arrives with `vocab.salary(..., basis="stated")` already applied, and
+    # it must keep behaving exactly as before, `salary_kind` included. Only a row whose
+    # vendor sent NO numbers is quarantined -- which is precisely the predicted-or-absent
+    # case, because those two are indistinguishable in the record (see
+    # `sources.PREDICTED_PAY_SOURCES` for why the source name is the only available key).
     # THE KIND IS SET ABOVE THE FILL-ONLY GUARD, and that placement is the whole point.
     # Everything below returns early when a vendor already sent numbers -- but a
     # vendor-stated figure carrying an OTE or equity label is EXACTLY the defect this
@@ -1101,27 +1132,56 @@ def derive_salary(p: dict) -> dict:
         p["salary_kind"] = salary_kind(p.get("text") or "", p["salary"])
     if p.get("salary_min") is not None or p.get("salary_max") is not None:
         return p
-    # AN ESTIMATE IS NOT A COMMITMENT, and the display string is what enforces that
-    # now. This function once wrote 109106.0 into `salary_min` with basis="parsed" on
-    # a row whose 109106.69 was a model output -- caught by measuring, not by review.
-    # The fix at the time was a pair of salary_estimated_* columns plus an early return
-    # here when they were set. Those columns were removed at 0.9.0, and the reason is
-    # worth keeping, and stating carefully. On the last release that SHIPPED those
-    # columns the separation leaked: all 6,633 rows carrying an estimate also rendered
-    # it as "$129,584–$129,584" -- EN-DASH, U+2013, which is what the store holds;
-    # a LIKE '%-%' on an ASCII hyphen returns 0 of 6,633 and reads as a refutation --
-    # with 0 carrying a commitment figure
-    # `[live prod, engine 0.8.2]`. That is the HISTORY, not the reason they went --
-    # `fa0cee3` and `9907e55` closed the leak earlier in 0.9.0, so by the removal the
-    # quarantine was already intact. They went because nothing downstream ever read
-    # them.
+    # BELOW THE FILL-ONLY RETURN ON PURPOSE, and the first draft of this guard had it
+    # above. There it also fired on an Adzuna row that carried a display string with no
+    # structured numbers -- not a prediction -- and stripped its `salary_kind`, because
+    # the kind is assigned above the fill-only return and that placement is deliberate
+    # (see the 411-of-42,072 measurement in the block above; it is how the original
+    # misplacement was caught). Down here the guard is strictly narrower and the
+    # `salary_min is None and salary_max is None` condition it used to carry is
+    # redundant: every row with a vendor figure has already returned.
     #
-    # `_adzuna_pay` now emits NO salary at all for a predicted row, so the guard is the
-    # `not display` return below: there is no string to parse and no column to leak
-    # into. Verified end to end through the real adapter path, including a row whose
-    # body quotes the model's own figure as prose.
+    # BOTH THE FIX AND ITS COST ARE UNREACHABLE FROM THE ADAPTER, which is why the move
+    # is justified by narrowness alone and not by a bug report. Enumerated over every
+    # branch of `_adzuna_pay`: `util.salary_range` returns non-empty exactly when
+    # `vocab.salary` fills at least one of min/max, so "display string AND no numbers"
+    # -- the row the old placement stripped a kind from -- occurs on none of them.
+    #
+    # The cost is bounded by the same fact. `salary_kind` is assigned under
+    # `if p.get("salary")`, and a real predicted row carries `salary == ""`, so the kind
+    # is never set on one: measured, a predicted row as the adapter emits it comes out
+    # `salary_kind=None`. The only row that pays the cost -- a prediction labelled
+    # `base` with a null `salary_min` -- is that same hand-constructed row, reachable by
+    # a library caller and by nothing in this pipeline. Recorded rather than left to be
+    # discovered, and recorded WITH its reachability so neither fact is overstated.
+    #
+    # For WHY the key is the source name and nothing finer, see
+    # `sources.PREDICTED_PAY_SOURCES`: a predicted Adzuna row and a genuine no-figure
+    # Adzuna row are byte-identical in the record once `_coerce` has run.
+    if p.get("source") in PREDICTED_PAY_SOURCES:
+        return p
+    # WHY THERE ARE NO salary_estimated_* COLUMNS, since the guard above is what stands
+    # in their place. The fix at the time was a pair of estimate columns plus an early
+    # return here when they were set. On the last release that SHIPPED them the
+    # separation leaked anyway: all 6,633 rows carrying an estimate also rendered it as
+    # "$129,584–$129,584" -- EN-DASH, U+2013, which is what the store holds; a
+    # LIKE '%-%' on an ASCII hyphen returns 0 of 6,633 and reads as a refutation -- with
+    # 0 carrying a commitment figure `[live prod, engine 0.8.2]`. That is the HISTORY,
+    # not the reason they went: `fa0cee3` and `9907e55` closed the leak earlier in
+    # 0.9.0. They went because nothing downstream ever read them.
     display = p.get("salary")
     if not display:
+        # A CHEAP EARLY-OUT, NOT THE QUARANTINE. An earlier version of this comment
+        # called it "the guard" and four other sites repeated the claim. It refuses
+        # nothing this function would otherwise accept: deleting this line in an
+        # isolated export left the guarding test GREEN (`1/710 tests collected`, the
+        # test named), because `vocab.salary_from_display("")` returns all-None and the
+        # next check returns on that. It is not a performance guard either: timed over
+        # 20,000 real corpus bodies, `_adjacent_evidence(body, "")` costs 0.52 us/row,
+        # about 32 ms across the 60,716 fall-through rows of a whole harvest. The line
+        # is vestigial. It stays because Phase 1's section-scoped body scan is what
+        # replaces it, and replacing it now would be an irreversible change made on a
+        # provisional plan; the quarantine above is deliberately independent of it.
         return p
     currency, period = _adjacent_evidence(p.get("text") or "", display)
     got = vocab.salary_from_display(display, period=period, currency=currency)
