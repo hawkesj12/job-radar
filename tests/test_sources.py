@@ -4102,3 +4102,59 @@ def test_the_seeker_labels_are_not_anchored_to_a_line_start():
     )
     assert "\n" not in one_line
     assert sources._is_hn_seeker_post(one_line)
+
+
+def test_greenhouse_emits_the_board_owner_it_was_already_being_sent(monkeypatch):
+    """`company_name` rode on every Greenhouse row and this adapter threw it away, so
+    the engine stamped the watchlist's slug instead and a user read
+    `langanengineeringandenvironmentalservicesllc`.
+
+    Measured live 2026-08-24 over 104 boards: present and non-empty on 100% of rows,
+    and byte-identical to `discover.board_owner`'s separate `/v1/boards/{slug}` call on
+    103 of 103 boards that had a row to compare -- so this costs no extra request, and
+    does not need `content=true`.
+
+    Asserted on the ADAPTER's output, not on a harvested record: the engine decides
+    whether to USE it (fill-only), and conflating the two hides which layer moved."""
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url: {
+            "jobs": [
+                {
+                    "title": "Staff Engineer",
+                    "company_name": "Abnormal",
+                    "absolute_url": "https://x/1",
+                    "location": {"name": "Remote"},
+                    "content": "python",
+                    "first_published": "2026-07-20T00:00:00-04:00",
+                }
+            ]
+        },
+    )
+    assert [r["company"] for r in sources.fetch_greenhouse("abnormalsecurity")] == [
+        "Abnormal"
+    ]
+
+
+def test_greenhouse_reports_no_company_rather_than_an_empty_one(monkeypatch):
+    """`None` means "the source did not say" and must stay distinct from `""`: the
+    engine falls back to the watchlist entry on None, and `str(None)` is the string
+    "None", which is why contract fields are never blindly coerced."""
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url: {
+            "jobs": [
+                {
+                    "title": "Staff Engineer",
+                    "company_name": "",
+                    "absolute_url": "https://x/1",
+                    "location": {"name": "Remote"},
+                    "content": "python",
+                    "first_published": "2026-07-20T00:00:00-04:00",
+                }
+            ]
+        },
+    )
+    assert [r["company"] for r in sources.fetch_greenhouse("x")] == [None]

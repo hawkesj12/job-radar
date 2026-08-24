@@ -123,6 +123,8 @@ The depth lane's bottleneck was never fetching. It was **supply**: every per-com
 
 **Then probe — and this is what makes bulk mining safe.** Every candidate is hit against its real ATS API and kept only if it returns at least one live role. A dead, churned, or misparsed slug returns nothing and costs one cheap request.
 
+**And take the employer's real name while you're there.** A mined slug is a URL fragment, not a company: `langanengineeringandenvironmentalservicesllc` is Langan Engineering and Environmental Services. Greenhouse reports the board owner on every posting it returns, so a mined board arrives with its proper name at no extra request. That name is used only where the watchlist has none of its own — a curated name always wins, because a vendor's own string is sometimes worse (`allwebleads` reports itself as `AWL`). Boards on an ATS that never names its owner keep the slug: **an ugly employer name is better than a wrong one.**
+
 **And where the ATS will say who owns a board, check identity too.** A probe proves `jobs.lever.co/capital` is a real board with real jobs. It does not prove it belongs to Capital One — it doesn't. Liveness and identity are different questions, and conflating them files a stranger's jobs under a real employer, invisibly. Greenhouse is the one ATS that answers the second question, so the riskiest slug guesses are generated only for it.
 
 `probe` reports _why_ each candidate failed, split into terminal (`refused`, `wrong-owner`, `unsupported`) and retryable (`throttled`, `missing`, `empty`, `error`). The split is load-bearing: 429 means slow down, not go away, and a caller that blacklists on it will discard hundreds of good employers in one bad run.

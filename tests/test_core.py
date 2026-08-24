@@ -4152,12 +4152,17 @@ def test_coerce_strips_edge_whitespace_without_moving_the_dedup_key():
         assert p["title"] == "Data Engineer", repr(ws)
         assert p["location"] == "Austin, TX", repr(ws)
 
-    # `company`, `url` and `source` are deliberately NOT stripped -- on a depth adapter
-    # `company` comes from the watchlist, not the vendor, so this is the wrong layer.
+    # `company` IS stripped as of 0.9.0. This assertion pinned the OPPOSITE, on the
+    # reasoning that "on a depth adapter `company` comes from the watchlist, not the
+    # vendor, so this is the wrong layer." That premise died when `harvest` began
+    # filling `company` from Greenhouse's own `company_name`: it is now
+    # vendor-supplied, and about one Greenhouse board in ten ships edge whitespace
+    # in it -- ' Higher Logic', 'Home Chef  ', ' ALO', 'Brandtech+ ', 'Horace Mann '.
+    # `url` and `source` are still NOT stripped: measured at 0 rows each.
     p = {"title": "t", "location": "l", "company": "  Acme  ", "url": "  u  ",
          "source": "greenhouse"}
     engine._coerce(p)
-    assert p["company"] == "  Acme  " and p["url"] == "  u  "
+    assert p["company"] == "Acme" and p["url"] == "  u  "
 
     # Stripping runs BEFORE the nullable pass, so a whitespace-only location becomes
     # None rather than a string that looks present and holds nothing.
@@ -5292,4 +5297,158 @@ def test_every_test_name_a_source_comment_cites_actually_exists():
     assert not missing, (
         f"a source comment names a test that does not exist: {missing}. "
         "Rename the citation with the test, or delete it."
+    )
+
+
+# ── company: FILL-ONLY from the vendor's own name (0.9.0) ────────────────────
+def _vendor_depth(monkeypatch, vendor):
+    """One greenhouse board whose postings carry `vendor` as their own company.
+
+    `vendor=None` models a board the ATS reports no owner for -- the adapter emits the
+    key as None rather than omitting it, so the engine sees an explicit "the source did
+    not say" and must not invent one."""
+
+    def fake(slug, **kw):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": vendor,
+                "location": "Remote",
+                "url": f"https://x/{slug}",
+                "posted": "2026-07-20",
+                "text": "python",
+                "salary": "",
+            }
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+
+
+def test_a_watchlist_name_byte_equal_to_the_slug_is_filled_from_the_vendor(monkeypatch):
+    """The defect: `seed._seeded` writes `"name": entry["slug"]` on every mined board,
+    so a user read `langanengineeringandenvironmentalservicesllc` as the employer.
+
+    5,052 of 5,052 `cdx-discovery` boards in the reference universe are byte-equal like
+    this -- 100%, no exceptions -- which is what makes the population exact rather than
+    a guess about casing. Three casing tests were tried first and all three were wrong:
+    they cannot tell a slug from a lowercase brand like `deel`."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[
+            {"name": "abnormalsecurity", "ats": "greenhouse", "slug": "abnormalsecurity"}
+        ],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["Abnormal"]
+
+
+def test_a_missing_watchlist_name_is_also_filled_from_the_vendor(monkeypatch):
+    """`dedup.board_entry` returns {"ats","slug"} with no `name` key at all, so
+    `c.get("name", slug)` fell through to the slug. 0 such entries exist on disk today
+    (`seed._seeded` renames them before they land), but the fallback is live code and
+    the fill must cover it -- otherwise the fix depends on which producer wrote the
+    entry, which is not a property anyone reading the record can see."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    rows, _, errors = engine.harvest(
+        _cfg(), companies=[{"ats": "greenhouse", "slug": "abnormalsecurity"}]
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["Abnormal"]
+
+
+def test_a_curated_watchlist_name_is_never_overwritten_by_the_vendor(monkeypatch):
+    """FILL-ONLY, and this is the assertion that makes it fill-only rather than
+    prefer-vendor. Measured live on 40 curated boards: the vendor disagreed on 6, in
+    BOTH directions -- 'DoorDash' -> 'DoorDash USA' but also 'Canonical Ltd.' ->
+    'Canonical' -- so no prefer-longer/prefer-shorter tie-break exists either.
+    `allwebleads` -> 'AWL' is the shape that settles it: a vendor's own name can be
+    less legible than the slug, which no win rate offsets."""
+    _vendor_depth(monkeypatch, "DoorDash USA")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[{"name": "DoorDash", "ats": "greenhouse", "slug": "doordashusa"}],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["DoorDash"]
+
+
+def test_a_board_the_vendor_does_not_name_keeps_the_slug(monkeypatch):
+    """A wrong name is worse than an ugly one. With no vendor name the slug stands --
+    and `None` must not arrive as the string "None" via the `_REQUIRED_TEXT` pass."""
+    _vendor_depth(monkeypatch, None)
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[
+            {"name": "somemineboard", "ats": "greenhouse", "slug": "somemineboard"}
+        ],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["somemineboard"]
+
+
+def test_a_vendor_company_that_is_only_whitespace_does_not_win(monkeypatch):
+    """`'   '` is not a name. It is a truthy string, so a bare `vendor or name` would
+    have silently replaced the slug with a blank employer column."""
+    _vendor_depth(monkeypatch, "   ")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[{"name": "someboard", "ats": "greenhouse", "slug": "someboard"}],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["someboard"]
+
+
+def test_vendor_company_edge_whitespace_is_stripped(monkeypatch):
+    """Greenhouse ships edge whitespace in `company_name` on roughly one board in ten
+    -- ' Higher Logic', 'Home Chef  ', ' ALO', 'Brandtech+ ', 'Horace Mann ' across
+    three live samples taken by two agents against two endpoints. `company` was
+    excluded from `_coerce`'s strip loop because it came from the watchlist; it now
+    comes from the vendor, which is what makes this the right layer."""
+    _vendor_depth(monkeypatch, " Higher Logic")
+    rows, _, _ = engine.harvest(
+        _cfg(),
+        companies=[{"name": "higherlogic", "ats": "greenhouse", "slug": "higherlogic"}],
+    )
+    assert [r["company"] for r in rows] == ["Higher Logic"]
+
+
+def test_a_renamed_frontier_board_still_scores_as_frontier(monkeypatch):
+    """A BUG THIS CHANGE INTRODUCES, fixed in the same commit. `meta` is keyed on
+    `norm(watchlist name)` and `_consume` reads `meta.get(norm(p["company"]))`, so
+    filling the company moved the lookup off its own entry: `frontier` and `local`
+    silently stopped applying to every board the fill renamed. No error, no log line
+    -- only a score that quietly moved by `cfg.frontier_penalty`.
+
+    Measured before the re-key: 19.0 for a filled frontier board against 9.0 for the
+    same board with a curated name. Exposure on disk today is 0 entries (no flagged
+    watchlist entry is byte-equal to its slug), which is why nothing caught it."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    cfg = _cfg()
+    rows, _, _ = engine.harvest(
+        cfg,
+        companies=[
+            {
+                "name": "abnormalsecurity",
+                "ats": "greenhouse",
+                "slug": "abnormalsecurity",
+                "frontier": True,
+            }
+        ],
+    )
+    assert [r["company"] for r in rows] == ["Abnormal"]
+    assert "frontier" in (rows[0].get("signals") or ""), rows[0].get("signals")
+
+
+def test_filling_the_company_does_not_move_the_dedup_key_for_whitespace(monkeypatch):
+    """The accepted scope of the strip change, pinned rather than asserted in prose:
+    `norm` collapses non-alphanumerics, so ' Higher Logic' and 'Higher Logic' already
+    key identically. If that stopped being true, every stored row for the board would
+    orphan and lose its `first_seen` and `status`."""
+    from job_radar import dedup
+
+    assert dedup.norm(" Higher Logic") == dedup.norm("Higher Logic")
+    assert dedup.company_block({"company": " ALO"}) == dedup.company_block(
+        {"company": "ALO"}
     )
