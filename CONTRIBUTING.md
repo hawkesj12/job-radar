@@ -327,6 +327,20 @@ append-only so an existing reference never changes meaning.)
   else work has a higher bar than one that only costs you** — if a ruling lands on your
   claim, go verify it before the work starts.
 
+- **`cd`-ing IN IS NOT ENOUGH IF THE SCRIPT LIVES OUTSIDE.** Two agents hit this
+  independently, a week apart. `python3 /tmp/harness.py` puts **the SCRIPT'S directory** on
+  `sys.path[0]` — not the working directory — so a harness run from inside the export still
+  imports the working tree through the editable install. One agent's before/after diff read
+  **0 changed across 67,678 sections** because both halves measured the same untouched tree;
+  the other caught it only because it prints `job_radar.__file__`. **Copy the harness INTO
+  the export, or pass an explicit package root.**
+
+- **Assert the tree with RESOLVED paths, not string prefixes.** `mktemp -d` returns
+  `/var/folders/...` on macOS and the import resolves to `/private/var/folders/...`, so
+  `__file__.startswith(tmpdir)` fails on a correct tree. A guard that cries wolf gets
+  deleted, and then the real case walks through. Use
+  `os.path.realpath(job_radar.__file__).startswith(os.path.realpath(root))`.
+
 - **`cd` INTO the isolated export. Do not run pytest at it from outside.** The `cd` in this
   file's recipe is load-bearing and nothing says so until it bites: launching
   `python3 -m pytest /tmp/gate` from the repo puts the repo's cwd on `sys.path[0]`, and the
