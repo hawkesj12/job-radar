@@ -5452,3 +5452,32 @@ def test_filling_the_company_does_not_move_the_dedup_key_for_whitespace(monkeypa
     assert dedup.company_block({"company": " ALO"}) == dedup.company_block(
         {"company": "ALO"}
     )
+
+
+def test_a_nameless_entry_keeps_its_frontier_and_local_flags(monkeypatch):
+    """TWO SITES, TWO DIFFERENT DEFAULTS FOR ONE MISSING KEY.
+
+    `meta` was keyed on `norm(c.get("name", ""))` while `_consume` reads
+    `meta.get(norm(p["company"]))`, and the stamp defaults to the SLUG -- so an entry
+    with no `name` was filed under `norm("")`, never matched, and `frontier`/`local`
+    silently did nothing for it. Measured before the fix: nameless + `frontier` scored
+    11 against a curated board's 1; nameless + `local` scored 11 against 21.
+
+    PREDATES the company fill and is not caused by it. The fill's own alias did not
+    cover it either, because `norm(name) in meta` is False for an entry that has no
+    name -- which is exactly what that comment's "every board it renames" got wrong.
+
+    Exposure on disk is 0: no entry in any shipped watchlist is nameless. That is why
+    nothing caught it, and why this test exists rather than a measurement.
+    """
+    _vendor_depth(monkeypatch, "Abnormal")
+    cfg = _cfg()
+    rows, _, _ = engine.harvest(
+        cfg, companies=[{"ats": "greenhouse", "slug": "abn", "frontier": True}]
+    )
+    assert "frontier" in (rows[0].get("signals") or ""), rows[0].get("signals")
+
+    rows, _, _ = engine.harvest(
+        cfg, companies=[{"ats": "greenhouse", "slug": "abn", "local": True}]
+    )
+    assert "local" in (rows[0].get("signals") or ""), rows[0].get("signals")
