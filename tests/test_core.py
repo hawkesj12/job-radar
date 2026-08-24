@@ -5260,3 +5260,36 @@ def test_salary_kind_reads_ote_out_of_a_parenthetical():
     # UNRELATED cues equidistant from the figure are a real ambiguity and still refuse,
     # however long either is.
     assert k("bonus $100-$200 base pay", "$100-$200") == "base"
+
+
+def test_every_test_name_a_source_comment_cites_actually_exists():
+    """A COMMENT-TO-TEST CROSS-REFERENCE IS CHECKED BY NOTHING ELSE HERE, and this release
+    came within one merge-resolution choice of proving it. Two commits renamed the same
+    test differently -- `..._but_not_its_parse` and `..._but_not_its_figure` -- while a
+    `sources.py` comment cited it by name. Had the merge taken one commit's rename beside
+    the other's comment, the register would point at a test that does not exist and `ruff`,
+    `mypy` and `pytest` would all have stayed green, because no gate reads a comment.
+
+    This repo treats a wrong comment as a bug, so a comment naming a test that was renamed
+    or deleted is a bug nothing was catching. Cheap to close: 2 names cited today, 517
+    defined."""
+    import pathlib
+    import re
+
+    cited: dict[str, str] = {}
+    for f in sorted(pathlib.Path("job_radar").glob("*.py")):
+        for m in re.finditer(r"\btest_[a-z0-9_]{6,}", f.read_text(encoding="utf-8")):
+            cited.setdefault(m.group(0), f.name)
+
+    defined: set[str] = set()
+    for f in sorted(pathlib.Path("tests").glob("*.py")):
+        defined |= set(
+            re.findall(r"^def (test_[a-z0-9_]+)", f.read_text(encoding="utf-8"), re.M)
+        )
+
+    assert cited, "the scanner found no cited names -- it has stopped scanning"
+    missing = {n: where for n, where in cited.items() if n not in defined}
+    assert not missing, (
+        f"a source comment names a test that does not exist: {missing}. "
+        "Rename the citation with the test, or delete it."
+    )
