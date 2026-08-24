@@ -631,10 +631,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route a `salary_is_predicted` row into `salary_estimated_*`, and `derive_salary`
   returned early when it saw one — that guard existed because the parser once wrote
   `109106.0` into `salary_min` on a row whose `109106.69` was a model output. A
-  predicted row now emits **no salary at all**: `salary` stays `""`, so `derive_salary`
-  returns at its display-string check and can never parse the figure into a commitment
-  column. Same property, one fewer column, and both tests were re-pointed at the new
-  mechanism rather than deleted. **The prediction is discarded, not relocated** — if you
+  predicted row now emits **no salary at all**: `salary` stays `""`, so there is no
+  string to hand the parser.
+
+  **WAS: "so `derive_salary` returns at its display-string check and can never parse the
+  figure into a commitment column."** That credited a line that refused nothing, and four
+  other sites in the tree repeated it. Measured on `1a1414d`: deleting `if not display:
+  return p` in an isolated export left the whole suite green (`674 passed`), because
+  `vocab.salary_from_display("")` returns all-None and the next check returns on that —
+  and handing `derive_salary` a predicted row that still carried the en-dash fake range
+  `"$129,584–$129,584"` wrote `salary_min=129584.0, salary_basis='parsed'`. **The one
+  string that had actually reached a production store was the one string with no defence
+  inside the parser.** Stated precisely, because the harsher reading is also the wrong
+  one: **that string is not reachable from any shipped adapter at HEAD** —
+  `util.salary_range` renders a point estimate as `$129,584`, dashless, and
+  `salary_from_display` refuses it. `"$129,584–$129,584"` is the 0.8.2 rendering, alive
+  in the live consumer's store and in nothing this tree emits. The new guard is defence
+  in depth against re-introducing it, and against a library caller handing
+  `derive_salary` rows out of its own 0.8.2-era store — **not a patch for a live leak.** `derive_salary` now carries its own quarantine keyed on
+  `sources.PREDICTED_PAY_SOURCES`, independent of what the adapter emits, so the two
+  guards fail separately and are mutation-tested apart. **The prediction is discarded, not relocated** — if you
   were reading Adzuna's estimates, they are gone — and a downstream store declaring its
   own `salary_estimated_*` columns sees them go permanently NULL on upgrade rather than
   error.

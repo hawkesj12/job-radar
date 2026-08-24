@@ -1511,7 +1511,11 @@ POSTED_BASES = frozenset({"stated", "relative"})
 # used to carry them was removed at 0.9.0 -- NOT because it was empty (it read 0 of
 # 102,799 only on a harvest whose source mix excluded the one adapter that fills it;
 # the live consumer's store holds 6,633), but because nothing downstream ever read it.
-# The protection now rides on the adapter emitting no display string at all.
+# The protection is `engine.derive_salary`'s PREDICTED_PAY_SOURCES guard, which
+# refuses by SOURCE. An earlier version of this line said it "rides on the adapter
+# emitting no display string at all", which credited a line that refused nothing:
+# measured on 1a1414d, a predicted row still carrying the en-dash fake range
+# `$129,584–$129,584` parsed straight into salary_min with basis="parsed".
 SALARY_BASES = frozenset({"stated", "parsed"})
 
 # `salary_kind` -- WHAT QUANTITY the figure measures. A different axis from

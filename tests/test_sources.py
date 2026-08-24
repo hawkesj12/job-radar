@@ -2213,6 +2213,14 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
                 "salary_max": 61482.41,
                 "salary_is_predicted": "1",
                 "redirect_url": "https://a/1",
+                # A BODY THAT QUOTES THE MODEL'S OWN FIGURE, carried for Phase 1 and
+                # INERT TODAY -- `derive_salary` reads no body, so nothing below
+                # exercises a scan. It is here because without a `description` this
+                # payload yields `text=None, sections=[]`, and a fixture that cannot
+                # hold the row under test is how the sibling test in test_core.py sat
+                # green through a release. When the section-scoped scan lands, this is
+                # the row it must refuse.
+                "description": "Compensation. $61,482–$61,482 a year. Benefits.",
             },
             {
                 "title": "SWE",
@@ -2236,9 +2244,15 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
     assert predicted["salary_basis"] is None
     # THE PREDICTION IS DISCARDED, not relocated. The salary_estimated_* columns that
     # used to receive it were removed at 0.9.0 (empty on 102,799 of 102,799 rows of a
-    # harvest whose source mix excluded the one adapter filling them). The empty
-    # display string below is now the whole protection: `engine.derive_salary` returns
-    # at its `if not display` check and can never parse the figure into salary_min.
+    # harvest whose source mix excluded the one adapter filling them).
+    #
+    # THE EMPTY DISPLAY STRING IS NOT "the whole protection", which is what this comment
+    # claimed until 0.9.0 -- along with engine.py, vocab.py and two other docstrings.
+    # `engine.derive_salary`'s `if not display` check refuses nothing: measured on
+    # 1a1414d, feeding it a predicted row that still carried `$129,584–$129,584` wrote
+    # salary_min=129584.0 with basis='parsed'. The empty string only avoids handing it
+    # such a row. The protection is `derive_salary`'s PREDICTED_PAY_SOURCES guard, and
+    # the end-to-end assertion below is what proves the two are independent.
     assert "salary_estimated_min" not in predicted
     assert real["salary_min"] == 115000.0 and real["salary_basis"] == "stated"
 
@@ -2251,6 +2265,21 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
     # record a consumer actually receives.
     assert predicted["salary"] is None, "a prediction rendered as a display string"
     assert real["salary"] == "$115,000–$145,000", "a real range lost its display string"
+
+    # A WIRING TEST, NOT A MEASUREMENT, and the label matters. It proves the guard is
+    # REACHABLE through the real adapter path. It cannot tell you how often a predicted
+    # row occurs, because no measurement of a real Adzuna row is available to this repo:
+    # `_reports/full_flat_raw.ndjson` holds 0 adzuna rows out of 102,799 (11 sources:
+    # greenhouse 69,867, ashby 26,218, lever 4,804, himalayas 1,047, smartrecruiters
+    # 498, hn 219, braintrust 54, jobicy 45, remoteok 34, remotive 8, arbeitnow 5), so
+    # "0 predicted rows gained a salary_min" is true of that file before anyone writes
+    # a line -- an explained zero, which is CONTRIBUTING's form 8. This runs the real
+    # adapter into the real `_coerce` into the real `derive_salary` instead.
+    engine.derive_salary(predicted)
+    assert predicted["salary_min"] is None, "a prediction reached the commitment column"
+    assert predicted["salary_basis"] is None
+    engine.derive_salary(real)
+    assert real["salary_min"] == 115000.0, "a real vendor range was quarantined"
 
 
 def test_usajobs_reads_its_rate_interval(monkeypatch):
