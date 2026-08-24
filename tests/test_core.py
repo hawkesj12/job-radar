@@ -3882,7 +3882,7 @@ def test_the_prediction_quarantine_is_scoped_to_sources_that_predict():
     assert p["salary_basis"] == "parsed"
 
 
-def test_a_non_predicted_adzuna_row_keeps_its_kind_and_its_parse():
+def test_a_non_predicted_adzuna_row_keeps_its_kind_but_not_its_parse():
     """THE COLLATERAL THE FIRST DRAFT OF THE QUARANTINE CAUSED, pinned so it cannot come
     back. The guard was written above the `salary_kind` assignment, where it fired on any
     Adzuna row with no structured figures -- including one whose EMPLOYER stated pay as a
@@ -3892,7 +3892,18 @@ def test_a_non_predicted_adzuna_row_keeps_its_kind_and_its_parse():
     `util.salary_range` returns non-empty exactly when `vocab.salary` fills at least one
     of min/max, so "display string and no numbers" occurs on none of them. It is reachable
     for a LIBRARY CALLER constructing a row, which is what this test is. Pinning an
-    unreachable case is cheap; discovering that a guard silently widened is not."""
+    unreachable case is cheap; discovering that a guard silently widened is not.
+
+    WAS NAMED `..._and_its_parse`, and the parse is exactly what it does NOT keep -- the
+    assertion below is `salary_min is None`. A wrong test name is a wrong comment one
+    layer out, and it is the first thing a Phase-1 reader meets.
+
+    AND THIS TEST PINS A RECALL DECISION NOBODY HAS ARGUED YET. The guard returns before
+    any body scan, so when Phase 1 adds one it will be blocked on EVERY Adzuna row --
+    including this one, whose employer stated pay in the description. That may be right
+    (Adzuna ships a 500-char excerpt, so the reachable loss is probably small) or it may
+    not, but revisiting it means CHANGING this test rather than adding one. Said here so
+    the change is a decision instead of a surprise."""
     p = {
         "source": "adzuna",
         "salary": "$115,000\u2013$145,000",
