@@ -369,6 +369,15 @@ append-only so an existing reference never changes meaning.)
   fix it. **Print `job_radar.__file__` from inside the run** if you want proof rather than
   faith about which tree you just measured.
 
+- **To prove a file did NOT change, use its BLOB ID — never a checksum of your own slice
+  of it.** Two reviewers both certified `discover._norm_name` unchanged and published
+  **different hashes of the same unchanged function** — `c85a490218fb1395` from a regex slice
+  and `59aff783fcdbb7bb` from `inspect.getsource`. Both were internally consistent and neither
+  was wrong; they hashed different string boundaries. **Two numbers in circulation as proof of
+  one claim is worse than no proof**, because the next reader must adjudicate a discrepancy
+  that means nothing. `git rev-parse <rev>:<path>` is content-addressed by git itself, needs no
+  agreement about boundaries, and settles it: identical across every rev, or it is not.
+
 - **RUN A NO-OP MUTANT AS A CONTROL.** A mutation run proves the guard holds only if you
   know the harness actually edited the file the tests imported. **A no-op edit that must come
   back GREEN is the control**, and without it a red result and a broken harness are

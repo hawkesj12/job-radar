@@ -1651,6 +1651,11 @@ def _harvest(cfg, watchlist_path, companies):
                     if ps:
                         filled = norm(ps[0]["company"])
                         if filled and filled not in meta and norm(name) in meta:
+                            # LOAD-BEARING ON ROUGHLY 8 OF 40 BOARDS, not on the whole
+                            # fill population: a CASE-ONLY fill needs no alias at all,
+                            # because `norm('astranis') == norm('Astranis')`, and casing
+                            # alone is 32 of 40 in the measured draw. The flag only moves
+                            # when `norm()` moves.
                             meta[filled] = meta[norm(name)]
                     _consume(ps, hits, blocks, cfg, meta)
 
