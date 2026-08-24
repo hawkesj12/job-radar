@@ -1527,6 +1527,11 @@ def _harvest(cfg, watchlist_path, companies):
         # in any shipped watchlist is nameless. That is exactly why nothing caught it,
         # and why the fill's own alias below did not cover it: `norm(name) in meta` is
         # False for an entry that has no name.
+        # CASE-SENSITIVITY, measured rather than assumed: 293 of 727 watchlist entries
+        # are casefold-equal to their slug but NOT byte-equal (`Anthropic`/`anthropic`,
+        # `Stripe`/`stripe`) -- correct curated names, and the fill correctly leaves
+        # every one of them alone. The inverse shape, byte-equal but semantically
+        # distinct, is 0 of 727. A case-insensitive test here would sweep in all 293.
         meta[norm(c.get("name") or c.get("slug") or "")] = {
             "frontier": bool(c.get("frontier")),
             "local": bool(c.get("local")),
@@ -1637,8 +1642,16 @@ def _harvest(cfg, watchlist_path, companies):
                         )
                         p["source"] = ats
                     # RE-KEY `meta`, or the fill silently turns off `frontier` and
-                    # `local` for every board it renames. `meta` is built above as
-                    # `meta[norm(c.get("name", ""))]` while `_consume` looks it up as
+                    # `local` for a board whose name it MOVES UNDER `norm()`.
+                    # WAS: "every board it renames", which overclaimed twice. A
+                    # CASE-ONLY fill needs no alias at all -- `norm('astranis') ==
+                    # norm('Astranis')` -- and casing alone is 32 of 40 in the
+                    # measured draw, so this is load-bearing on roughly 8 of 40.
+                    # And it never covered a NAMELESS entry, because `norm(name) in
+                    # meta` is False when there is no name; that is a separate,
+                    # pre-existing defect fixed at the `meta` keying above.
+                    # `meta` is built above as
+                    # `meta[norm(c.get("name") or c.get("slug") or "")]` while `_consume` looks it up as
                     # `meta.get(norm(p["company"]))` -- so renaming the company moves
                     # the lookup off its own entry and the flag stops applying, with
                     # no error and no log line. Measured on a frontier board that the

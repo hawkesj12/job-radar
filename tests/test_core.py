@@ -5438,7 +5438,11 @@ def test_a_renamed_frontier_board_still_scores_as_frontier(monkeypatch):
         ],
     )
     assert [r["company"] for r in rows] == ["Abnormal"]
-    assert "frontier" in (rows[0].get("signals") or ""), rows[0].get("signals")
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"frontier" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("frontier") for x in sigs), sigs
 
 
 def test_filling_the_company_does_not_move_the_dedup_key_for_whitespace(monkeypatch):
@@ -5475,9 +5479,17 @@ def test_a_nameless_entry_keeps_its_frontier_and_local_flags(monkeypatch):
     rows, _, _ = engine.harvest(
         cfg, companies=[{"ats": "greenhouse", "slug": "abn", "frontier": True}]
     )
-    assert "frontier" in (rows[0].get("signals") or ""), rows[0].get("signals")
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"frontier" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("frontier") for x in sigs), sigs
 
     rows, _, _ = engine.harvest(
         cfg, companies=[{"ats": "greenhouse", "slug": "abn", "local": True}]
     )
-    assert "local" in (rows[0].get("signals") or ""), rows[0].get("signals")
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"local" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("local") for x in sigs), sigs
