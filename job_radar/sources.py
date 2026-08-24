@@ -1894,6 +1894,19 @@ DIRECT_APPLY_SOURCES = frozenset({"usajobs", "braintrust"})
 # them. If Google is ever found to emit an ESTIMATE there, the defect is `google_salary`
 # writing basis="parsed" onto it at the adapter, and this set is the wrong instrument.
 #
+# WHAT IT COSTS IS ZERO TODAY AND NON-ZERO THE MOMENT A BODY SCAN EXISTS, and that is
+# worth a sentence here rather than an argument later. `derive_salary` returns on this
+# set BEFORE it reads any body, so a scan would be skipped on EVERY Adzuna row --
+# including one whose employer stated pay in the description and whose vendor simply
+# sent no structured numbers. That row is a true positive being refused, and it is
+# already pinned by `test_a_non_predicted_adzuna_row_keeps_its_kind_but_not_its_figure`,
+# so revisiting the decision means CHANGING a test rather than adding one. It is
+# deliberate: that row is byte-identical in the record to a prediction, so admitting it
+# admits predictions too. The recall lost is probably small -- Adzuna ships
+# `text_basis: "excerpt"`, a 500-character truncation on 275 of 275 rows locally and
+# 7,146 of 7,150 [live prod, 2026-08-20], so there is little prose there to read -- but
+# "probably small" is an estimate and nobody has measured it on a real Adzuna body.
+#
 # WHAT THIS SET DOES NOT COVER, said plainly because a register reads as broader than it
 # is: it keys on WHO PUBLISHED the row, so it cannot see a third-party estimate quoted
 # inside an ordinary source's prose, and it would not catch a second predicting source

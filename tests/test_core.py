@@ -3882,7 +3882,7 @@ def test_the_prediction_quarantine_is_scoped_to_sources_that_predict():
     assert p["salary_basis"] == "parsed"
 
 
-def test_a_non_predicted_adzuna_row_keeps_its_kind_and_its_parse():
+def test_a_non_predicted_adzuna_row_keeps_its_kind_but_not_its_figure():
     """THE COLLATERAL THE FIRST DRAFT OF THE QUARANTINE CAUSED, pinned so it cannot come
     back. The guard was written above the `salary_kind` assignment, where it fired on any
     Adzuna row with no structured figures -- including one whose EMPLOYER stated pay as a
@@ -3892,7 +3892,12 @@ def test_a_non_predicted_adzuna_row_keeps_its_kind_and_its_parse():
     `util.salary_range` returns non-empty exactly when `vocab.salary` fills at least one
     of min/max, so "display string and no numbers" occurs on none of them. It is reachable
     for a LIBRARY CALLER constructing a row, which is what this test is. Pinning an
-    unreachable case is cheap; discovering that a guard silently widened is not."""
+    unreachable case is cheap; discovering that a guard silently widened is not.
+
+    WAS NAMED `..._keeps_its_kind_and_its_parse`, which its own second assertion
+    disproves: the figure IS quarantined and only the kind survives. A wrong test name
+    is a wrong comment one layer out, and this is the first test anyone touching the
+    body scan will read."""
     p = {
         "source": "adzuna",
         "salary": "$115,000\u2013$145,000",
