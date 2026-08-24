@@ -327,6 +327,26 @@ append-only so an existing reference never changes meaning.)
   else work has a higher bar than one that only costs you** — if a ruling lands on your
   claim, go verify it before the work starts.
 
+- **A SWEEP HAS TWO WAYS TO LIE AND THEY LOOK IDENTICAL FROM INSIDE IT.** Both happened
+  within one hour, to two different people, in opposite directions:
+
+  ```
+  pointed AT the wrong tree     read its answer as the right tree's
+                                (a shell left inside a worktree; a moved HEAD read as main's)
+  pointed AWAY from the target  read ABSENCE as evidence
+                                (a worktree excluded from an enumeration because it was
+                                 believed to belong to the sweeper -- so the sweep could not
+                                 have seen the thing it was looking for, and reported that
+                                 it was not there)
+  ```
+
+  **One nearly reported a lane violation that had not happened; the other reported "not
+  observable from any tree" about work that was sitting in a tree it had skipped.** Neither
+  is detectable from the run's own output — both produce a clean, plausible, complete-looking
+  answer. **The only thing that caught either was going and looking at the artifact
+  afterwards.** So: an enumeration reporting an absence must **list what it enumerated**, and
+  a conclusion drawn from a sweep is provisional until the artifact itself is read.
+
 - **`cd`-ing IN IS NOT ENOUGH IF THE SCRIPT LIVES OUTSIDE.** Two agents hit this
   independently, a week apart. `python3 /tmp/harness.py` puts **the SCRIPT'S directory** on
   `sys.path[0]` — not the working directory — so a harness run from inside the export still
