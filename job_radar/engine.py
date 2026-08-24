@@ -1515,7 +1515,19 @@ def _harvest(cfg, watchlist_path, companies):
 
     meta, known_slugs = {}, set()
     for c in companies:
-        meta[norm(c.get("name", ""))] = {
+        # KEYED THE SAME WAY THE COMPANY IS STAMPED, which it was not until 0.9.0.
+        # `_consume` looks this up as `meta.get(norm(p["company"]))`, and `company` is
+        # stamped `c.get("name", slug or "?")` below -- so a NAMELESS entry was keyed on
+        # `norm("")` and looked up on `norm(slug)`, and its `frontier`/`local` flags
+        # silently stopped applying. Measured: a nameless `frontier: true` board scored
+        # 11 instead of 1 with no `frontier-reach` signal, and `local` 11 instead of 21.
+        # Two defaults for one key; the fix is to use the same one on both sides.
+        #
+        # PRE-EXISTING, not introduced by the fill, and exposure on disk is 0 -- no entry
+        # in any shipped watchlist is nameless. That is exactly why nothing caught it,
+        # and why the fill's own alias below did not cover it: `norm(name) in meta` is
+        # False for an entry that has no name.
+        meta[norm(c.get("name") or c.get("slug") or "")] = {
             "frontier": bool(c.get("frontier")),
             "local": bool(c.get("local")),
         }
