@@ -122,6 +122,18 @@ def fetch_greenhouse(slug: str):
         out.append(
             {
                 "title": j.get("title", ""),
+                # The board owner, as Greenhouse itself reports it, on a field that
+                # was already in the response and was being thrown away. Measured
+                # live 2026-08-24 over 104 boards: present and non-empty on 100% of
+                # rows, and byte-identical to what `discover.board_owner`'s separate
+                # `/v1/boards/{slug}` request returns on 103 of 103 boards that had a
+                # row to compare -- so reading it here costs no extra request, and it
+                # does not need `content=true` either.
+                #
+                # `or None` because "" must stay distinct from a real name: the
+                # engine falls back to the watchlist entry on None, and this is a
+                # nullable field precisely so an absent one is not a plausible guess.
+                "company": j.get("company_name") or None,
                 "location": (j.get("location") or {}).get("name", ""),
                 "url": j.get("absolute_url", ""),
                 # `first_published`, NOT `updated_at`. This is a correctness fix

@@ -158,6 +158,62 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`company` was a URL board slug on two thirds of depth rows, and the employer's real
+  name was already in the response.** A user read
+  `langanengineeringandenvironmentalservicesllc` and `equipmentsharecom` instead of
+  Langan Engineering and EquipmentShare. **67,023 of 102,799 rows in the reference
+  harvest — 65.2% of the corpus, 66.1% of depth rows** [7,360-board universe,
+  2026-08-20, 11 of 19 sources].
+
+  **The cause is one assignment, and it is not the one it looks like.**
+  `engine.harvest` stamps `c.get("name", c.get("slug") or "?")`, which reads as "a
+  watchlist entry with no name falls back to its slug" — but **0 nameless entries exist
+  in any watchlist on disk.** `seed._seeded` writes `"name": entry["slug"]` onto every
+  mined board, so the slug arrives as a *present* name and the fallback never fires.
+  Both shapes are handled; only the second one was ever happening.
+
+  **`fetch_greenhouse` was discarding `company_name`, which rides on every row.**
+  Measured live 2026-08-24 across 104 boards: present and non-empty on 100% of rows, and
+  byte-identical to what `discover.board_owner`'s separate `/v1/boards/{slug}` request
+  returns on 103 of 103 boards with a row to compare. **It costs no extra request and
+  does not need `content=true`.**
+
+  **FILL-ONLY: the vendor's name is used only where the watchlist never had a real one.**
+  Preferring the vendor unconditionally was measured and rejected — across 40 curated
+  boards it disagreed on 6, in **both** directions (`DoorDash` → `DoorDash USA`, but also
+  `Canonical Ltd.` → `Canonical`), so no prefer-longer or prefer-shorter tie-break is
+  available either. `allwebleads` → `AWL` decided it: **a vendor's own name can be less
+  legible than the slug**, which no win rate offsets.
+
+  The population test is `name` byte-equal to `slug`, and it is deliberately loose — 3 of
+  94 curated boards are byte-equal too (`Cohere`, `Linear`, `Perplexity`). **That
+  contamination is harmless in this direction**: if the curated name is already right,
+  the vendor reports the same string, so the fill is a no-op on exactly its false
+  positives. A test too loose to *identify* a defect can still be safe to *act* on.
+
+  **Accepted, and named rather than buried: Ashby is not fixed and cannot be.** It has no
+  identity endpoint — `catalog/ashby.md` records `company: null`, "the board IS the
+  company". That is **19,814 rows, 29.6% of the defect by rows and 42.1% by distinct
+  boards.** Earlier work put Ashby at 14.4%; that figure came from a casing test whose
+  recall is 32.9% on Greenhouse but **13.2% on Ashby**, so it under-sampled the
+  unreachable half by 2.5×. Lever is a further 17 rows. **Roughly 70% of the defect is
+  reachable; the rest is a scope fact, not a shortfall.**
+
+  On upgrade, stored rows for a renamed board re-key. `shortlist.upsert` keeps a
+  secondary index by URL and migrates them, preserving `first_seen`, `status`,
+  `llm_score` and `llm_note` — 0 of 102,799 rows lack a URL, so the fallback covers the
+  whole corpus.
+
+- **`company` now has its edge whitespace stripped at the record boundary.** It was
+  deliberately excluded, on the reasoning that "on a DEPTH adapter it comes from the
+  watchlist rather than the vendor, so stripping it would be fixing the wrong layer."
+  **Filling from `company_name` falsifies that premise**, and Greenhouse ships edge
+  whitespace on roughly one board in ten — `' Higher Logic'`, `'Home Chef  '`, `' ALO'`,
+  `'Brandtech+ '`, `'Horace Mann '`, found across three live samples by two agents
+  against two endpoints. **`dedup_key` does not move**: `norm` and `company_block` both
+  collapse non-alphanumerics, so this reaches only the CSV, `emit` and the display.
+  `url` and `source` are still not stripped — measured at 0 rows each.
+
 - **A vendor-STATED salary figure now passes the same magnitude check a parsed one
   does.** The implied-annual veto lived inside `salary_from_display`, so it guarded the
   parsed lane and nothing else — a figure an adapter read out of a structured vendor

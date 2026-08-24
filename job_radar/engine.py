@@ -479,11 +479,23 @@ def _coerce(p: dict) -> dict:
     # the `_NULLABLE_TEXT` pass as "" and becomes None rather than a string that looks
     # present and holds nothing. (0 such rows in that corpus; the ordering is free.)
     #
-    # `company`, `url` and `source` are deliberately NOT here. `company` carries edge
-    # whitespace on 24 rows and on a DEPTH adapter it comes from the watchlist rather
+    # `company` IS here as of 0.9.0, and the reason it was excluded is now FALSE.
+    # That exclusion read: "on a DEPTH adapter it comes from the watchlist rather
     # than the vendor, so stripping it at this boundary would be fixing the wrong
-    # layer; `url` and `source` carry it on 0.
-    for k in ("title", "location"):
+    # layer." True when written; `harvest` now fills `company` from Greenhouse's
+    # own `company_name` wherever the watchlist never held a real name, so the
+    # vendor's dirt reaches this boundary and this IS the right layer.
+    #
+    # It is not rare. Measured live 2026-08-24 by two agents across three samples
+    # and two different Greenhouse endpoints -- 2 of 12, 2 of 40, 1 of 40 boards
+    # ship edge whitespace in `company_name`: ' Higher Logic', 'Home Chef  ',
+    # ' ALO', 'Brandtech+ ', 'Horace Mann '. Roughly one board in ten.
+    #
+    # ACCEPTED SCOPE, so nobody re-derives it: `dedup_key` DOES NOT MOVE. `norm`
+    # and `company_block` both collapse non-alphanumerics, so ' ALO' and 'ALO'
+    # already key identically -- this reaches only the CSV, `emit` and the display.
+    # `url` and `source` still carry edge whitespace on 0 rows.
+    for k in ("title", "location", "company"):
         v = p.get(k)
         if isinstance(v, str):
             p[k] = v.strip()
@@ -1577,12 +1589,57 @@ def _harvest(cfg, watchlist_path, companies):
                     if err:
                         errors.append(err)
                         continue
-                    name, ats = c.get("name", c.get("slug") or "?"), c.get("ats")
+                    slug = c.get("slug")
+                    name, ats = c.get("name", slug or "?"), c.get("ats")
+                    # FILL-ONLY. A watchlist name byte-equal to the slug was never
+                    # sourced from anywhere: `seed._seeded` assigns
+                    # `"name": entry["slug"]` to every mined board. In the 7,360-board
+                    # universe behind our reference corpus, 5,052 of 5,052 boards whose
+                    # provenance is `cdx-discovery` are exactly that -- 100%, no
+                    # exceptions. Those are the rows a user reads as
+                    # `langanengineeringandenvironmentalservicesllc`.
+                    #
+                    # So fill from the adapter's own company ONLY there, never over a
+                    # curated name. Vendor-always was measured and REJECTED: across 40
+                    # boards with a curated name the vendor disagreed on 6, and the
+                    # disagreement runs BOTH ways -- 'DoorDash' -> 'DoorDash USA' but
+                    # also 'Canonical Ltd.' -> 'Canonical', so no prefer-longer or
+                    # prefer-shorter tie-break is available either. `allwebleads` ->
+                    # 'AWL' is the shape that settles it: a vendor's own name can be
+                    # LESS legible than the slug, which no win rate offsets.
+                    #
+                    # The byte-equality test is deliberately LOOSE -- 3 of 94 curated
+                    # boards are byte-equal too ('Cohere', 'Linear', 'Perplexity').
+                    # That contamination is harmless in THIS direction, which is the
+                    # non-obvious part: if the curated name is already right, the vendor
+                    # reports the same string, so the fill is a no-op on exactly the
+                    # false positives. A test too loose to IDENTIFY a defect can still
+                    # be safe to ACT on.
+                    curated = name if name != slug else None
                     for p in ps:
-                        p["company"], p["source"] = (
-                            name,
-                            ats,
+                        vendor = p.get("company")
+                        p["company"] = curated or (
+                            vendor
+                            if isinstance(vendor, str) and vendor.strip()
+                            else name
                         )
+                        p["source"] = ats
+                    # RE-KEY `meta`, or the fill silently turns off `frontier` and
+                    # `local` for every board it renames. `meta` is built above as
+                    # `meta[norm(c.get("name", ""))]` while `_consume` looks it up as
+                    # `meta.get(norm(p["company"]))` -- so renaming the company moves
+                    # the lookup off its own entry and the flag stops applying, with
+                    # no error and no log line. Measured on a frontier board that the
+                    # fill renames: score 19.0 with the alias missing vs 9.0 with it,
+                    # a silent 10-point swing.
+                    #
+                    # An alias rather than a rewrite: the original key must keep
+                    # working, because breadth postings for the same employer arrive
+                    # under the watchlist's spelling and read the same `meta`.
+                    if ps:
+                        filled = norm(ps[0]["company"])
+                        if filled and filled not in meta and norm(name) in meta:
+                            meta[filled] = meta[norm(name)]
                     _consume(ps, hits, blocks, cfg, meta)
 
     # Breadth sources are independent third-party hosts — fetch them in
