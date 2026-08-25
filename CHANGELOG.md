@@ -6,6 +6,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`util.salary_from_text` now takes the first money range that PASSES its guards, not the
+  first that matches.** It ran `_SAL_RE.search` — one match — and returned `""` when that
+  match failed `_SAL_MAGNITUDE` or the anchor/unit guard, without ever looking at the second.
+  So a body opening *"we raised $3–$200M in revenue"* and stating a real salary two
+  paragraphs later parsed as no salary at all.
+
+  **16 rows gain a `salary_min`** [102,553-row harvest, 2026-08-24, 11 of 19 sources] across
+  11 distinct employers, max 3 each — Algolia, Cloudflare, Anduril — so not one template.
+  **That is small, and it is not the reason the change is here.** The give-up is what made
+  the obvious fix dangerous: widening `_SAL_RE` to catch figures under \$10,000 (`$5,400 -
+  $5,800 per month`, invisible to a `\d{2,3}` pattern) changed **126 real display strings**
+  — 124 of them to empty — because a wider pattern makes a bad first match likelier, and a
+  bad first match was fatal. Flex's `$170,000–$230,000` became `""`. With the give-up gone
+  that widening rescues 121 of the 126, and it is still not shipping, because the 5
+  survivors change from *lost the display* to *wrong figure substituted*: `$110,000 -
+  $125,000` → `$2,500–$9,999` (a donation tier), `$120,000–$140,000` → `$500k to $1`. A null
+  is honest; a plausible wrong number is not.
+
+  **The change is provably fill-only**, which is why it could ship at all. `search` returns
+  the leftmost match, which is `finditer`'s first; the guards are unchanged pure functions of
+  `(matched, tail)` over that same match; so a row returning non-empty today stops on the
+  same match and returns the identical string, and **only rows currently returning `""` can
+  move.** Verified three ways against the shipped code: a corpus differential over 102,023
+  rows (**0 changed**), an in-process differential with both modules loaded via `sys.modules`
+  eviction (**0**), and adversarial differential fuzz — 589,000 cases, 258,740 with a
+  non-empty control (**0 divergences**). All 13 call sites use the return exactly once and
+  only to populate `salary`, so the proof extends from the function to the record.
+
+  **The proof is conditional on a strictly first-passing loop.** Ranking, `findall` +
+  `text.find()` to recover `tail`, or narrowing `tail` to the next match each break it on
+  contact — and `text.find()` in particular is wrong here because these bodies repeat their
+  pay strings. Five mutants are pinned, all killed with the full suite and no `-k` selector:
+  `finditer`→`search`, both guards' `continue`→`return ""`, `_SAL_MAGNITUDE` made inert, and
+  return-the-LAST-passing-match. That last one scored **692 passed** before its test existed,
+  because both fill-only fixtures contained only ONE passing match and could not tell first
+  from last; 3,179 corpus rows carry a display and more than one passing match, so it was
+  reachable.
+
+  **Cost, bounded analytically rather than by a timing run:** the worst case for any row is
+  one full regex scan of that body, which is exactly what a no-match row costs today, and
+  65.6% of rows already pay it. Only the 2.9% whose first match is rejected pay anything
+  extra. Measured on this corpus, +3.3% over 102,023 bodies (+0.11 µs/row).
+
+  **What this does NOT fix:** a posting stating several legitimate bands still has its first
+  one chosen silently — 108 rows across 46 employers, geographic tier tables, a product
+  question rather than a parse bug. Fixing it requires ranking matches, which is exactly what
+  the fill-only proof forbids.
+
 ### Added
 
 - **`sponsorship` and `clearance` — whether a person can apply at all.** Neither existed in

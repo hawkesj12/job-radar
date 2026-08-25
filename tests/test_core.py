@@ -1188,6 +1188,148 @@ def test_salary_from_text_accepts_pay_rejects_funding():
     assert util.salary_from_text("a $20-40 discount") == ""  # bare range, ambiguous
 
 
+# REAL BODIES, TRIMMED, from the 2026-08-24 harvest -- each one a posting where a
+# salary-shaped figure that is NOT pay stands in front of the pay range. Hand-written
+# fixtures could not have produced this set: three of the four were found only by
+# diffing a candidate change across 102,553 corpus rows, and the shapes (an ARR band,
+# a deal size, a company-growth line) are not what anyone writes from imagination.
+_DECOY_ALGOLIA = (
+    "In 2021, we raised $150 million in Series D funding, quadrupling our valuation "
+    "to $2.25 billion.\n"
+    "Experience at our current stage and beyond ($150-300M+ ARR range, high growth)\n"
+    "On-Target Earnings Pay Range\n$181,500—$234,900 USD\n"
+)
+_DECOY_MUCKRACK = (
+    "Experience in multiple phases of company growth (startup, $10-$50M, $50M to "
+    "100M, 100M+)\n"
+    "The base salary for this role in the United States is between "
+    "$120,000 - $145,000 USD\n"
+)
+_FIRST_MATCH_WINS_OTTER = (
+    "Own the technical sale in strategic Enterprise accounts ($200K–$1M+ ACV), "
+    "partnering with Enterprise AEs.\n"
+    "Salary range\nOTE Range: $189,000 to $248,000 USD per year\n"
+)
+_FIRST_MATCH_WINS_HOUSEBUYERS = (
+    "Our Company went from $0 to $50 million in annual revenue in its first 3 years.\n"
+    "Compensation Range: $140,000-$220,000 per year (inclusive of base salary and "
+    "bonus/commission)"
+)
+# TWO PASSING MATCHES, which the two bodies above do NOT have -- and that difference is
+# the whole reason these exist. In Otter/HouseBuyers the decoy is not a match at all
+# under the shipped `_SAL_RE` (`$1`, `$0` are single digits), so only one match passes
+# and first-vs-last is indistinguishable on them. A mutant returning the LAST passing
+# match instead of the first survived the full suite until these were added. Both are
+# real: 3,179 corpus rows carry a display AND more than one passing match, most of them
+# an employer stating the same band twice in different notation.
+_TWO_PASSING_CODEPATH = (
+    "Compensation: $110,000 to $150,000 per year\n"
+    "We offer plans, legal services, home/auto insurance discounts.\n"
+    "Pay range\n$110,000—$150,000 USD"
+)
+_TWO_PASSING_NEBIUS = (
+    "We offer competitive salaries, ranging from $109,500-$136,800 (United States).\n"
+    "Pay Transparency\nBase Compensation Range\n$109,000—$136,000 USD"
+)
+
+
+# THE TWO ROWS WHERE `_SAL_MAGNITUDE` IS THE ONLY GUARD THAT CAN REJECT. Both decoys
+# carry an anchor (`k`, and a comma), so `has_anchor` is True and the `_SAL_UNIT` check
+# never runs -- the magnitude veto is load-bearing alone. Found by mutation: making
+# `_SAL_MAGNITUDE` inert left the whole suite green while changing these two corpus rows
+# (Anduril to `$100k to $10`, Van Leeuwen to `$105,000 - 140,000`). Note the second is
+# the EMPLOYER's typo -- "140,000m annual compensation" -- which is why a fixture nobody
+# copied from real output would not contain it.
+_MAGNITUDE_ONLY_ANDURIL = (
+    "These projects range in cost from $100k to $10M. They are day 2 work.\n"
+    "US Salary Range\n$166,000—$220,000 USD"
+)
+_MAGNITUDE_ONLY_VANLEEUWEN = (
+    "Compensation + Benefits\n$105,000 - 140,000m annual compensation depending on "
+    "experience\n"
+    "Salary Range\n$105,000—$145,000 USD"
+)
+
+
+# THE ANCHOR/UNIT GUARD'S `continue`, WHICH CARRIES 7 OF THE 16 GAINS and which
+# `test_..._returns_empty_when_every_match_fails_a_guard` LOOKS like it covers and
+# structurally cannot: that test asserts "", and a mutant that gives up on this guard
+# also returns "" on its inputs. Killing it needs a first match that fails the unit
+# check and a later one that passes. Anduril is the real shape -- `$22 - $28` is
+# followed by `.84/hour`, so `_SAL_UNIT` does not match at the boundary and there is no
+# comma or k to anchor it, while `$25 - $33` is followed by `/hour` and passes.
+_UNIT_ONLY_ANDURIL = (
+    "US Hourly Range\n"
+    "Materials Associate: $22 - $28.84/hour\n"
+    "Senior Materials Associate: $25 - $33/hour\n"
+)
+
+
+def test_salary_from_text_skips_a_decoy_and_reaches_the_real_range():
+    """THE BUG THIS FIXES. `_SAL_RE.search` returned the first match and both guards
+    said `return ""`, so ONE salary-shaped decoy consumed the only attempt and the pay
+    range later in the same posting was unreachable. Algolia's `$150-300M+ ARR` is
+    vetoed by `_SAL_MAGNITUDE`; its real range sits after it. 16 rows of a 102,553-row
+    harvest gain a `salary_min` from this, across 11 distinct employers."""
+    assert util.salary_from_text(_DECOY_ALGOLIA) == "$181,500—$234,900"
+    assert util.salary_from_text(_DECOY_MUCKRACK) == "$120,000 - $145,000"
+    # These two skip on the MAGNITUDE veto specifically -- see the fixture note above.
+    assert util.salary_from_text(_MAGNITUDE_ONLY_ANDURIL) == "$166,000—$220,000"
+    assert util.salary_from_text(_MAGNITUDE_ONLY_VANLEEUWEN) == "$105,000—$145,000"
+    # And this one skips on the ANCHOR/UNIT guard, the other `continue`. Both forms
+    # below fail without it: the real body, and the minimal case it reduces to.
+    assert util.salary_from_text(_UNIT_ONLY_ANDURIL) == "$25 - $33"
+    assert (
+        util.salary_from_text("a $20-40 discount. Base salary: $120,000 - $145,000 per year")
+        == "$120,000 - $145,000"
+    )
+
+
+def test_salary_from_text_is_fill_only_over_a_body_with_an_earlier_money_range():
+    r"""THE CONTRACT PROPERTY, AND NOTHING PINNED IT UNTIL NOW -- which is the actual
+    finding. A candidate fix that widened `_SAL_RE` from `\d{2,3}` to `\d{1,3}` changed
+    **126 records that already carried a display string**, most of them to "", and the
+    full suite stayed GREEN at 689 passed while it did so. A green suite was not
+    evidence for this property and had not been for the whole release.
+
+    Both bodies below produce a display string TODAY. Under the widening, `$200K–$1`
+    and `$0 to $50` become matches, land first, and `_SAL_MAGNITUDE` vetoes the tail --
+    so each row LOSES a correct salary. This asserts the byte-identical string, which
+    is the only form that catches a substitution as well as a loss."""
+    assert util.salary_from_text(_FIRST_MATCH_WINS_OTTER) == "$189,000 to $248,000"
+    assert (
+        util.salary_from_text(_FIRST_MATCH_WINS_HOUSEBUYERS) == "$140,000-$220,000"
+    )
+
+
+def test_salary_from_text_returns_the_FIRST_passing_match_not_a_later_one():
+    """FILL-ONLY DEPENDS ON "STRICTLY FIRST-PASSING" AND NOTHING ELSE PINS IT. The
+    proof that this change cannot alter a row that already has a display string is:
+    `finditer`'s first element is the match `search` returned, and the guards are
+    unchanged, so the loop's first iteration reproduces the old answer exactly. Any
+    ranking rule -- prefer the last match, the largest, the one nearest a
+    compensation cue -- breaks that on contact, because a row whose first match passes
+    could then return a different one.
+
+    Found by mutation, not by design: a `return the LAST passing match` mutant scored
+    692 passed against the rest of this file. Both employers below state their band
+    twice in different notation, so the two candidates are near-identical and a
+    ranking rule would look harmless on them -- which is exactly why they are the
+    fixture."""
+    assert util.salary_from_text(_TWO_PASSING_CODEPATH) == "$110,000 to $150,000"
+    assert util.salary_from_text(_TWO_PASSING_NEBIUS) == "$109,500-$136,800"
+
+
+def test_salary_from_text_returns_empty_when_every_match_fails_a_guard():
+    """The loop must still give up. Scanning to the end and finding nothing acceptable
+    is not the same code path as finding nothing at all, and only one of the two
+    existed before: with `search`, a rejected first match returned "" immediately, so
+    the exhausted-loop exit is new and untested by everything above it."""
+    assert util.salary_from_text("We raised $20-40 million, then $10-$50M more") == ""
+    assert util.salary_from_text("a $20-40 discount and a $30-60 rebate") == ""
+    assert util.salary_from_text("no money here at all") == ""
+
+
 def test_has_is_whole_word():
     # callers pass already-lowercased text (see scoring.score); has() is case-exact
     assert util.has("ai", "senior ai engineer")
