@@ -2227,13 +2227,26 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
                 "salary_max": 61482.41,
                 "salary_is_predicted": "1",
                 "redirect_url": "https://a/1",
-                # A BODY THAT QUOTES THE MODEL'S OWN FIGURE, carried for Phase 1 and
-                # INERT TODAY -- `derive_salary` reads no body, so nothing below
-                # exercises a scan. It is here because without a `description` this
-                # payload yields `text=None, sections=[]`, and a fixture that cannot
-                # hold the row under test is how the sibling test in test_core.py sat
-                # green through a release. When the section-scoped scan lands, this is
-                # the row it must refuse.
+                # A BODY THAT QUOTES THE MODEL'S OWN FIGURE, AND IT IS INERT --
+                # `derive_salary` reads no body, so nothing below exercises a scan.
+                # WAS: "carried for Phase 1 ... when the section-scoped scan lands,
+                # this is the row it must refuse." That scan was abandoned: a
+                # section-scoped body read reaches 11 rows of a 102,553-row harvest,
+                # because eleven of thirteen adapters already run `salary_from_text`
+                # over the WHOLE body to build the display string, so a row with no
+                # display is by construction one where that function already returned
+                # "". There is no pending change that arms this fixture.
+                #
+                # It stays because without a `description` this payload yields
+                # `text=None, sections=[]`, and a fixture that cannot hold the row
+                # under test is how the sibling test in test_core.py sat green through
+                # a release. NOTE what this test does and does not prove: it DOES call
+                # `derive_salary` (twice -- verified at runtime with a counting wrapper,
+                # not read off a line number), so the adapter -> `_coerce` ->
+                # `derive_salary` path is real and exercised. But a predicted row
+                # arrives `salary=None`, so the quarantine has nothing to refuse and
+                # this half stays green under a quarantine disarm. The guard that
+                # actually fails on a disarm is the test_core.py sibling.
                 "description": "Compensation. $61,482–$61,482 a year. Benefits.",
             },
             {

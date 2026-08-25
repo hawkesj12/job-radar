@@ -466,17 +466,80 @@ _SAL_UNIT = re.compile(
 
 
 def salary_from_text(text: str) -> str:
-    m = _SAL_RE.search(text or "")
-    if not m:
-        return ""
-    matched = m.group(0)
-    tail = (text or "")[m.end() :]
-    if _SAL_MAGNITUDE.match(tail):  # "$20-40 million in Series B" -> funding
-        return ""
-    has_anchor = "k" in matched.lower() or "," in matched
-    if not has_anchor and not _SAL_UNIT.match(tail):  # bare "$20-40" -> too ambiguous
-        return ""
-    return re.sub(r"\s+", " ", matched).strip()
+    r"""The first money range in `text` that reads like pay, or "".
+
+    THE FIRST MATCH THAT PASSES, NOT THE FIRST MATCH. This was `_SAL_RE.search` plus
+    `return ""` on either guard, so one salary-shaped decoy earlier in the body -- a
+    funding round, an ARR band, a deal size -- consumed the only attempt and the real
+    pay range further down was never reached. Algolia is the shape: `$150-300M+ ARR`
+    matches, `_SAL_MAGNITUDE` vetoes it, and `On-Target Earnings Pay Range
+    $181,500-$234,900` sits two thousand characters later. Same for Muck Rack, whose
+    `$10-$50M` company-growth line stands in front of its real
+    `$120,000 - $145,000`.
+
+    16 ROWS, AND THAT IS THE HONEST HEADLINE. Measured [102,553-row harvest, 11 of 19
+    sources, 2026-08-24]: 16 rows gain a `salary_min`, across 11 distinct employers
+    with at most 3 from any one, so it is not a single board's template. The value of
+    this change is not the 16 rows. It is that the give-up is gone.
+
+    STRICTLY FIRST-PASSING, AND THAT IS LOAD-BEARING RATHER THAN INCIDENTAL. Because
+    the guards are unchanged pure functions of `(matched, tail)` and `finditer`'s first
+    element IS the match `search` returned, a row that produces a display string today
+    takes the loop's first iteration and returns the byte-identical string. That is
+    what makes this fill-only: only rows currently returning "" can change, measured
+    0 changed of 102,553. ANY ranking, cue-proximity or "prefer the later/larger
+    match" rule destroys that property on contact, because it lets a row whose first
+    match passes return a different one. Do not add one here.
+
+    WHY THE LOOP AND NOT A WIDER `_SAL_RE`. The obvious alternative was widening
+    `\d{2,3}` to `\d{1,3}` so `$5,400 - $5,800` would match. Measured, it changes
+    **126 records that already carry a display string** and most of them LOSE it:
+    `$189,000 to $248,000` becomes "" because `$200K-$1` now matches first and
+    `_SAL_MAGNITUDE` vetoes the tail. Three become a different figure outright
+    (`$110,000 - $125,000` -> `$2,500-$9,999`, a donation tier). The digit class was
+    never the defect; giving up on the first match was. (WAS: "148 records" -- that
+    counted rows whose `salary` field was non-empty, but eleven of thirteen call sites
+    are `vendor_field or salary_from_text(text)`, so on 22 of them the function's
+    output never reaches the record. 129 is the function-level count, 126 the
+    record-level one, and the gate is about the record.)
+
+    WHAT THIS DOES NOT FIX, stated so a later reader does not assume it did. A body
+    whose first passing match is the WRONG band is untouched -- the loop stops there
+    by design. 108 rows across 46 employers show one band while a pay-transparency
+    cue names a materially different one, and those are geographic tier tables where
+    the first tier won, not parse failures.
+
+    COST IS BOUNDED BY WHAT THE MAJORITY OF ROWS ALREADY PAY, which is why it needs no
+    assumption about how long a posting can get. `finditer` is lazy and this returns on
+    the first passing match, so the worst case for any row is ONE full regex scan of
+    that body -- exactly what a row with no match at all costs today, and 65.6% of rows
+    (66,893 of 102,023) already pay it. Only the 2.9% whose first match is REJECTED
+    scan further than they used to; the 31.5% whose first match passes stop where they
+    always did. Measured for scale rather than as the argument: +3.3% over the whole
+    corpus, +0.11 us/row.
+
+    (WAS: "bodies are NOT capped in production -- the 8,000-character cap in harvest
+    analysis is the harness's". The premise was false in a way worth recording: the cap
+    is real but belongs to `full_flat.ndjson`, the post-`_clean_row` file, while every
+    measurement in this docstring came from `full_flat_raw.ndjson`, the engine's own
+    return, whose longest body is 24,579 characters and which has 3 rows at exactly
+    8,000. The caveat was hedging against a truncation that was not in the data.)
+    """
+    body = text or ""
+    for m in _SAL_RE.finditer(body):
+        matched = m.group(0)
+        # The WHOLE remainder, exactly as the single-match version computed it. Slicing
+        # only as far as the next match would show `_SAL_MAGNITUDE` and `_SAL_UNIT`
+        # different input than they see today and silently change the first match's
+        # verdict.
+        tail = body[m.end() :]
+        if _SAL_MAGNITUDE.match(tail):  # "$20-40 million in Series B" -> funding
+            continue
+        has_anchor = "k" in matched.lower() or "," in matched
+        if not has_anchor and not _SAL_UNIT.match(tail):  # bare "$20-40" -> ambiguous
+            continue
+        return re.sub(r"\s+", " ", matched).strip()
+    return ""
 
 
 def _money(n: int, currency) -> str:
