@@ -113,7 +113,6 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
             "qualifiers": r.get("title_qualifiers"),
         },
         "company": r.get("company") or None,
-        "category": r.get("category"),
         "department": r.get("department"),
         "seniority": r.get("seniority"),
         "seniority_raw": r.get("seniority_raw"),

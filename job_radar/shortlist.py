@@ -14,7 +14,7 @@ THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 18 colu
 are a HUMAN shortlist you open in a spreadsheet; `emit.py`'s NDJSON is the machine
 contract, and a test asserts every `engine._CONTRACT_FIELDS` member appears there.
 So contract fields land here only when a person reading a row wants them —
-`seniority`, `seniority_raw`, `category` and `tags` are all deliberately absent, and
+`seniority`, `seniority_raw` and `tags` are all deliberately absent, and
 `seniority_raw` in particular would be incoherent without the `seniority` beside it
 that this file also does not carry. Adding a column is a schema change for every
 existing CSV, which is a real cost to a CLI user; decide it here on purpose rather

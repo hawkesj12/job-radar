@@ -107,7 +107,7 @@ def test_remotive_parser_maps_fields(monkeypatch):
     assert j["title"] == "AI Engineer" and j["company"] == "Acme"
     assert j["location"] == "USA (Remote)"  # Remotive is remote-only by definition
     assert j["posted"] == "2026-07-10"
-    assert j["category"] == "Software Development"
+    assert j["department"] == "Software Development"
     assert j["salary"] == "$150,000 - $180,000"  # vendor's own field wins
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
     _assert_contract(out, "remotive")
@@ -157,7 +157,7 @@ def test_jobicy_parser_maps_fields(monkeypatch):
     j = out[0]
     assert j["title"] == "Machine Learning Engineer" and j["company"] == "Globex"
     # jobIndustry is a LIST in the live API; it must not reach the record as a repr.
-    assert j["category"] == "Engineering"
+    assert j["department"] == "Engineering"
     assert j["location"] == "Anywhere (Remote)"
     # The list-vs-string case is the whole reason this adapter has a branch.
     assert j["employment_type"] == "full-time, contract"
@@ -304,11 +304,14 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
     # `catalog/_SCHEMA.md` names writing `DepartmentName` here as "the exact mistake
     # this split exists to prevent", and the shared word is now the bait for it.
     # `department` takes `SubAgency` (a facility name, absent from this fixture as it
-    # is from 5 of 82 live federal rows) and `category` takes the OPM series; neither
-    # is the employing department, and `parent_company` -- the recovery the README
-    # used to name -- was removed earlier in this same release. So "Department of
-    # Health" appears nowhere in the record, and the assert below keeps it that way.
-    assert j["department"] is None and j["category"] is None
+    # is from 5 of 82 live federal rows) and falls back to the OPM occupational series
+    # (also absent here) -- neither is the employing department, and `parent_company`,
+    # the recovery the README used to name, was removed earlier in this same release.
+    # So "Department of Health" appears nowhere in the record, and the assert below
+    # keeps it that way. It is `None` here because BOTH permitted sources are absent
+    # from this fixture, which is the point: the adapter has no third thing to reach
+    # for, and the employer is not a fallback.
+    assert j["department"] is None
     assert not any(v == "Department of Health" for v in j.values())
     # NORMALIZED from PositionSchedule[].Code — `.Name` is EMPTY on 47 of 50 live
     # rows and a shift pattern on the rest, so not one row in 50 produced a usable
@@ -932,9 +935,9 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
 @pytest.mark.parametrize(
     "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
 )
-def test_no_adapter_still_emits_team(name, monkeypatch):
-    """`team` is GONE at 0.9.0 -- the org-unit field is `department` -- and nothing
-    else in the suite would notice it coming back.
+def test_no_adapter_still_emits_team_or_category(name, monkeypatch):
+    """`team` and `category` are BOTH GONE at 0.9.0 -- they merged into `department` --
+    and nothing else in the suite would notice either coming back.
 
     THE REASON THIS EXISTS IS `engine._reorder`, which KEEPS a key it does not name
     rather than dropping it -- deliberately, so that adding a contract field cannot
@@ -947,9 +950,11 @@ def test_no_adapter_still_emits_team(name, monkeypatch):
     revert, would reintroduce it with nothing red.
 
     The 0.8.2 field named `department` was a DIFFERENT field -- a five-meaning column
-    that this same test used to ban. It is the org unit now, and only the org unit;
-    the meaning that made the old name unusable (USAJOBS' employing department) is
-    pinned out separately in `test_usajobs_parser_maps_nested_federal_shape`.
+    that this same test used to ban. It now holds the vendor's org unit where one is
+    published and its job family where one is not, which measured as complementary
+    rather than redundant: 0 of 102,553 rows carried both `team` and `category`. The
+    one meaning still banned is the EMPLOYER (USAJOBS' `DepartmentName`), pinned out
+    separately in `test_usajobs_parser_maps_nested_federal_shape`.
 
     Asserted on the ADAPTER's own output, before the engine, because that is where
     the key would be written.
@@ -968,10 +973,12 @@ def test_no_adapter_still_emits_team(name, monkeypatch):
     )
     assert out, f"{name}: produced no row, so this proved nothing"
     for r in out:
-        assert "team" not in r, (
-            f"{name} still emits `team` -- renamed to `department` at 0.9.0, which is "
-            f"the word the vendors themselves use. Its job family goes in `category`."
-        )
+        for dead in ("team", "category"):
+            assert dead not in r, (
+                f"{name} still emits `{dead}` -- both merged into `department` at "
+                f"0.9.0. `department` carries the vendor's org unit where it ships "
+                f"one and its job family where it does not; the two never co-occurred."
+            )
 
 
 @pytest.mark.parametrize(
@@ -1181,7 +1188,7 @@ def test_themuse_ignores_a_query_because_it_cannot_search(monkeypatch):
         assert "nurse" not in u.lower(), f"query leaked into the URL: {u}"
     j = out[0]
     assert j["company"] == "Acme"
-    assert j["category"] == "Data Science"  # a job FAMILY, not an org unit
+    assert j["department"] == "Data Science"  # a job FAMILY; this vendor ships no org unit
     assert j["url"] == "https://www.themuse.com/jobs/acme/ai-engineer"
     _assert_contract(out, "themuse")
 

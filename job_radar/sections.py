@@ -15,7 +15,7 @@ nothing at all. There is nothing to parse into columns directly. But
 the header TYPES recur, and that is what this maps: the many names onto the few types.
 Measured with THIS classifier across the 730-employer corpus, `responsibilities` appears
 for 92.7% of employers and `requirements` for 92.5%, which is better fill than
-`seniority` or `category` gets from the vendors themselves.
+`seniority` or `department` gets from the vendors themselves.
 
 Every measurement in this file is one of two corpora and says which: the NINE-BOARD
 corpus (2,697 raw Greenhouse bodies, nine employers, uncapped) or the 730-EMPLOYER

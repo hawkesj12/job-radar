@@ -88,37 +88,38 @@ _CONTRACT_FIELDS = (
     "title_root",  # the matchable role, decoration stripped -- vocab.decompose_title
     "title_level",  # I | II | III | IV
     "title_qualifiers",  # list[str] | None -- domain/geo decoration
-    # `category` is the catalog's `function` -- the JOB FAMILY ("Data Science"), free
-    # text from the source, NOT an O*NET-SOC code and NOT normalized. `department` is
-    # the catalog's `org_unit` -- the EMPLOYER'S OWN group name ("Field Engineering").
-    # It was briefly called `team` during 0.9.0 and was renamed BACK: five of the
-    # seven adapters that fill it read a vendor key literally named `department`
-    # (`departments[].name`, `department`, `department.label`), and only two read one
-    # named `team`. The 0.8.2 field of this name was a different thing -- a
-    # five-meaning column -- and it is gone; this one is the org unit and nothing
-    # else. `catalog/_SCHEMA.md` splits `function` /
-    # `org_unit` / `employer_org` precisely because five adapters were pouring all
-    # three into one column, and it records the cost: 5,050 distinct values including
-    # employer names.
+    # `department` is the ONE org/function column. It holds whatever the vendor
+    # publishes for "what part of the company / what kind of work": the catalog's
+    # `org_unit` where a source ships one (greenhouse `departments[].name`, ashby /
+    # workable / smartrecruiters / rippling `department`, lever `categories.department`)
+    # and its `function` where it ships that instead (adzuna `IT Jobs`, the muse, jobicy,
+    # remotive, braintrust, himalayas, and USAJOBS' OPM series).
     #
-    # SO A SOURCE THAT SHIPS ONLY AN ORG UNIT CORRECTLY LEAVES `category` None. That
-    # is not an unfinished mapping, and it is worth stating because it has been filed
-    # as a bug: greenhouse, ashby and lever send `departments[0].name` / `team`, which
-    # are org units, so their `category` is None on 100% of rows -- while
-    # smartrecruiters, an ATS on the same lane, fills it 100% because it ships a real
-    # `function.label`. The dividing line is whether the VENDOR publishes a job
-    # family, never whether the source is an ATS or an aggregator.
+    # It was TWO columns until 0.9.0 -- `team` and `category` -- and they measured as
+    # complementary, never redundant: on 102,553 rows `[2026-08-24]` `team` filled
+    # 100,463 and `category` 1,759, with **0 rows carrying both** and 331 carrying
+    # neither. Three ATSs filled one, five aggregators filled the other, so each column
+    # read ~98% empty on its own and neither was usable as a filter. Merging them is
+    # exactly what `catalog/_SCHEMA.md` warns against for a PROFILE -- it keeps
+    # `function` / `org_unit` / `employer_org` separate because five adapters once
+    # poured all three into one field and produced 5,050 distinct values including
+    # employer names. The zero overlap is what makes it safe HERE and nowhere else:
+    # no row loses a value, because no row ever had two.
     #
-    # Deriving `category` from `department` was tried downstream and reverted: it
+    # THE EMPLOYER IS STILL NOT ALLOWED IN. That was the third meaning in the old
+    # `department`, and USAJOBS still publishes `DepartmentName` = "Department of
+    # Veterans Affairs". It reads `SubAgency` here; a test pins the string out.
+    #
+    # Values are the source's own words, NOT normalized and NOT an O*NET-SOC code.
+    # Deriving a job family from an org unit was tried downstream and reverted: it
     # looked like +17.7% coverage and its single largest effect was filing 895 rows of
     # "Senior Software Engineer, Backend" under Science and Engineering, because that
-    # employer's org unit is called "Engineering". Normalizing these onto a taxonomy
-    # is a consumer's judgment (`catalog/_SCHEMA.md`: "Fidelity, not opinion"), and
-    # this library does not make it.
-    "category",
+    # employer's org unit is called "Engineering". Normalizing onto a taxonomy is a
+    # consumer's judgment (`catalog/_SCHEMA.md`: "Fidelity, not opinion"), and this
+    # library does not make it.
     "tags",  # list[str] | None -- skills the source itself extracted
     # who
-    "department",  # the employer's own group -- the catalog's `org_unit`, see `category`.
+    "department",  # the ONE org/function column -- see the block above.
     # NOT the employing organisation: USAJOBS publishes `DepartmentName` = "Department
     # of Health", which is an EMPLOYER, and the shared word is the bait _SCHEMA.md
     # warns about. That adapter reads `SubAgency` here; a test pins it.
@@ -1305,7 +1306,7 @@ _READING_ORDER = (
     # what the role is
     "title", "title_root", "title_level", "title_qualifiers",
     # who is hiring, and for which group
-    "company", "department", "category", "tags",
+    "company", "department", "tags",
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",

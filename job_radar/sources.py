@@ -280,7 +280,11 @@ def fetch_lever(slug: str):
                 "country": country_code(j.get("country")),
                 "url": j.get("hostedUrl", ""),
                 **posted_from(j.get("createdAt")),
-                "department": cats.get("team") or cats.get("department") or None,
+                # `categories.department` FIRST, matching catalog/lever.md, which
+                # records `org_unit: categories.department` ("Customer Success"). This
+                # read was `team`-first and disagreed with its own profile; Lever is
+                # the one vendor shipping both keys as separate fields.
+                "department": cats.get("department") or cats.get("team") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
                 # that this adapter never read -- remoteness was being re-derived from
                 # the description while the source stated it outright.
@@ -583,8 +587,14 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 # string, fully structured geography, and an actual remote BOOLEAN --
                 # all present on every posting, all previously collapsed into one
                 # location string and one `department`.
-                "category": (j.get("function") or {}).get("label") or None,
-                "department": (j.get("department") or {}).get("label") or None,
+
+                # ORG UNIT first, the vendor's job family as the fallback. This
+                # adapter ships both; `department.label` was empty on 510 of 510 rows
+                # in a local harvest while `function.label` filled every one, so in
+                # practice this yields the function here.
+                "department": (j.get("department") or {}).get("label")
+                or (j.get("function") or {}).get("label")
+                or None,
                 "seniority": (j.get("experienceLevel") or {}).get("label") or None,
                 "city": loc.get("city") or None,
                 "state": loc.get("region") or None,
@@ -650,7 +660,7 @@ def fetch_workable(slug: str):
                 or j.get("url")
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
                 **posted_from(j.get("created_at") or j.get("published_on")),
-                "department": j.get("department") or None,
+                "department": j.get("department") or j.get("function") or None,
                 "city": city,
                 "state": state,
                 "country": country,
@@ -677,7 +687,7 @@ def fetch_workable(slug: str):
                 else None,
                 "remote_basis": "stated" if "telecommuting" in j else None,
                 "seniority": j.get("experience") or None,
-                "category": j.get("function") or None,
+
                 "source_extra": {
                     k: v
                     for k, v in (
@@ -2079,7 +2089,7 @@ def search_remotive(queries, strict: bool = False):
                 **stated_scope(j.get("candidate_required_location")),
                 "url": j.get("url", ""),
                 **posted_from(j.get("publication_date")),
-                "category": j.get("category") or None,
+                "department": j.get("category") or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
                 # here is remote because that is what this board is. Collapsing the two
@@ -2120,7 +2130,7 @@ def search_jobicy(queries):
                 "location": (j.get("jobGeo") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 **posted_from(j.get("pubDate")),
-                "category": _joined(j.get("jobIndustry")) or None,
+                "department": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -2352,7 +2362,7 @@ def _himalayas_rows(jobs, out, seen=None):
                 "location": loc.strip(),
                 "url": url,
                 **posted_from(j.get("pubDate")),
-                "category": ", ".join(
+                "department": ", ".join(
                     x
                     for x in (j.get("parentCategories") or j.get("categories") or [])
                     if isinstance(x, str)
@@ -2612,7 +2622,7 @@ def search_adzuna(queries):
                         "expires": to_date(j.get("deadline")),  # 1 of 20 populated
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
                         # -- one of the four different things `department` carried.
-                        "category": (j.get("category") or {}).get("label") or None,
+                        "department": (j.get("category") or {}).get("label") or None,
                         "city": city,
                         "state": state,
                         "country": country,
@@ -3071,7 +3081,7 @@ def search_braintrust(queries):
                     # the 20% seniority fill came from the title decomposition, not
                     # from Braintrust. `role.name` is a clean job FAMILY on 20/20 and
                     # `category` was empty.
-                    "category": (j.get("role") or {}).get("name") or None,
+                    "department": (j.get("role") or {}).get("name") or None,
                     "expires": to_date(j.get("deadline")),
                     "remote_type": "remote",  # a remote freelance network by definition
                     # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -3319,9 +3329,11 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # Pouring it into a category column is how a downstream store ended up
                 # with employer names among its most common "categories"; the two keys
                 # below say what each thing actually is.
-                "department": d.get("SubAgency") or None,
-                # OPM occupational series -- a real, coded job family.
-                "category": ", ".join(
+                # `SubAgency` first; the OPM occupational series -- a real, coded
+                # job family -- as the fallback. `DepartmentName` is the EMPLOYER and
+                # is deliberately read by neither.
+                "department": d.get("SubAgency")
+                or ", ".join(
                     c.get("Name", "")
                     for c in (d.get("JobCategory") or [])
                     if c.get("Name")
@@ -3548,7 +3560,7 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 **posted_from(j.get("publication_date")),
                 # A job FAMILY ("Data Science"), not an org unit -- see
                 # catalog/_SCHEMA.md on why that distinction is load-bearing.
-                "category": "; ".join(x for x in cats if x) or None,
+                "department": "; ".join(x for x in cats if x) or None,
                 # `levels` is a real seniority string ("Senior Level"). It was held
                 # back while `seniority` was a strand-B key not yet on any adapter;
                 # the contract exists now, so it ships.

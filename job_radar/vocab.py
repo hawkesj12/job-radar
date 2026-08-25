@@ -143,7 +143,7 @@ def employment_type(raw) -> tuple[str | None, str | None]:
 # for seniority, so a closed set of rungs would be an OPINION about how levels
 # order, and `catalog/_SCHEMA.md` ("Fidelity, not opinion ... whether a consumer
 # maps a category is that consumer's business") governs this field exactly as it
-# governs `category`.
+# governs `department`.
 #
 # The concrete harm that settled it, probed live 2026-08-20: SmartRecruiters'
 # `experienceLevel` ships LinkedIn's published enumeration verbatim -- Internship,

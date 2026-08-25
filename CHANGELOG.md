@@ -585,8 +585,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
-- **`team` is gone; the org-unit field is `department`.** The record is **45 fields →
-  44**. These were one field under two names: of 100,878 filled rows in a 102,799-row
+- **`team` and `category` are both gone; there is ONE org/function column,
+  `department`.** The NDJSON record goes **50 leaf fields → 49** and
+  `engine._CONTRACT_FIELDS` **36 → 35** (measured against this tree; the "45 fields"
+  an earlier draft of this entry published was never sourced and no test pinned it).
+
+  **`team` and `department` were one field under two names.** of 100,878 filled rows in a 102,799-row
   harvest `[2026-08-20]`, **100,825 were byte-identical and 53 matched `category`
   instead; zero carried a value absent from both.** That corpus reached only 11 of 19
   sources, so the claim was re-established by reading **all nineteen adapters** — the
@@ -629,8 +633,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `_build_row`. Keeping the vendors' word deletes that migration instead of documenting
   it.
 
-  **Recovery for a consumer reading `team`:** read `department`. Same value, same
-  fill (98.0% of 102,553 rows `[2026-08-24]`), one name.
+  **`category` merged in, and the measurement is why that is safe.** It held the
+  catalog's `function` — the job family — where a vendor published one, and it was
+  never redundant with `team`: on 102,553 rows `[2026-08-24]`, `team` filled **100,463**
+  and `category` **1,759**, with **0 rows carrying both** and 331 carrying neither.
+  Three ATSs (Greenhouse, Ashby, Lever) fill one at 99.9–100%; five aggregators
+  (Himalayas, SmartRecruiters, Braintrust, Jobicy, Remotive) fill the other at 100%.
+  So the two were **complementary, not duplicated** — and each read ~98% empty on its
+  own, which made neither usable as a filter. Merged, `department` is **99.7% filled**
+  and **not one row loses a value, because no row ever had two.**
+
+  This is the merge `catalog/_SCHEMA.md` warns against for a PROFILE — it keeps
+  `function` / `org_unit` / `employer_org` separate precisely because five adapters
+  once poured all three into one field and produced 5,050 distinct values including
+  employer names. **The zero overlap is what makes it safe in the RECORD and nowhere
+  else**, and the profiles keep the three-key split unchanged. The employer is still
+  excluded: USAJOBS reads `SubAgency`, falling back to its OPM occupational series,
+  and never `DepartmentName`.
+
+  Three adapters ship both kinds of key and now coalesce, org unit first: Workable
+  (`department` → `function`), SmartRecruiters (`department.label` → `function.label`
+  — the former was empty on 510 of 510 rows locally, so in practice this yields the
+  function) and USAJOBS (`SubAgency` → `JobCategory[].Name`). **Lever also flipped**:
+  it read `categories.team` first, which disagreed with its own catalog profile
+  (`org_unit: categories.department`), and now reads `department` first.
+
+  **Recovery for a consumer reading either:** read `department`. `team or category`
+  reproduces the old pair exactly, since they never co-occurred.
 
   **What the test suite loses, stated rather than left to be found.** The
   `department` byte-identity gate loaded 0.6.0's `sources.py` out of git and ran it
