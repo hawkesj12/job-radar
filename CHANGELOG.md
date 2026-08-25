@@ -586,9 +586,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Removed — BREAKING
 
 - **`team` and `category` are both gone; there is ONE org/function column,
-  `department`.** The NDJSON record goes **50 leaf fields → 49** and
-  `engine._CONTRACT_FIELDS` **36 → 35** (measured against this tree; the "45 fields"
-  an earlier draft of this entry published was never sourced and no test pinned it).
+  `department`.** The FLAT record — what `harvest()` returns and what a library
+  consumer receives — goes **49 keys → 48**, measured as the union of keys over a
+  102,553-row harvest `[2026-08-24]` and recomputed against this tree.
+
+  **Three different counts describe this record and they must not be swapped.** The
+  flat record is 49→48; the NDJSON wire format, which NESTS (`title.raw`,
+  `remote.type`), is **50 leaf fields → 49**; and `engine._CONTRACT_FIELDS`, the subset
+  guaranteed present-and-`None`, is **36 → 35**. The middle one is a trap: its AFTER
+  value equals the flat record's BEFORE value, so quoting "49" without saying which
+  reads as no change at all. `_coerce` alone returns 44 keys — the pipeline adds
+  `score`, `signals`, `dedup_key`, `harvested_at` and `sources` after that boundary,
+  plus whatever an adapter supplies. The "45 fields → 44" an earlier draft of this
+  entry published matched none of these, was never sourced, and no test pinned it.
 
   **`team` and `department` were one field under two names.** of 100,878 filled rows in a 102,799-row
   harvest `[2026-08-20]`, **100,825 were byte-identical and 53 matched `category`
