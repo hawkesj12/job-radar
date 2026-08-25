@@ -361,6 +361,19 @@ append-only so an existing reference never changes meaning.)
   deleted, and then the real case walks through. Use
   `os.path.realpath(job_radar.__file__).startswith(os.path.realpath(root))`.
 
+- **And assert the EXACT path, not the repo root — a worktree lives INSIDE the repo.**
+  The bullet above says to prefix-match a resolved root, and that is right for a
+  `mktemp -d` export and WRONG for the other case. `git worktree` puts agent trees under
+  `.claude/worktrees/agent-*/`, which is inside the repo path, so a
+  `startswith(repo_root)` assert is satisfied by **either** tree and passes silently when
+  a harness imports the wrong one. Observed 2026-08-25: a reviewer running
+  `python3 /tmp/x6-check/fillonly.py` from inside an export imported the MAIN tree
+  (`sys.path[0]` is the script's directory, per the bullet above) and caught it only
+  because it compared the exact resolved path. Under a root-prefix assert it would have
+  reported control == mutant — a clean, plausible, complete-looking zero. **Compare the
+  full resolved path to the tree you meant, and print it in the result.** A prefix is
+  not an identity.
+
 - **`cd` INTO the isolated export. Do not run pytest at it from outside.** The `cd` in this
   file's recipe is load-bearing and nothing says so until it bites: launching
   `python3 -m pytest /tmp/gate` from the repo puts the repo's cwd on `sys.path[0]`, and the
