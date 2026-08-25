@@ -98,7 +98,9 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
     only to NDJSON. If those two ever need to agree, this mapping is the one place to
     change.
 
-    `department` is GONE as of 0.9.0. Its org unit is `team`; see the record contract.
+    `team` is GONE as of 0.9.0 -- the org-unit field is `department`, which is the
+    word five of the seven org-unit adapters read from the vendor. See the record
+    contract.
     """
     srcs = _sources(r)
     out = {
@@ -112,7 +114,7 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
         },
         "company": r.get("company") or None,
         "category": r.get("category"),
-        "team": r.get("team"),
+        "department": r.get("department"),
         "seniority": r.get("seniority"),
         "seniority_raw": r.get("seniority_raw"),
         "seniority_basis": r.get("seniority_basis"),

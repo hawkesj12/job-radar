@@ -296,17 +296,19 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
     j = out[0]
     assert j["title"] == "IT Specialist (Data Management)"
     assert j["company"] == "National Institutes of Health"
-    # THE ACCEPTED LOSS, pinned where it happens. `DepartmentName` ("Department of
-    # Health") is the EMPLOYING DEPARTMENT, and it rode in the deprecated `department`
-    # until 0.9.0 removed that field. This is the one adapter of nineteen where the
-    # removal cost information: `team` takes `SubAgency` (a facility name, absent from
-    # this fixture as it is from 5 of 82 live federal rows) and `category` takes the
-    # OPM series; neither is the department, and `parent_company` -- the recovery the
-    # README used to name -- was removed earlier in this same release. So the string
-    # "Department of Health" now appears nowhere in the record, and this asserts that
-    # rather than leaving it to be discovered.
-    assert "department" not in j
-    assert j["team"] is None and j["category"] is None
+    # THE TRAP THE RENAME REOPENS, pinned where it happens. 0.9.0 named the org-unit
+    # field `department` (five of the seven org-unit adapters read a vendor key by
+    # that name), which means that ON THIS ONE ADAPTER the vendor's `DepartmentName`
+    # and the record's `department` share a word and mean DIFFERENT THINGS:
+    # "Department of Health" is the EMPLOYING DEPARTMENT, not an org unit.
+    # `catalog/_SCHEMA.md` names writing `DepartmentName` here as "the exact mistake
+    # this split exists to prevent", and the shared word is now the bait for it.
+    # `department` takes `SubAgency` (a facility name, absent from this fixture as it
+    # is from 5 of 82 live federal rows) and `category` takes the OPM series; neither
+    # is the employing department, and `parent_company` -- the recovery the README
+    # used to name -- was removed earlier in this same release. So "Department of
+    # Health" appears nowhere in the record, and the assert below keeps it that way.
+    assert j["department"] is None and j["category"] is None
     assert not any(v == "Department of Health" for v in j.values())
     # NORMALIZED from PositionSchedule[].Code — `.Name` is EMPTY on 47 of 50 live
     # rows and a shift pattern on the rest, so not one row in 50 produced a usable
@@ -930,9 +932,9 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
 @pytest.mark.parametrize(
     "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
 )
-def test_no_adapter_still_emits_department(name, monkeypatch):
-    """`department` is GONE at 0.9.0, and nothing else in the suite would notice it
-    coming back.
+def test_no_adapter_still_emits_team(name, monkeypatch):
+    """`team` is GONE at 0.9.0 -- the org-unit field is `department` -- and nothing
+    else in the suite would notice it coming back.
 
     THE REASON THIS EXISTS IS `engine._reorder`, which KEEPS a key it does not name
     rather than dropping it -- deliberately, so that adding a contract field cannot
@@ -941,8 +943,13 @@ def test_no_adapter_still_emits_department(name, monkeypatch):
     `"department": ""` puts the key straight back into the record, and because it is
     no longer in `_NULLABLE_TEXT` it is not even normalized to None -- it arrives as a
     literal `""`, the exact empty-string-means-absent lie the contract exists to
-    remove. Nineteen adapters had that line; a twentieth adapter, or a revert, would
-    reintroduce it with nothing red.
+    remove. Seven adapters had that line under the old name; a twentieth adapter, or a
+    revert, would reintroduce it with nothing red.
+
+    The 0.8.2 field named `department` was a DIFFERENT field -- a five-meaning column
+    that this same test used to ban. It is the org unit now, and only the org unit;
+    the meaning that made the old name unusable (USAJOBS' employing department) is
+    pinned out separately in `test_usajobs_parser_maps_nested_federal_shape`.
 
     Asserted on the ADAPTER's own output, before the engine, because that is where
     the key would be written.
@@ -961,9 +968,9 @@ def test_no_adapter_still_emits_department(name, monkeypatch):
     )
     assert out, f"{name}: produced no row, so this proved nothing"
     for r in out:
-        assert "department" not in r, (
-            f"{name} still emits `department` -- removed at 0.9.0. Its org unit "
-            f"belongs in `team`, its job family in `category`."
+        assert "team" not in r, (
+            f"{name} still emits `team` -- renamed to `department` at 0.9.0, which is "
+            f"the word the vendors themselves use. Its job family goes in `category`."
         )
 
 
@@ -3931,7 +3938,7 @@ def test_rippling_org_unit_reaches_team(monkeypatch):
     monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: listing)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
     j = sources.fetch_rippling("acme")[0]
-    assert j["team"] == "Engineering", "Rippling's org unit no longer reaches the record"
+    assert j["department"] == "Engineering", "Rippling s org unit no longer reaches the record"
 
 
 @pytest.mark.parametrize(

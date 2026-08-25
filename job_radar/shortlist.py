@@ -7,7 +7,7 @@ the market, so your application history is never lost. Written atomically
 (temp -> os.replace), so an interrupted write leaves the previous file intact.
 
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
-salary, company, title, team, employment_type, location,
+salary, company, title, department, employment_type, location,
 source, url, signals, dedup_key
 
 THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 18 columns
@@ -20,14 +20,16 @@ that this file also does not carry. Adding a column is a schema change for every
 existing CSV, which is a real cost to a CLI user; decide it here on purpose rather
 than letting a field appear in one surface and vanish from the other by accident.
 
-`team` IS HERE, and it is here because `department` was. This file carried the
-deprecated `department` and, uniquely, carried no other org-unit column -- so unlike
-the record, where `department` was a byte-identical duplicate of `team` on 100,825 of
-100,878 filled rows, in the CSV it was the ONLY place the employer's own group
-appeared. Deleting it would have dropped that information out of the CLI's primary
-output silently, in place, on the user's own file, on the first scan after upgrade.
-The column was renamed instead: same position, same 98.1% fill, the name the record
-already uses.
+`department` IS HERE and DID NOT MOVE at 0.9.0. This file carried it while the
+record carried both `department` and `team` as byte-identical duplicates on 100,825
+of 100,878 filled rows -- so unlike the record, in the CSV it was the ONLY place the
+employer's own group appeared. 0.9.0 first resolved that duplicate the other way and
+renamed this column to `team`, which cost a STICKY row its value: `upsert` carries a
+stored row forward untouched when the posting is absent, so a role that had left the
+market came back with the new column blank and never self-healed. Reverting to
+`department` -- the word the vendors themselves use -- makes `COLUMNS` byte-identical
+to 0.8.x, so there is no migration to survive at all. A test asserts that equality
+rather than describing it.
 """
 
 from __future__ import annotations
@@ -154,7 +156,7 @@ COLUMNS = [
     "salary",
     "company",
     "title",
-    "team",
+    "department",
     "employment_type",
     "location",
     "source",
@@ -289,7 +291,7 @@ def _build_row(p: dict, today: str) -> dict:
         "salary": p.get("salary", ""),
         "company": p.get("company", ""),
         "title": (p.get("title", "") or "").strip(),
-        "team": p.get("team") or "",
+        "department": p.get("department") or "",
         "employment_type": p.get("employment_type", ""),
         "location": (p.get("location", "") or "").strip(),
         "source": src,

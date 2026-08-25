@@ -851,13 +851,19 @@ def test_applied_is_sticky_when_role_leaves_feed(tmp_path):
     assert any(r["status"] == "applied" for r in merged2)  # history persists
 
 
-def test_a_0_8_store_survives_the_department_to_team_rename(tmp_path):
+def test_a_0_8_store_needs_no_migration_because_the_column_never_moved(tmp_path):
     """THE UPGRADE PATH EVERY EXISTING USER HITS, and it was untested — the sticky test
     above writes in the CURRENT format, so nothing read a 0.8.x store.
 
-    `department` became `team` at 0.9.0 rather than being deleted, because
-    `shortlist.COLUMNS` carried no other org-unit column. This pins both halves: what
-    the rename PRESERVES, and what it COSTS.
+    An earlier 0.9.0 renamed this column `department` -> `team` and that rename COST a
+    sticky row its org unit: `upsert` carries a stored row forward untouched when the
+    posting is absent, so a renamed column came back blank on any role that had left
+    the market, and a row that is never re-harvested never self-heals. The rename was
+    reverted — `department` is the word five of the seven org-unit adapters read from
+    the vendor (`departments[].name`, `department`, `department.label`), so keeping it
+    makes `shortlist.COLUMNS` byte-identical across the whole release and deletes the
+    migration rather than testing it. This pins both halves: the header does not move,
+    and a sticky row keeps its value.
     """
     import csv as _csv
 
@@ -883,24 +889,18 @@ def test_a_0_8_store_survives_the_department_to_team_rename(tmp_path):
 
     # PRESERVED: the header migrates and the application history is intact.
     assert list(rows[0]) == shortlist.COLUMNS
-    assert "department" not in rows[0] and "team" in rows[0]
+    assert list(rows[0]) == old_header  # the header did not move AT ALL
+    assert "team" not in rows[0]
     assert rows[0]["status"] == "applied"
     assert rows[0]["first_seen"] == "2026-05-01"
 
-    # THE COST, pinned deliberately. A row that is not re-harvested keeps its stored
-    # values, and the old `department` is NOT carried across -- so `team` comes back
-    # blank. It self-heals the next time that posting is seen; a role that has LEFT
-    # THE MARKET never is, and stays blank. Back-filling would mean asserting an org
-    # unit from a column whose meaning varied by source, which is the whole reason
-    # `department` was removed.
-    #
-    # THE BACK-FILL WOULD HAVE TO GO IN `load_all`, and that is the mutant this line
-    # is tested against -- mapping `department` -> `team` on READ turns this red.
-    # Doing it in `_build_row` instead does NOT turn it red and would not work:
-    # `upsert` carries a stored row forward untouched when the posting is absent, so
-    # a sticky row never passes through `_build_row` at all. Measured, not assumed --
-    # that mutant survives.
-    assert rows[0]["team"] == ""
+    # THE ROW KEEPS ITS ORG UNIT. Under the reverted `department` -> `team` rename
+    # this read `""`: a role that had LEFT THE MARKET lost its org unit permanently,
+    # because `upsert` carries a stored row forward untouched when the posting is
+    # absent, so a sticky row never passes through `_build_row` and never self-heals.
+    # A back-fill in `load_all` was the only place that could have fixed it. Keeping
+    # the vendors' own word for the column removes the problem instead of patching it.
+    assert rows[0]["department"] == "Platform Engineering"
 
 
 def test_surface_excludes_applied_and_low_score(tmp_path):
@@ -1033,7 +1033,7 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
     p.update(
         {
             "location": hostile,
-            "team": hostile,
+            "department": hostile,
             "employment_type": hostile,
             "salary": hostile,
             "posted": util.to_date(hostile),
@@ -1689,7 +1689,7 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     # `Z` fixture here would freeze a shape this vendor has never sent and would stop
     # catching the regression that would actually hurt.
     assert j["posted"] == "2026-07-10"
-    assert j["team"] == "Engineering"
+    assert j["department"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
 
 

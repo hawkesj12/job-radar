@@ -162,7 +162,7 @@ def fetch_greenhouse(slug: str):
                 # not. Mapped anyway: it costs nothing, other boards may fill it, and
                 # to_date returns "" for a null so an absent deadline stays absent.
                 "expires": to_date(j.get("application_deadline")),
-                "team": (depts[0].get("name") if depts else None) or None,
+                "department": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
@@ -280,7 +280,7 @@ def fetch_lever(slug: str):
                 "country": country_code(j.get("country")),
                 "url": j.get("hostedUrl", ""),
                 **posted_from(j.get("createdAt")),
-                "team": cats.get("team") or cats.get("department") or None,
+                "department": cats.get("team") or cats.get("department") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
                 # that this adapter never read -- remoteness was being re-derived from
                 # the description while the source stated it outright.
@@ -484,7 +484,7 @@ def fetch_ashby(slug: str):
                 **posted_from(
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
-                "team": j.get("department") or j.get("team") or None,
+                "department": j.get("department") or j.get("team") or None,
                 # `workplaceType`, NOT `isRemote`. Measured on openai (n=733):
                 #
                 #   isRemote=True,  workplaceType='Hybrid'   442
@@ -584,7 +584,7 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 # all present on every posting, all previously collapsed into one
                 # location string and one `department`.
                 "category": (j.get("function") or {}).get("label") or None,
-                "team": (j.get("department") or {}).get("label") or None,
+                "department": (j.get("department") or {}).get("label") or None,
                 "seniority": (j.get("experienceLevel") or {}).get("label") or None,
                 "city": loc.get("city") or None,
                 "state": loc.get("region") or None,
@@ -650,7 +650,7 @@ def fetch_workable(slug: str):
                 or j.get("url")
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
                 **posted_from(j.get("created_at") or j.get("published_on")),
-                "team": j.get("department") or None,
+                "department": j.get("department") or None,
                 "city": city,
                 "state": state,
                 "country": country,
@@ -1734,7 +1734,7 @@ def fetch_rippling(slug: str, keep=None):
                 # source that did not run. `department.label` is an org unit
                 # ({"id": "Eng", "label": "Engineering"}) -- the same vendor shape the
                 # other four map to `team`.
-                "team": dept.get("label") if isinstance(dept, dict) else None,
+                "department": dept.get("label") if isinstance(dept, dict) else None,
                 "employment_type": "",
                 "salary": "",
                 "text": "",
@@ -3319,7 +3319,7 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # Pouring it into a category column is how a downstream store ended up
                 # with employer names among its most common "categories"; the two keys
                 # below say what each thing actually is.
-                "team": d.get("SubAgency") or None,
+                "department": d.get("SubAgency") or None,
                 # OPM occupational series -- a real, coded job family.
                 "category": ", ".join(
                     c.get("Name", "")

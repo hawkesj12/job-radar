@@ -585,54 +585,52 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
-- **`department` is gone, one minor version earlier than this project published.** The
-  README said "removed at 1.0 — not before, as published"; it goes at **0.9.0**, and
-  that broken promise is the cost of the change rather than a detail. The record is
-  **45 fields → 44**.
+- **`team` is gone; the org-unit field is `department`.** The record is **45 fields →
+  44**. These were one field under two names: of 100,878 filled rows in a 102,799-row
+  harvest `[2026-08-20]`, **100,825 were byte-identical and 53 matched `category`
+  instead; zero carried a value absent from both.** That corpus reached only 11 of 19
+  sources, so the claim was re-established by reading **all nineteen adapters** — the
+  only method that covers a source that did not run. Eleven assign a value, and every
+  one writes both keys **from the same expression in the same record literal**,
+  differing only in whether absent is spelled `""` or `None`.
 
-  **It was a duplicate of `team` almost everywhere.** Of 100,878 filled rows in a
-  102,799-row harvest `[2026-08-20]`, **100,825 were byte-identical to `team` and 53 to
-  `category`; zero carried a value absent from both.** That corpus only reached 11 of
-  19 sources, so it is not on its own sufficient — the claim was re-established by
-  reading **all nineteen adapters**, which is the only method that covers a source that
-  did not run. Eleven assign a value, and every one of those eleven writes `team` or
-  `category` **from the same expression in the same record literal**, differing only in
-  whether absent is spelled `""` or `None`; the other eight assigned `""`. Enumerating
-  every JSON type a vendor can send through `x.get(k, "")` versus `x.get(k) or None`
-  finds no input where they carry different information.
+  **`department` is the name that survived, because it is the vendors' own word.** Five
+  of the seven adapters that fill this field read a vendor key literally called
+  `department`: Greenhouse `departments[].name`, Ashby `department`, Workable
+  `department`, SmartRecruiters `department.label`, Rippling `department.label`. Only
+  Lever and Ashby name a `team` at all: Lever reads `team` first and `department`
+  second, Ashby reads `department` first and `team` second. USAJOBS reads neither — its
+  org unit is `SubAgency`. An earlier draft of this release resolved the duplicate the other way; keeping
+  the vendors' word is both more honest and **strictly less breaking**, and the two
+  paragraphs below are the difference it makes.
 
-  **THE ONE GENUINE LOSS IS USAJOBS, and there is no recovery for it.** That adapter
-  assigned `DepartmentName` — the EMPLOYING DEPARTMENT, "Department of Veterans
-  Affairs" — to `department`, while `team` holds `SubAgency` (a facility name such as
-  *"Central Virginia VA Health Care System, Richmond, Virginia"*) and `category` holds
-  the OPM occupational series. On a live store, 77 of 82 federal rows carry that
-  facility `team` and 0 carry a `category`, so `team or category` returns a **wrong
-  value rather than a null**. `parent_company`, the recovery this README used to name,
-  was removed earlier in this same release. The employing department is now simply
-  unmapped on that adapter, and `test_usajobs_parser_maps_nested_federal_shape` asserts
-  the string appears nowhere in the record rather than leaving it to be discovered.
+  **`department` now means ONE thing, which is the actual fix.** At 0.8.2 it was four:
+  an org unit (Greenhouse, Ashby), a job family (Adzuna `IT Jobs`), a seniority
+  (Braintrust `level`), and the EMPLOYER (USAJOBS `DepartmentName` — "Department of
+  Veterans Affairs"). It is the org unit and nothing else now: Adzuna's job family goes
+  to `category`, Braintrust's `level` read is gone (the key left that API), and USAJOBS
+  reads `SubAgency`. **That last one is a value change under an unchanged key** — a
+  federal row's `department` was the employing department and is now a facility name
+  such as *"Central Virginia VA Health Care System, Richmond, Virginia"*. The employing
+  department is unmapped on that adapter; `parent_company`, the recovery this README
+  used to name, was removed earlier in this same release. `catalog/_SCHEMA.md` calls
+  writing `DepartmentName` into an org-unit field "the exact mistake this split exists
+  to prevent" — the shared word is now the bait for it, so
+  `test_usajobs_parser_maps_nested_federal_shape` asserts the string appears nowhere in
+  the record rather than leaving it to be discovered.
 
-  **`shortlist.csv` keeps the information under a new name.** That file carried
-  `department` and, deliberately, neither `team` nor `category` — so unlike the record,
-  there it was not a duplicate but the **only** org-unit column, 98.1% filled. Deleting
-  it would have dropped the employer's own group out of the CLI's primary output
-  silently, in place, on the user's file, on the first scan after upgrade. The column
-  is **renamed to `team`** instead: same position, 18 columns still, 98.1% fill. **So
-  the `team or category` recovery describes the record and the NDJSON, not the CSV.** A
-  script that greps the CSV header for `department` still breaks — it loses a name, not
-  the data.
+  **`shortlist.csv` does not change at all.** `COLUMNS` is byte-identical to 0.8.x —
+  same 18 names, same order — and a test asserts that equality rather than describing
+  it. The earlier draft renamed this column to `team`, and that rename had a cost worth
+  recording even though it is no longer paid: `upsert` carries a stored row forward
+  untouched when a posting is absent, so an `applied` or `dismissed` role that had
+  **left the market** came back with the new column blank — `status` and `first_seen`
+  intact — and never self-healed, because a sticky row never passes through
+  `_build_row`. Keeping the vendors' word deletes that migration instead of documenting
+  it.
 
-  **What a user sees the morning after, because a rename is not free.** On the first
-  scan after upgrading, the header swaps and every row that gets **re-harvested** picks
-  up its `team`. A **sticky** row does not: an `applied` or `dismissed` role that was
-  not seen this run keeps its stored values, and its old `department` is not carried
-  into the new column — so it comes back with **`team` blank while `status` and
-  `first_seen` are intact**. Reproduced on a 0.8.x store: `status='applied'`,
-  `first_seen='2026-05-01'`, `team=''`. It self-heals the next time that posting is
-  harvested — but a role that has **left the market**, which is precisely what sticky
-  status exists to preserve, will never be re-harvested and stays blank permanently.
-  Unavoidable for any renamed column, and stated here rather than discovered in an
-  applied list.
+  **Recovery for a consumer reading `team`:** read `department`. Same value, same
+  fill (98.0% of 102,553 rows `[2026-08-24]`), one name.
 
   **What the test suite loses, stated rather than left to be found.** The
   `department` byte-identity gate loaded 0.6.0's `sources.py` out of git and ran it

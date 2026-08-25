@@ -41,7 +41,7 @@ _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Greenhouse board ranked EQUAL to a RemoteOK redirect — the one distinction the
 # product is built on, absent from the table that exists to express it. A DEPTH
 # source IS the employer's applicant-tracking system, so its copy is the canonical
-# record: the real apply URL, the full description, the employer's own team. Google
+# record: the real apply URL, the full description, the employer's own department. Google
 # for Jobs sits in the middle because its apply_options resolve to direct-to-company
 # links. Everything else is an aggregator serving a redirect.
 _DEPTH_PREF, _GOOGLE_PREF, _AGGREGATOR_PREF = 2, 1, 0
@@ -89,9 +89,14 @@ _CONTRACT_FIELDS = (
     "title_level",  # I | II | III | IV
     "title_qualifiers",  # list[str] | None -- domain/geo decoration
     # `category` is the catalog's `function` -- the JOB FAMILY ("Data Science"), free
-    # text from the source, NOT an O*NET-SOC code and NOT normalized. `team` is the
-    # catalog's `org_unit` -- the EMPLOYER'S OWN group name ("Field Engineering"). It
-    # had a deprecated alias, `department`, removed at 0.9.0. `catalog/_SCHEMA.md` splits `function` /
+    # text from the source, NOT an O*NET-SOC code and NOT normalized. `department` is
+    # the catalog's `org_unit` -- the EMPLOYER'S OWN group name ("Field Engineering").
+    # It was briefly called `team` during 0.9.0 and was renamed BACK: five of the
+    # seven adapters that fill it read a vendor key literally named `department`
+    # (`departments[].name`, `department`, `department.label`), and only two read one
+    # named `team`. The 0.8.2 field of this name was a different thing -- a
+    # five-meaning column -- and it is gone; this one is the org unit and nothing
+    # else. `catalog/_SCHEMA.md` splits `function` /
     # `org_unit` / `employer_org` precisely because five adapters were pouring all
     # three into one column, and it records the cost: 5,050 distinct values including
     # employer names.
@@ -113,7 +118,10 @@ _CONTRACT_FIELDS = (
     "category",
     "tags",  # list[str] | None -- skills the source itself extracted
     # who
-    "team",  # the employer's own group -- the catalog's `org_unit`, see `category`
+    "department",  # the employer's own group -- the catalog's `org_unit`, see `category`.
+    # NOT the employing organisation: USAJOBS publishes `DepartmentName` = "Department
+    # of Health", which is an EMPLOYER, and the shared word is the bait _SCHEMA.md
+    # warns about. That adapter reads `SubAgency` here; a test pins it.
     # where
     # list[dict] | None -- every place ONE posting names, each {raw, city, state,
     # country}. NO per-place `url`: entries carried one until 0.9.0, and it was the
@@ -1297,7 +1305,7 @@ _READING_ORDER = (
     # what the role is
     "title", "title_root", "title_level", "title_qualifiers",
     # who is hiring, and for which group
-    "company", "team", "category", "tags",
+    "company", "department", "category", "tags",
     "seniority", "seniority_raw", "seniority_basis",
     # where the work is, then where a remote worker may sit
     "location", "city", "state", "country", "locations",
