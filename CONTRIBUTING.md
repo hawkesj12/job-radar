@@ -186,7 +186,7 @@ inert** and only mutation testing found it. Separately: three passing assertions
 helper stayed green when the guard was deleted **from its call site** — testing a helper
 is not testing the wiring.
 
-## Twenty-one ways a check comes back clean for the wrong reason
+## Twenty-four ways a check comes back clean for the wrong reason
 
 Every one of these produced a confident, wrong number in this repo:
 
@@ -213,8 +213,10 @@ Every one of these produced a confident, wrong number in this repo:
 | 20 | **a mutation run that never selected the guarding test** | a mutant was disarmed and the suite came back GREEN. The filter was `-k salary_kind`; the test written to guard that exact change was named `test_equity_fires_only_inside_the_figures_own_clause`, which does not contain the string. **The selector excluded its own target.** Re-run as `-k "salary_kind or equity_fires"` and both mutants went red. A green mutation run proves nothing unless you can show the guarding test RAN |
 | 21 | **a failure form applied by pattern-match instead of by measurement** | THIS CATALOGUE causing a failure. An agent recognised form 14's shape — two decisions in one lane, one arming the other — and reported it, minutes after being told form 14 was working forward for the first time. Measured, the intersection was **exactly zero**, and **the disconfirming evidence was in its own earlier message**: it had defined the population by "has a non-USD currency" and then argued the fix would give it one. **Recognition is fast and cheap, which is what lets it substitute for measurement without anyone noticing** |
 | 22 | **an isolated-export run that imported the working tree** | `python3 -m pytest /tmp/gate` launched FROM the repo puts cwd on `sys.path[0]`, so the export's tests import the **worktree's** `job_radar`, not the export's. Same mutant: **605 passed from the repo, 1 failed from inside the export.** `PYTHONPATH` does not fix it — only `cd`ing into the export does. Form 12's shape in a new place: the environment supplied the unmutated code, and the result is a green run that looks exactly like a passing guard |
+| 23 | **a metadata key read as describing the artifact you are holding** | a run's meta carried `rows_text_truncated_by_jobfitr: 13603`, and a reviewer read it as "13,603 rows in MY file are truncated". It meant the opposite: 13,603 rows **exceed** the cap and were shortened when writing a DIFFERENT file. Measured — `full_flat.ndjson` max 8,000 with 13,606 rows at exactly the cap; `full_flat_raw.ndjson`, the file actually being measured, max **24,579** with 3. The caveat rode on three reports, and a performance question was answered "the corpus cannot tell us" when it could. **A key names the OPERATION that produced a number, not the artifact in your hand** |
+| 24 | **"a correct value exists later" read as "the next one is correct"** | a truncated pay range (`$141,380 -$194`) had the right range further down the same body, which looked like a clean argument for preferring a later match. Measured over the whole population: **72% were not malformed at all** — sub-$1,000 hourly rates a later match would have REPLACED with the employer's annual approximation, one of them with a different and lower role's rate. And of the genuinely mangled rows, the next passing match was right on about two of ten. **The structural reason generalises: a body whose first band truncated is a body with MULTIPLE bands — geographic and seniority tiers — so the next match is the second band, not the repaired first one.** The premise was true and the inference from it was false |
 
-Forms 8, 9, 11, 14, 15, 16, 17, 18, 19, 20, 21 and 22 are the dangerous ones, because all twelve look like good
+Forms 8, 9, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 and 24 are the dangerous ones, because all fourteen look like good
 work — a real measurement is involved in each. **16 is the worst of them:** nothing about
 it is false. (There is no form 10; the numbering is
 append-only so an existing reference never changes meaning.)
