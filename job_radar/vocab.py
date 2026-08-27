@@ -1533,7 +1533,7 @@ SALARY_BASES = frozenset({"stated", "parsed"})
 #                  pass ran. 12,299 rows, and NOT the same fact as iso_adjacent:
 #                  a vendor-structured salary's display string is SYNTHESIZED by the
 #                  adapter, so `text.find(display)` fails and no window is ever read
-#                  on 12,142 of them -- 98.7% (ashby, lever, himalayas, braintrust).
+#                  on 12,142 of them -- 98.7% (ashby, lever, himalayas, braintrust, jobicy).
 #                  NOT `by construction`, which an earlier version of this comment
 #                  claimed and which is false: the display IS locatable on 157 rows
 #                  (1.3%), and 20 of those hold exactly one ISO code in the window,

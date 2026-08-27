@@ -5702,13 +5702,12 @@ def test_a_vendor_currency_is_not_labelled_as_a_code_beside_the_figure():
 
     12,299 of 41,944 amount-bearing rows get their currency from the source's own
     structured field, and on 12,142 of them (98.72%) `_adjacent_evidence` never reads a
-    window
-    at all -- a vendor-structured salary's display string is SYNTHESIZED by the
+    window at all -- a vendor-structured salary's display string is SYNTHESIZED by the
     adapter, so `text.find(display)` fails on 98.72% of them -- NOT "by construction",
     which `vocab.py` records as false: it SUCCEEDS on 157 of the 12,299, and 20 of those
     carry one ISO code. The basis names how the value was decided, and the vendor field
-    decided it on all 12,299 either way. (ashby 10,321, lever 1,106,
-    himalayas 656, braintrust 54) [full_flat_raw.ndjson, harvest 2026-08-25].
+    decided it on all 12,299 either way. (ashby 10,321, lever 1,106, himalayas 656,
+    braintrust 54, jobicy 5) [full_flat_raw.ndjson, harvest 2026-08-25].
 
     Labelling those `iso_adjacent` would assert the employer wrote a code beside a
     figure when they did not -- the same provenance lie that
