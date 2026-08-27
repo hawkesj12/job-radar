@@ -164,6 +164,10 @@ def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dic
             "min": r.get("salary_min"),
             "max": r.get("salary_max"),
             "currency": r.get("salary_currency"),
+            # WHY the currency is null, when it is. A bare figure and a figure
+            # whose currency we refused to guess are the same bytes without this
+            # -- 36.0% of amount-bearing rows on the 2026-08-25 harvest.
+            "currency_basis": r.get("salary_currency_basis"),
             "period": r.get("salary_period"),
             "basis": r.get("salary_basis"),
             # WHAT the figure measures, beside HOW it was extracted. A consumer

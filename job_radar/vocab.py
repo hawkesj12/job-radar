@@ -1518,6 +1518,55 @@ POSTED_BASES = frozenset({"stated", "relative"})
 # `$129,584–$129,584` parsed straight into salary_min with basis="parsed".
 SALARY_BASES = frozenset({"stated", "parsed"})
 
+# `salary_currency_basis` -- HOW the currency beside a figure was decided, including
+# when it was DELIBERATELY NOT decided. A third axis from `salary_basis` (how the
+# figure was extracted) and `salary_kind` (what the figure measures).
+#
+# THE REFUSAL WAS INVISIBLE, WHICH IS THE BUG THIS FIXES. `_adjacent_evidence` sets a
+# currency only when exactly one ISO code sits in its window, because `$` is shared by
+# USD/CAD/AUD/SGD/HKD/MXN. That refusal is correct and stays. But it left 15,098 of
+# 41,944 amount-bearing rows (36.0%) carrying a bare number, indistinguishable from a
+# row nobody asked about -- so `ORDER BY salary_min` sorts an unlabelled 11 next to an
+# unlabelled 60,000,000. The fix is to LABEL the refusal, not to end it.
+#
+#   vendor_field   the source published a currency as structured data, before any text
+#                  pass ran. 12,299 rows, and NOT the same fact as iso_adjacent:
+#                  a vendor-structured salary's display string is SYNTHESIZED by the
+#                  adapter, so `text.find(display)` fails and no window is ever read
+#                  on 12,142 of them -- 98.7% (ashby, lever, himalayas, braintrust).
+#                  NOT `by construction`, which an earlier version of this comment
+#                  claimed and which is false: the display IS locatable on 157 rows
+#                  (1.3%), and 20 of those hold exactly one ISO code in the window,
+#                  so the employer really did write a code beside that figure. The
+#                  label is still right, because a basis names WHAT DECIDED the
+#                  value and on all 12,299 that was the vendor's field, corroborating
+#                  text or not. Folding them into `iso_adjacent` would instead assert
+#                  the employer wrote the code that decided it -- the same class of
+#                  provenance lie that the remote-basis vocabulary already had to
+#                  unpick, where six adapters labelled a board-wide fact `stated`.
+#   iso_adjacent   exactly one ISO code in the window. 14,547 rows.
+#   ambiguous      two or more codes in the window, so the currency was REFUSED on
+#                  purpose. 89 rows -- and hand-read, 86 are genuine dual-currency
+#                  postings (`Canada Base Salary Band ... / USA Base Salary Band ...`,
+#                  one quoting three). The employers declined to pick; neither do we.
+#   absent         no ISO code was found in the window, OR the figure could not be
+#                  located in the body at all. 15,009 rows. THE `OR` IS THE
+#                  DEFINITION, not an implementation detail: 15,004 rows had a
+#                  window that held no code, and on 5 the body is non-empty but
+#                  `text.find(display)` fails -- a spacing or punctuation difference
+#                  between the display string and the prose -- so no window was ever
+#                  built. 0.01%, and stated as 0.01%. Those two states are
+#                  deliberately conflated: a consumer behaves identically on both,
+#                  and a fifth member reading `5` in the census is exactly how
+#                  `posted_basis` ended up carrying one value across a whole corpus.
+#                  Written out so the five are not rediscovered later as a defect.
+#
+# [instrumented over _reports/full_flat_raw.ndjson, harvest 2026-08-25, 103,489 rows;
+# sources.py/engine.py/vocab.py blob-identical to the tree that produced it]
+SALARY_CURRENCY_BASES = frozenset(
+    {"vendor_field", "iso_adjacent", "ambiguous", "absent"}
+)
+
 # `salary_kind` -- WHAT QUANTITY the figure measures. A different axis from
 # `salary_basis`, which records only HOW it was extracted, and the gap between them is
 # why ~670 on-target-earnings bands and a $32,000-$48,000 new-hire EQUITY GRANT sat in
