@@ -786,7 +786,15 @@ def _adjacent_evidence(
         return None, None, None
     w = text[max(0, i - _ADJ_WINDOW) : i + len(needle) + _ADJ_WINDOW]
     codes = set(_CURRENCY_CODE.findall(w.upper()))
-    currency = codes.pop() if len(codes) == 1 else None
+    # COUNT BEFORE THE POP. `codes.pop()` mutates the set, so reading `len(codes)` at
+    # the return gave **0 for a one-code window** -- byte-identical to a window that
+    # held nothing, which is the exact distinction `n_codes` exists to make. No live
+    # effect today only because `_label_currency` tests `salary_currency is not None`
+    # first and one-code rows leave by an earlier branch; reorder those branches and
+    # 14,547 rows silently relabel `absent`. `len(codes) + 1` survived all 704 tests,
+    # so nothing was guarding it -- an assertion now does.
+    n_codes = len(codes)
+    currency = codes.pop() if n_codes == 1 else None
     # "90-day waiting period" / "4-day work week" / "12-month vesting" are not
     # pay periods. Dropping a digit-hyphen prefix removes the actual source of
     # the 55 bogus `day` assignments rather than only catching them downstream.
@@ -794,7 +802,7 @@ def _adjacent_evidence(
         vocab.salary_period(x) for x in _PERIOD_WORD.findall(_HYPHEN_QTY.sub(" ", w))
     }
     periods.discard(None)
-    return currency, (periods.pop() if len(periods) == 1 else None), len(codes)
+    return currency, (periods.pop() if len(periods) == 1 else None), n_codes
 
 
 # The cues for `salary_kind`, most specific first. Order does NOT decide the answer --

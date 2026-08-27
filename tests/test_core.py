@@ -5701,9 +5701,13 @@ def test_a_vendor_currency_is_not_labelled_as_a_code_beside_the_figure():
     """THE FINDING OF THIS PHASE, and the reason there are four values and not three.
 
     12,299 of 41,944 amount-bearing rows get their currency from the source's own
-    structured field, and on 12,137 of them `_adjacent_evidence` never reads a window
+    structured field, and on 12,142 of them (98.72%) `_adjacent_evidence` never reads a
+    window
     at all -- a vendor-structured salary's display string is SYNTHESIZED by the
-    adapter, so `text.find(display)` fails by construction (ashby 10,321, lever 1,106,
+    adapter, so `text.find(display)` fails on 98.72% of them -- NOT "by construction",
+    which `vocab.py` records as false: it SUCCEEDS on 157 of the 12,299, and 20 of those
+    carry one ISO code. The basis names how the value was decided, and the vendor field
+    decided it on all 12,299 either way. (ashby 10,321, lever 1,106,
     himalayas 656, braintrust 54) [full_flat_raw.ndjson, harvest 2026-08-25].
 
     Labelling those `iso_adjacent` would assert the employer wrote a code beside a
@@ -5823,3 +5827,30 @@ def test_a_predicted_pay_row_still_gets_a_basis_for_its_vendor_currency():
     }
     engine.derive_salary(p)
     assert p["salary_currency_basis"] == "vendor_field"
+
+def test_n_codes_counts_a_ONE_code_window_as_one_not_zero():
+    """`n_codes` is the third return of `_adjacent_evidence` and it read **0** for a
+    window holding exactly one code -- byte-identical to a window holding none, which is
+    the one distinction the value exists to make. `codes.pop()` mutated the set and
+    `len(codes)` was read after it.
+
+    NO LIVE EFFECT WHEN FOUND: `_label_currency` tests `salary_currency is not None`
+    first, so the 14,547 one-code rows leave by an earlier branch and were labelled
+    correctly anyway. That is exactly why it needs a test -- reorder those two branches
+    and 14,547 rows silently relabel `absent`, with the count agreeing that they should.
+    Its docstring tells callers not to re-derive the count ("measuring two
+    implementations at once"), so the number it hands them has to be right.
+
+    `len(codes) + 1` survived all 704 tests before this existed.
+    """
+    needle = "$120,000 - $150,000"
+    one = f"Base pay {needle} USD per year"
+    two = f"Range {needle} USD or CAD per year"
+    none_ = f"Base pay {needle} per year"
+
+    assert engine._adjacent_evidence(one, needle) == ("USD", "year", 1)
+    assert engine._adjacent_evidence(two, needle) == (None, "year", 2)
+    assert engine._adjacent_evidence(none_, needle) == (None, "year", 0)
+    # the needle absent from the body is the fourth state, and it is None -- not 0
+    assert engine._adjacent_evidence("no figure here", needle) == (None, None, None)
+
