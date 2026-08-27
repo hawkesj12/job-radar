@@ -462,3 +462,63 @@ def test_clearance_reads_sections_and_says_so():
     assert "sections" in extract.enrich.__doc__ or "spans" in extract.enrich.__doc__, (
         "the second input must be documented -- omitting it over-claims `required`"
     )
+
+def test_a_held_clearance_is_required_even_when_a_SECOND_one_can_be_obtained():
+    """`_OBTAINABLE` is tested before `_REQUIRED` on purpose, and that swallowed the
+    two-credential sentence: "hold X, be able to obtain Y" was read as "able to obtain",
+    which tells a candidate holding NO clearance that a job needing an active TS on day
+    one is open to them. That is the three-state design's own harm, pointed backwards.
+
+    63 rows of a 103,489-row harvest [2026-08-25] flip to `required` here. The three
+    below are the shapes: a bare `with`, an explicit `and`, and a comma.
+    """
+    for text in (
+        "Active Top Secret clearance with ability to obtain SCI and CI Polygraph",
+        "Must have an active Secret clearance and be able to obtain a TS/SCI clearance",
+        "Active Secret clearance, with ability to obtain TS/SCI",
+    ):
+        assert extract.clearance({"text": text, "sections": []})[0] == "required", text
+
+
+def test_an_either_path_clearance_offer_stays_obtainable():
+    """THE CASES THE FIX MUST NOT BREAK, and cue ORDER alone breaks all three.
+
+    An earlier draft flipped on "an active cue precedes an obtain cue" and would have
+    reclassified 3 of the first 5 rows it touched -- every one of them an employer
+    OFFERING either path. 80 of the 146 candidate rows read this way. The connector
+    carries the meaning, not the position.
+    """
+    for text in (
+        "Active Security clearance or ability to obtain one",
+        "Active DoD Secret Clearance (or ability to obtain)",
+        "Existing or ability to obtain a U.S. government security clearance",
+    ):
+        assert extract.clearance({"text": text, "sections": []})[0] == "obtainable", text
+
+
+def test_an_obtain_verb_taking_a_pronoun_refers_to_the_SAME_clearance():
+    """The second signal, and the only one that rescues a NEGATED active cue.
+
+    "If you do NOT have an active clearance..." carries `active` before `obtain` with no
+    alternation between them, so the either-path test alone flips it. The obtain-verb
+    takes `one`, which points back at the clearance already named -- one credential, not
+    two. 33 of the 146 candidate rows.
+    """
+    assert extract.clearance(
+        {"text": "If you do not have an active clearance, you must be eligible and willing to obtain one",
+         "sections": []}
+    )[0] == "obtainable"
+
+
+def test_an_active_word_AFTER_the_obtain_verb_modifies_what_is_being_obtained():
+    """451 rows -- the largest group -- and the reason the guard is positional at all.
+
+    "Eligible to obtain and maintain an ACTIVE TS clearance" has both cues, but `active`
+    describes the clearance being obtained. Flipping on mere co-presence would break
+    every one of them.
+    """
+    assert extract.clearance(
+        {"text": "Eligible to obtain and maintain an active U.S. Top Secret security clearance",
+         "sections": []}
+    )[0] == "obtainable"
+

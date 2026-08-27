@@ -443,6 +443,59 @@ _REQUIRED = re.compile(r"""(?xi)
 # entirely. A fixed-width scan reads across the boundary into the next section's text
 # and mislabels the section after it, so the header is consulted directly and the
 # sentence scan stops where the section does.
+# AN ACTIVE CLEARANCE PLUS AN OBTAIN VERB IS TWO CREDENTIALS, NOT ONE, and reading it
+# as one inverts the requirement in the direction that hurts most. `_OBTAINABLE` is
+# tested before `_REQUIRED` on purpose -- the modal in "must be able to obtain" belongs
+# to the obtaining -- but that ordering also swallowed sentences where the obtain-verb
+# governs a DIFFERENT, higher credential than the one already held:
+#
+#   "Active Top Secret clearance with ability to obtain SCI and CI Polygraph"
+#   "Must have an active Secret clearance and be able to obtain a TS/SCI clearance"
+#
+# Both were labelled `obtainable`, which tells a candidate holding no clearance that a
+# job requiring an active TS on day one is open to them. That is the exact harm the
+# three-state design exists to prevent, pointed the other way.
+#
+# TWO SIGNALS SAVE THE HONEST CASES, and neither is sufficient alone -- measured on a
+# 103,489-row harvest [2026-08-25], 146 rows carry an active-possession cue BEFORE an
+# obtain cue:
+#   * `_CLEAR_ALT` -- an either-path offer ("Active clearance OR ability to obtain one",
+#     "Active DoD Secret Clearance (or ability to obtain)"). The employer accepts either,
+#     so `obtainable` is correct. 80 of the 146.
+#   * `_CLEAR_ANAPHORA` -- the obtain-verb takes a pronoun rather than a noun ("willing
+#     to obtain ONE"), so it refers back to the same clearance. 33 of the 146, and it is
+#     what rescues "If you do NOT have an active clearance, you must be willing to obtain
+#     one" -- a negated active cue that the alternation test alone would flip.
+# An earlier version of this rule used cue ORDER alone and would have broken 3 of the
+# first 5 rows it touched; the connector, not the position, is what carries the meaning.
+#
+# 63 rows flip to `required` (0.061% of the corpus). Of the 14 distinct sentences among
+# them, 13 are unambiguously "hold X, be able to obtain Y".
+_CLEAR_ALT = re.compile(r"(?xi) \bor\b | / | \(")
+_CLEAR_ANAPHORA = re.compile(
+    r"(?xi) ^ \s* [\s)]* (?: and \s+ maintain \s+ )? (?: one|it|such|them|this|that|again ) \b"
+)
+_CLEAR_ACTIVE = re.compile(r"(?xi) \b(?: active|current|existing )\b | in \s+ possession \s+ of")
+
+
+def _obtain_names_a_second_credential(scope: str, om: re.Match) -> bool:
+    """True when an active-possession phrase governs one clearance and `om` governs another.
+
+    `scope` is the sentence; `om` is the `_OBTAINABLE` match inside it. Returns False --
+    i.e. leave the state `obtainable` -- whenever the sentence offers either path, or the
+    obtain-verb refers back to the same clearance with a pronoun.
+    """
+    am = _CLEAR_ACTIVE.search(scope)
+    if am is None or am.start() >= om.start():
+        # No active-possession claim, or it comes AFTER the obtaining ("eligible to
+        # obtain and maintain an active TS clearance") -- there the `active` modifies the
+        # clearance being obtained, and `obtainable` is right. 451 rows read this way.
+        return False
+    if _CLEAR_ALT.search(scope[am.end() : om.start()]):
+        return False
+    return not _CLEAR_ANAPHORA.match(scope[om.end() :])
+
+
 _PREFERRED = re.compile(r"""(?xi)
     preferred | nice[-\s]to[-\s]have | \bbonus\b | \ba\s+plus\b | desired | ideally
     | \bhelpful\b | not\s+required | may\s+require
@@ -476,8 +529,12 @@ def clearance_events(p: dict) -> list[ClearanceHit]:
         # heading is the employer's own framing of the whole list beneath it.
         if (header and _PREFERRED.search(header)) or _PREFERRED.search(scope):
             state = "mentioned"
-        elif _OBTAINABLE.search(scope):
-            state = "obtainable"
+        elif (om := _OBTAINABLE.search(scope)) is not None:
+            state = (
+                "required"
+                if _obtain_names_a_second_credential(scope, om)
+                else "obtainable"
+            )
         elif _REQUIRED.search(scope):
             state = "required"
         else:

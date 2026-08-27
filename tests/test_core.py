@@ -1570,8 +1570,15 @@ def test_a_section_that_cannot_be_located_gets_no_offsets_rather_than_wrong_ones
     Asserting `text[start:end] == section_text` proves nothing -- it is true by
     construction, because the offsets are produced BY searching for that text. What can
     actually go wrong is the splitter and `clean` disagreeing about the same bytes, and
-    the contract is that such a section arrives with its `type` and `header` and no
-    boundaries at all. Never with a plausible-looking guess.
+    the contract is that such a section arrives with its `type` and `header` and NO
+    LOCATION. Never with a plausible-looking guess.
+
+    THE REFUSAL IS SPELLED `None` NOW, NOT AN ABSENT KEY -- the design is unchanged, the
+    shape is not. Omitting the keys gave the nested object two schemas while the 48-field
+    top-level keyset stayed perfectly uniform, so `s["start"]` raised KeyError on 3,116
+    of 103,489 rows (3.01%), 4,692 of 993,070 spans, 694 companies. This test asserted
+    the omission, so it PASSED while the defect shipped -- the assertion below is the
+    corrected one, and the sibling test above pins that a consumer can index every span.
     """
     monkeypatch.setattr(
         util.sections,
@@ -1581,7 +1588,7 @@ def test_a_section_that_cannot_be_located_gets_no_offsets_rather_than_wrong_ones
     text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
     assert len(secs) == 1
     assert secs[0]["type"] == "requirements" and secs[0]["header"] == "Experience"
-    assert "start" not in secs[0] and "end" not in secs[0]
+    assert secs[0]["start"] is None and secs[0]["end"] is None
     assert text == util.clean(_GREENHOUSE_BODY)  # the body itself is unaffected
 
 
@@ -5635,3 +5642,34 @@ def test_a_nameless_entry_keeps_its_frontier_and_local_flags(monkeypatch):
     # that merely CONTAINS it, so the assert would pass on a signal set that
     # never carried the flag.
     assert any(x.startswith("local") for x in sigs), sigs
+
+def test_a_section_that_cannot_be_located_emits_NULL_offsets_not_ABSENT_KEYS():
+    """THE NESTED OBJECT DID NOT HONOR THE TOP LEVEL'S TYPE DISCIPLINE, and nothing at
+    the row level hinted at it -- the 48-field record keyset is perfectly uniform across
+    103,489 rows, which is exactly what made this survive review.
+
+    A failed `find` used to append the entry untouched, so that span carried two keys
+    while every other span carried four. A consumer writing the obvious `s["start"]` got
+    a KeyError on 3,116 of 103,489 rows (3.01%), 4,692 of 993,070 spans, 694 distinct
+    companies -- broad, not one template.
+
+    The refusal to guess an offset is the design and is unchanged. What is pinned here is
+    that the refusal is spelled `None`, and that it stays DISTINGUISHABLE from the
+    zero-length case, which writes an integer meaning "an empty section, located here".
+    Collapsing those two would destroy the only self-check this design has.
+    """
+    # `<br>` inside a header is the known, singular cause of a failed lookup: the
+    # splitter collapses it to a space while the cleaner turns it into a newline, so
+    # `find` misses. 7 of 30,145 headers on a real corpus.
+    raw = "<strong>Key<br/>Duties</strong><p>Ship the thing.</p>"
+    text, spans = util.clean_with_sections(raw)
+    assert spans, "no spans produced, so this proved nothing"
+    for sp in spans:
+        assert set(sp) >= {"type", "header", "start", "end"}, f"missing keys: {sp}"
+        # the shape a naive consumer writes -- it must not raise
+        _ = sp["start"], sp["end"]
+    located = [s for s in spans if s["start"] is not None]
+    for s in located:
+        assert isinstance(s["start"], int) and isinstance(s["end"], int)
+        assert text[s["start"] : s["end"]] or s["start"] == s["end"]
+

@@ -8,6 +8,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A section whose text could not be located shipped with its offset keys ABSENT, not
+  null.** `clean_with_sections` refuses to guess an offset when the splitter and `clean`
+  disagree about the same bytes — that refusal is the design's only self-check and is
+  unchanged. What was wrong is how the refusal was spelled: the entry was appended
+  untouched, so that span carried `{type, header}` while every other span carried four
+  keys. **`s["start"]` raised `KeyError` on 3,116 of 103,489 rows (3.01%), 4,692 of
+  993,070 spans, across 694 distinct companies** `[harvest 2026-08-25]` — broad, not one
+  employer's template. The 48-field top-level keyset is perfectly uniform across every
+  row, which is exactly what let a *nested* object carry two schemas without anything at
+  the row level hinting at it. It is `None` now, and still distinguishable from the
+  zero-length case, which writes an integer meaning "an empty section, located here".
+
+  The existing contract test asserted `"start" not in secs[0]` — so it **passed while
+  the defect shipped**. It now asserts the null, and a sibling test pins that a consumer
+  can index every key on every span.
+
+- **`clearance='obtainable'` inverted the requirement when a posting named TWO
+  credentials.** `_OBTAINABLE` is tested before `_REQUIRED` on purpose — the modal in
+  *"must be able to obtain"* belongs to the obtaining — but that ordering also swallowed
+  *"Active Top Secret clearance with ability to obtain SCI"*, where the obtain-verb
+  governs a **second, higher** credential and the first must already be held. The result
+  told a candidate holding no clearance that a job requiring an active TS on day one was
+  open to them: the exact harm the three-state design exists to prevent, pointed
+  backwards.
+
+  **63 rows flip to `required`** (0.061% of the corpus; `obtainable` 1,707 → 1,644). Of
+  the 14 distinct sentences among them, 13 are unambiguously *"hold X, be able to obtain
+  Y"*.
+
+  **Two signals protect the honest cases and neither is sufficient alone.** Of 146 rows
+  carrying an active-possession cue before an obtain cue, 80 offer **either path**
+  (*"Active clearance **or** ability to obtain one"*) and 33 have the obtain-verb take a
+  **pronoun** (*"willing to obtain **one**"*), which points back at the same clearance —
+  the second is what rescues *"If you do **not** have an active clearance, you must be
+  willing to obtain one"*, a negated cue the alternation test alone would flip. A first
+  draft of this rule used cue ORDER alone and would have broken 3 of the first 5 rows it
+  touched. **The connector carries the meaning, not the position.** A separate 451 rows
+  place `active` AFTER the obtain-verb (*"eligible to obtain and maintain an active TS
+  clearance"*), where it modifies what is being obtained; flipping on mere co-presence
+  would have broken every one.
+
 - **`util.salary_from_text` now takes the first money range that PASSES its guards, not the
   first that matches.** It ran `_SAL_RE.search` — one match — and returned `""` when that
   match failed `_SAL_MAGNITUDE` or the anchor/unit guard, without ever looking at the second.

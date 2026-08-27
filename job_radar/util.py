@@ -373,6 +373,24 @@ def clean_with_sections(raw: str) -> tuple[str, list[dict]]:
             entry["start"] = idx
             entry["end"] = idx + len(seg)
             pos = entry["end"]
+        else:
+            # A FAILED LOOKUP EMITS null OFFSETS, NOT ABSENT KEYS. The refusal to guess
+            # is the design and it stays; what changed is the SHAPE of the refusal. This
+            # branch used to append `entry` untouched, so a span carried only
+            # {type, header} while every other span carried four keys -- and a consumer
+            # writing the obvious `s["start"]` got a KeyError on 3,116 of 103,489 rows
+            # (3.01%), 4,692 of 993,070 spans, across 694 distinct companies. Not a
+            # template: broad enough that any naive reader crashes on a real corpus.
+            # The top-level record keyset is perfectly uniform, which is exactly what
+            # made this easy to miss -- nothing at the row level hinted that a NESTED
+            # object had two schemas.
+            #
+            # `None` is still distinguishable from the zero-length case above: that one
+            # writes an INTEGER position, meaning "an empty section, located here", while
+            # `None` means "this section could not be located at all". Collapsing those
+            # two would destroy the only self-check this design has, which is why the
+            # fix is a null and not a fallback offset.
+            entry["start"] = entry["end"] = None
         out.append(entry)
     return text, out
 
