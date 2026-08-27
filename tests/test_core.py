@@ -4140,7 +4140,7 @@ def test_a_hyphenated_quantity_is_not_a_pay_period():
     """
     # $45/hr is ~$11,700/yr if read as daily: plausible enough to survive the veto,
     # so only the hyphen guard can stop `day` here.
-    _, period = engine._adjacent_evidence(
+    _, period, _n = engine._adjacent_evidence(
         "the rate is $45 - $65 USD. Our policy requires a 90-day waiting period.",
         "$45 - $65",
     )
@@ -5672,4 +5672,185 @@ def test_a_section_that_cannot_be_located_emits_NULL_offsets_not_ABSENT_KEYS():
     for s in located:
         assert isinstance(s["start"], int) and isinstance(s["end"], int)
         assert text[s["start"] : s["end"]] or s["start"] == s["end"]
+
+
+def test_salary_currency_basis_vocabulary_is_closed_read_from_the_engine_source():
+    """Every `salary_currency_basis` literal in engine.py is in the vocabulary.
+
+    Enforced by reading the SOURCE, the same mechanism
+    `test_every_basis_field_uses_its_closed_vocabulary` applies to the adapters --
+    but pointed at engine.py, because this basis is decided in the pipeline rather
+    than by any adapter. A typo'd basis fails here rather than in whatever consumer
+    eventually branches on it.
+    """
+    import inspect
+    import re as _re
+
+    src = inspect.getsource(engine)
+    used = set(_re.findall(r'"salary_currency_basis"\]\s*=\s*"([a-z_]+)"', src))
+    assert used, "found no assignments to read -- this test would pass vacuously"
+    illegal = used - vocab.SALARY_CURRENCY_BASES
+    assert not illegal, f"engine emits {sorted(illegal)}"
+    # and every member is actually reachable, so a dead value cannot rot in the set
+    assert used == set(vocab.SALARY_CURRENCY_BASES), (
+        f"vocabulary and code disagree: only {sorted(used)} are assigned"
+    )
+
+
+def test_a_vendor_currency_is_not_labelled_as_a_code_beside_the_figure():
+    """THE FINDING OF THIS PHASE, and the reason there are four values and not three.
+
+    12,299 of 41,944 amount-bearing rows get their currency from the source's own
+    structured field, and on 12,142 of them (98.72%) `_adjacent_evidence` never reads a
+    window
+    at all -- a vendor-structured salary's display string is SYNTHESIZED by the
+    adapter, so `text.find(display)` fails on 98.72% of them -- NOT "by construction",
+    which `vocab.py` records as false: it SUCCEEDS on 157 of the 12,299, and 20 of those
+    carry one ISO code. The basis names how the value was decided, and the vendor field
+    decided it on all 12,299 either way. (ashby 10,321, lever 1,106,
+    himalayas 656, braintrust 54) [full_flat_raw.ndjson, harvest 2026-08-25].
+
+    Labelling those `iso_adjacent` would assert the employer wrote a code beside a
+    figure when they did not -- the same provenance lie that
+    `test_a_remote_only_board_reports_board_scope_not_a_vendor_field` exists to
+    prevent one field over: the values are right, the provenance is not.
+    """
+    # THE REAL CALLER, not a hand-built dict: `vocab.google_salary` is the adapter
+    # path that makes the mechanism definition REQUIRED rather than merely tidy.
+    # It sets a currency while reporting `salary_basis="parsed"`, so a rule keyed
+    # on `"stated"` would call this `iso_adjacent` and assert an employer wrote a
+    # code beside a figure that Google assembled.
+    got = vocab.google_salary("$120,000 - $150,000 a year")
+    assert got["salary_currency"] == "USD" and got["salary_basis"] == "parsed", (
+        "the divergent state this test exists for is gone; re-derive the rule"
+    )
+    p = dict(got)
+    p["salary"] = "$120,000 - $150,000 a year"
+    p["text"] = "a body that never quotes the band and names no currency code"
+    engine.derive_salary(p)
+    assert p["salary_currency"] == "USD", "the adapter's own value must survive"
+    assert p["salary_currency_basis"] == "vendor_field"
+
+    # And a genuinely vendor-structured row, built through the chokepoint every
+    # adapter reaches rather than by hand, so the record is provably reachable.
+    v = vocab.salary(100_000, 120_000, currency="EUR", period="year", basis="stated")
+    v["salary"] = "100,000 - 120,000"
+    v["text"] = "a body naming no currency code at all"
+    engine.derive_salary(v)
+    assert v["salary_currency"] == "EUR"
+    assert v["salary_currency_basis"] == "vendor_field"
+
+
+def test_one_adjacent_code_is_iso_adjacent_and_two_are_a_labelled_refusal():
+    """The refusal is correct and stays; what changes is that it is now visible.
+
+    `$` is shared by USD/CAD/AUD/SGD/HKD/MXN, so two codes in the window is a refusal
+    rather than a coin flip. Hand-read, 86 of the 89 such rows in the corpus are
+    genuine dual-currency postings -- `Canada Base Salary Band ... / USA Base Salary
+    Band ...`, one quoting three. The employers declined to pick.
+    """
+    one = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range for this role is $120,000 - $150,000 USD annually.",
+    }
+    engine.derive_salary(one)
+    assert one["salary_currency"] == "USD"
+    assert one["salary_currency_basis"] == "iso_adjacent"
+
+    two = {
+        "salary": "$120,000 - $150,000",
+        "text": "USA Band: $120,000 - $150,000 USD. Canada Band: 160,000 CAD.",
+    }
+    engine.derive_salary(two)
+    assert two["salary_currency"] is None, "two codes must not resolve to one"
+    assert two["salary_currency_basis"] == "ambiguous"
+
+
+def test_no_adjacent_code_is_absent_and_absent_covers_an_unreadable_window():
+    """`absent` deliberately spans TWO causes: a window read and holding no code
+    (15,004 rows) and no window readable at all (5 rows) -- empty body, or a display
+    string that does not occur in the body. A consumer behaves identically on both,
+    and a fifth member reading `5` in the census is exactly how `posted_basis` ended
+    up carrying one value across a whole corpus. Named here so the 5 are not
+    rediscovered later as an unlabelled gap.
+    """
+    read = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range for this role is $120,000 - $150,000 annually.",
+    }
+    engine.derive_salary(read)
+    assert read["salary_currency"] is None
+    assert read["salary_currency_basis"] == "absent"
+
+    unreadable = {"salary": "$120,000 - $150,000", "text": ""}
+    engine.derive_salary(unreadable)
+    assert unreadable["salary_currency_basis"] == "absent"
+
+
+def test_the_basis_is_set_exactly_when_there_is_a_figure_to_ask_about():
+    """Set IFF the row carries an amount -- NOT `iff a currency was found`, which was
+    the gate this field was first specified against and would have defeated its whole
+    purpose: the rows worth labelling are the ones where the currency is MISSING.
+    A basis on a row with no figure is the opposite error, answering a question
+    nobody posed.
+    """
+    none_at_all = {"salary": None, "text": "no pay information here"}
+    engine.derive_salary(none_at_all)
+    assert none_at_all.get("salary_currency_basis") is None
+
+    refused = {"salary": "up to $200,000", "text": "up to $200,000"}
+    engine.derive_salary(refused)
+    assert refused.get("salary_min") is None, "the parser must refuse a lone figure"
+    assert refused.get("salary_currency_basis") is None
+
+    has_figure = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range is $120,000 - $150,000.",
+    }
+    engine.derive_salary(has_figure)
+    assert has_figure["salary_min"] is not None
+    assert has_figure["salary_currency_basis"] is not None
+
+
+def test_a_predicted_pay_row_still_gets_a_basis_for_its_vendor_currency():
+    """`PREDICTED_PAY_SOURCES` returns before the text pass, and that early return is
+    a path out of `derive_salary` like any other. A row that leaves by it carrying an
+    amount must not carry a null basis, or the contract "set on every amount-bearing
+    row" holds everywhere except the one branch nobody re-read.
+    """
+    src = next(iter(engine.PREDICTED_PAY_SOURCES))
+    p = {
+        "source": src,
+        "salary_min": 90_000.0,
+        "salary_max": 110_000.0,
+        "salary_currency": "GBP",
+    }
+    engine.derive_salary(p)
+    assert p["salary_currency_basis"] == "vendor_field"
+
+def test_n_codes_counts_a_ONE_code_window_as_one_not_zero():
+    """`n_codes` is the third return of `_adjacent_evidence` and it read **0** for a
+    window holding exactly one code -- byte-identical to a window holding none, which is
+    the one distinction the value exists to make. `codes.pop()` mutated the set and
+    `len(codes)` was read after it.
+
+    NO LIVE EFFECT WHEN FOUND: `_label_currency` tests `salary_currency is not None`
+    first, so the 14,547 one-code rows leave by an earlier branch and were labelled
+    correctly anyway. That is exactly why it needs a test -- reorder those two branches
+    and 14,547 rows silently relabel `absent`, with the count agreeing that they should.
+    Its docstring tells callers not to re-derive the count ("measuring two
+    implementations at once"), so the number it hands them has to be right.
+
+    `len(codes) + 1` survived all 704 tests before this existed.
+    """
+    needle = "$120,000 - $150,000"
+    one = f"Base pay {needle} USD per year"
+    two = f"Range {needle} USD or CAD per year"
+    none_ = f"Base pay {needle} per year"
+
+    assert engine._adjacent_evidence(one, needle) == ("USD", "year", 1)
+    assert engine._adjacent_evidence(two, needle) == (None, "year", 2)
+    assert engine._adjacent_evidence(none_, needle) == (None, "year", 0)
+    # the needle absent from the body is the fourth state, and it is None -- not 0
+    assert engine._adjacent_evidence("no figure here", needle) == (None, None, None)
 

@@ -165,6 +165,12 @@ _CONTRACT_FIELDS = (
     "salary_min",  # float | None -- what an employer COMMITTED to
     "salary_max",
     "salary_currency",
+    # HOW the currency was decided, INCLUDING when it was deliberately not
+    # decided -- vocab.SALARY_CURRENCY_BASES. `None` only when the row carries
+    # no figure at all; on every amount-bearing row this says which of the four
+    # happened, so a refusal stops being indistinguishable from an unasked
+    # question. See the vocabulary for the per-value measurement.
+    "salary_currency_basis",
     "salary_period",  # year | month | week | day | hour | fixed | None
     # `stated` = a vendor's own structured field · `parsed` = read out of free text
     # (vocab.google_salary, vocab.salary_from_display). There has never been a `text`
@@ -745,7 +751,9 @@ _HYPHEN_QTY = re.compile(
 _ADJ_WINDOW = 90
 
 
-def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
+def _adjacent_evidence(
+    text: str, needle: str
+) -> tuple[str | None, str | None, int | None]:
     """The currency and period the employer STATED next to this figure, or None.
 
     WHY A WINDOW AND NOT THE WHOLE BODY: a posting that quotes a US band and a Canada
@@ -760,17 +768,33 @@ def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
     3,500 have no country at all, where this still reads the answer off the page.
     [local 94-board harvest, 0.9.0, 2026-08-20]
 
-    TWO of anything is a refusal, not a coin flip. Returns (currency, period), each
-    None unless exactly one candidate appears in the window.
+    TWO of anything is a refusal, not a coin flip. Returns (currency, period,
+    n_codes), the first two None unless exactly one candidate appears in the
+    window.
+
+    `n_codes` is HOW MANY distinct currency codes the window held, and it exists
+    so `derive_salary` can label a refusal without re-scanning the body. A caller
+    that re-derived the count itself would be measuring two implementations at
+    once and could not say which one moved. `None` means no window was read at
+    all -- empty text, or the display string does not occur in the body -- which
+    is a different fact from a window that was read and held nothing.
     """
     if not text or not needle:
-        return None, None
+        return None, None, None
     i = text.find(needle)
     if i < 0:
-        return None, None
+        return None, None, None
     w = text[max(0, i - _ADJ_WINDOW) : i + len(needle) + _ADJ_WINDOW]
     codes = set(_CURRENCY_CODE.findall(w.upper()))
-    currency = codes.pop() if len(codes) == 1 else None
+    # COUNT BEFORE THE POP. `codes.pop()` mutates the set, so reading `len(codes)` at
+    # the return gave **0 for a one-code window** -- byte-identical to a window that
+    # held nothing, which is the exact distinction `n_codes` exists to make. No live
+    # effect today only because `_label_currency` tests `salary_currency is not None`
+    # first and one-code rows leave by an earlier branch; reorder those branches and
+    # 14,547 rows silently relabel `absent`. `len(codes) + 1` survived all 704 tests,
+    # so nothing was guarding it -- an assertion now does.
+    n_codes = len(codes)
+    currency = codes.pop() if n_codes == 1 else None
     # "90-day waiting period" / "4-day work week" / "12-month vesting" are not
     # pay periods. Dropping a digit-hyphen prefix removes the actual source of
     # the 55 bogus `day` assignments rather than only catching them downstream.
@@ -778,7 +802,7 @@ def _adjacent_evidence(text: str, needle: str) -> tuple[str | None, str | None]:
         vocab.salary_period(x) for x in _PERIOD_WORD.findall(_HYPHEN_QTY.sub(" ", w))
     }
     periods.discard(None)
-    return currency, (periods.pop() if len(periods) == 1 else None)
+    return currency, (periods.pop() if len(periods) == 1 else None), n_codes
 
 
 # The cues for `salary_kind`, most specific first. Order does NOT decide the answer --
@@ -1079,6 +1103,44 @@ def salary_kind(text: str, needle: str) -> str:
     return "unspecified" if best is None or tied else best
 
 
+def _label_currency(p: dict, vendor_currency: bool, n_codes: int | None) -> dict:
+    """Record HOW `salary_currency` was decided -- vocab.SALARY_CURRENCY_BASES.
+
+    THE FIELD IS SET IFF THE ROW CARRIES AN AMOUNT, which is deliberately not the
+    same rule as `iff a currency was found`. The whole point is to label the rows
+    where the currency is MISSING: 15,098 of 41,944 amount-bearing rows on the
+    2026-08-25 harvest (36.0%) carry a bare number, and until this field they were
+    indistinguishable from a row nobody asked about. A basis on a row with no
+    figure would be the opposite error -- answering a question nobody posed --
+    so those stay `None` (61,545 rows).
+
+    TWO SCOPE CONSEQUENCES, recorded because each is a CHOICE rather than a
+    fallout. 396 rows carry a display string but no parsable amount and so get
+    `None`: there is no figure for a currency to denominate, and labelling the
+    provenance of a currency nobody can attach to a number says nothing. And 5
+    rows carry an amount with no display string at all -- every one of them a
+    vendor's structured figure -- which land in `vendor_field` correctly, via the
+    fill-only return rather than the text pass.
+
+    Four values, measured 29.3 / 34.7 / 35.8 / 0.2 percent, so this cannot quietly
+    become `posted_basis`, which carries one value across the whole corpus.
+    """
+    if p.get("salary_min") is None and p.get("salary_max") is None:
+        return p  # no figure, so there is no currency question to answer
+    if vendor_currency:
+        p["salary_currency_basis"] = "vendor_field"
+    elif p.get("salary_currency") is not None:
+        # The only other writer is `salary_from_display`, which never derives a
+        # currency itself -- it passes through the one `_adjacent_evidence` read
+        # from the window. So a currency here IS the adjacent code.
+        p["salary_currency_basis"] = "iso_adjacent"
+    elif n_codes is not None and n_codes >= 2:
+        p["salary_currency_basis"] = "ambiguous"
+    else:
+        p["salary_currency_basis"] = "absent"
+    return p
+
+
 def derive_salary(p: dict) -> dict:
     """Fill the structured salary from the display string the adapter already has.
 
@@ -1149,10 +1211,39 @@ def derive_salary(p: dict) -> dict:
     # numerator and denominator come from different instruments reads as sound from
     # either end. It describes the figure the EMPLOYER wrote, so it
     # is independent of whether our parser can turn that string into numbers.
+    # READ AT THE TOP, ABOVE THE FILL-ONLY RETURN, and the first version of this was
+    # below it -- which left the whole `vendor_field` arm unlabelled, because a row
+    # that already carries a vendor figure leaves by that return and never reaches
+    # the text pass. 12,299 of 41,944 amount-bearing rows exit there, so the field
+    # was null on 29.3% of exactly the rows it exists to describe. Two tests caught
+    # it; the placement is the fix.
+    #
+    # A currency present HERE came from the source's own structured field, which is
+    # a different provenance from one read off the page. Implemented as the
+    # MECHANISM (a currency already set) and NOT the correlation (`salary_basis ==
+    # "stated"`), because ONE WIRED ADAPTER REQUIRES THE DISTINCTION rather than
+    # merely permitting it: `vocab.google_salary` fills `salary_min` AT THE ADAPTER
+    # and sets `salary_currency="USD"` while deliberately reporting
+    # `salary_basis="parsed"` -- its own docstring: "this is text Google assembled,
+    # not a field an employer filled in". So on every salary-bearing google_jobs
+    # row the two definitions disagree, and keying on `"stated"` would label it
+    # `iso_adjacent` -- asserting an employer wrote an ISO code beside a figure when
+    # Google assembled the string and the adapter chose the currency. That is
+    # precisely the assumption this field exists to stop anyone making.
+    #
+    # The 2026-08-25 harvest shows 0 divergent rows, and that number is a SOURCE-MIX
+    # artifact, not evidence: google_jobs is keyed, it contributed 0 of 103,489 rows,
+    # and eight of nineteen adapters never ran. Quoting the zero without its cause
+    # would be the same mistake as a field measured empty on a corpus that excluded
+    # the only adapter filling it. NO CLAIM IS MADE HERE ABOUT HOW OFTEN THE GOOGLE
+    # PATH FIRES: no google_jobs record has been seen off the wire, the evidence is
+    # `vocab.google_salary` executed directly plus its call site in `sources.py`,
+    # and `catalog/` carries no profile for that source.
+    vendor_currency = p.get("salary_currency") is not None
     if p.get("salary"):
         p["salary_kind"] = salary_kind(p.get("text") or "", p["salary"])
     if p.get("salary_min") is not None or p.get("salary_max") is not None:
-        return p
+        return _label_currency(p, vendor_currency, None)
     # BELOW THE FILL-ONLY RETURN ON PURPOSE, and the first draft of this guard had it
     # above. There it also fired on an Adzuna row that carried a display string with no
     # structured numbers -- not a prediction -- and stripped its `salary_kind`, because
@@ -1180,7 +1271,7 @@ def derive_salary(p: dict) -> dict:
     # `sources.PREDICTED_PAY_SOURCES`: a predicted Adzuna row and a genuine no-figure
     # Adzuna row are byte-identical in the record once `_coerce` has run.
     if p.get("source") in PREDICTED_PAY_SOURCES:
-        return p
+        return _label_currency(p, vendor_currency, None)
     # WHY THERE ARE NO salary_estimated_* COLUMNS, since the guard above is what stands
     # in their place. The fix at the time was a pair of estimate columns plus an early
     # return here when they were set. On the last release that SHIPPED them the
@@ -1203,15 +1294,16 @@ def derive_salary(p: dict) -> dict:
         # is vestigial. It stays because Phase 1's section-scoped body scan is what
         # replaces it, and replacing it now would be an irreversible change made on a
         # provisional plan; the quarantine above is deliberately independent of it.
-        return p
-    currency, period = _adjacent_evidence(p.get("text") or "", display)
+        return _label_currency(p, vendor_currency, None)
+    currency, period, n_codes = _adjacent_evidence(p.get("text") or "", display)
     got = vocab.salary_from_display(display, period=period, currency=currency)
     if got.get("salary_min") is None:
-        return p  # the parser refused; leave the honest nulls alone
+        # the parser refused; leave the honest nulls alone
+        return _label_currency(p, vendor_currency, n_codes)
     for k, v in got.items():
         if p.get(k) is None:
             p[k] = v
-    return p
+    return _label_currency(p, vendor_currency, n_codes)
 
 
 def derive_remote(p: dict) -> dict:
@@ -1315,7 +1407,8 @@ _READING_ORDER = (
     # when
     "posted", "posted_basis", "expires", "harvested_at",
     # money -- the commitment, then the model's guess, never interleaved
-    "salary", "salary_min", "salary_max", "salary_currency", "salary_period",
+    "salary", "salary_min", "salary_max", "salary_currency",
+    "salary_currency_basis", "salary_period",
     "salary_basis", "salary_kind",
     # terms
     "employment_type", "employment_type_raw",

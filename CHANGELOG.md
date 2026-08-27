@@ -6,6 +6,59 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`salary_currency_basis` — the currency refusal is now labelled instead of silent.**
+  `_adjacent_evidence` sets a currency only when exactly one ISO code sits in its
+  ±90-character window, because `$` is shared by USD/CAD/AUD/SGD/HKD/MXN. **That rule is
+  unchanged and correct**; what was wrong is that refusing looked identical to never
+  having been asked. **15,098 of 41,944 amount-bearing rows (36.0%) carried a bare
+  number** `[harvest 2026-08-25, 103,489 rows]`, so `ORDER BY salary_min` sorted an
+  unlabelled `11` next to an unlabelled `60000000`. Four values, none near a monopoly:
+  `iso_adjacent` 14,547 (34.7%) · `absent` 15,009 (35.8%) · `vendor_field` 12,299
+  (29.3%) · `ambiguous` 89 (0.2%). Set **iff the row carries an amount** — 41,944 set,
+  61,545 `None` — which is deliberately not "iff a currency was found", since the rows
+  worth labelling are precisely the ones where it is missing.
+
+  **The fourth value is the finding, and the spec asked for three.** `vendor_field` rows
+  get their currency from the source's own structured field before any text pass runs,
+  and on 98.7% of them the display string is synthesized by the adapter so
+  `text.find(display)` fails and no window is ever read. Folding them into
+  `iso_adjacent` would assert the employer wrote a code beside a figure when they did
+  not — the same class of provenance lie the remote-basis vocabulary had to unpick when
+  six adapters labelled a board-wide fact `stated`.
+
+  **It is implemented as the mechanism (a currency already present) and not the
+  correlation (`salary_basis == "stated"`), because a wired adapter requires the
+  distinction rather than merely permitting it.** `vocab.google_salary` fills
+  `salary_min` at the adapter and sets `salary_currency = "USD"` while deliberately
+  reporting `salary_basis = "parsed"` — its own docstring: *"this is text Google
+  assembled, not a field an employer filled in."* On every salary-bearing google_jobs
+  row the two definitions disagree, and keying on `"stated"` would label it
+  `iso_adjacent`, asserting that an employer wrote an ISO code beside a figure Google
+  assembled. That is exactly the assumption this field exists to prevent. **The harvest
+  shows 0 divergent rows because google_jobs contributed 0 of 103,489 — it is keyed and
+  eight of nineteen adapters never ran** — so the zero is a source-mix artifact and is
+  quoted only with its cause. **No claim is made about how often that path fires:** no
+  google_jobs record has been read off the wire, the evidence is `vocab.google_salary`
+  executed directly plus its call site, and `catalog/` has no profile for that source.
+
+  `ambiguous` is a **deliberate** refusal, not a gap: hand-read, **86 of the 89** are
+  genuine dual-currency postings (`Canada Base Salary Band … / USA Base Salary Band …`,
+  one quoting three). Those employers declined to pick a currency and neither do we.
+  `absent` deliberately covers two states — a window read that held no code (15,004) and
+  a figure that could not be located in the body at all (5, 0.01%) — because a consumer
+  behaves identically on both, and a fifth member reading `5` in a census is how
+  `posted_basis` came to carry one value across an entire corpus.
+
+  **Accepted scope, stated rather than left to be found:** 396 rows carry a display
+  string but no parsable amount and get `None`, since there is no figure for a currency
+  to denominate; 5 rows carry an amount with no display string and land in
+  `vendor_field` via the fill-only return. **`_adjacent_evidence` now returns a third
+  element** (`n_codes`) so the caller can tell a two-code refusal from an empty window
+  without re-scanning the body — a caller that re-derived the count would be measuring
+  two implementations at once. `emit._nested` gains `salary.currency_basis`.
+
 ### Fixed
 
 - **A section whose text could not be located shipped with its offset keys ABSENT, not
