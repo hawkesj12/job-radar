@@ -1386,7 +1386,8 @@ def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
 
 # ── Strand B: the record contract ───────────────────────────────────────────
 # These are the gates BUILD-0.7.0 names. The `department` byte-identity gate lived
-# here until 0.9.0 removed the field; with nothing left to compare, the suite no
+# here until 0.9.0 merged `team` and `category` into `department` (the column KEPT;
+# `team` is the key that went), redefining the values it pinned to 0.6.0; the suite no
 # longer has an equivalence-against-history harness. That is intrinsic to the
 # removal, not an oversight -- but it is a real subtraction and it is recorded here
 # rather than left to be noticed. Its anti-vacuity coverage survives in
