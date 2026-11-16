@@ -7,6 +7,7 @@ import time
 import types
 import urllib.error
 from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -807,6 +808,24 @@ def test_ats_from_url():
     assert dedup.ats_from_url("https://example.com/careers") is None
 
 
+def _days_ago(n: int) -> str:
+    """A `posted` date N days before today, on the SAME clock the age gate reads.
+
+    THESE FIXTURES WERE A TIME BOMB. They hard-coded `"posted": "2026-07-10"` and
+    friends, and `engine._consume` / `shortlist.surface` drop a row whose
+    `util.age_int` exceeds `max_age_days` (60) measured against the REAL clock. The
+    suite went red on 2026-09-14 -- 18 failures on a tree whose code had not changed
+    -- and both CI and the release workflow stayed red on `main` from then on.
+    Bumping the literals would only re-arm it for another 60 days.
+
+    Derived from `util.today_et()` because that is what `age_int` compares against:
+    Eastern, not UTC and not naive local, so a fixture built just after midnight UTC
+    cannot land on the far side of the gate. The relative SPACING of the old literals
+    (07-10 / 07-12 / 07-20 = 12 / 10 / 2 days before a mid-July "today") is kept.
+    """
+    return (date.fromisoformat(util.today_et()) - timedelta(days=n)).isoformat()
+
+
 # ── store: the load-bearing upsert ───────────────────────────────────────────
 def _post(company, title, score, url):
     return {
@@ -814,7 +833,7 @@ def _post(company, title, score, url):
         "title": title,
         "score": score,
         "url": url,
-        "posted": "2026-07-10",
+        "posted": _days_ago(12),
         "sources": {"remoteok"},
         "text": "x",
         "signals": "ai",
@@ -953,7 +972,7 @@ def test_a_scan_persists_its_harvest_with_the_llm_enabled(tmp_path, monkeypatch)
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-10",
+                "posted": _days_ago(12),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "remotive",
             }
@@ -1854,7 +1873,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "fake",
             },
@@ -1863,7 +1882,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/2",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "fake2",
             },
@@ -1872,7 +1891,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/3",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Manage the office.",
                 "source": "fake",
             },
@@ -1903,7 +1922,7 @@ def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://adzuna.example/redirect/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": body,
                 "source": "adzuna",
             },
@@ -1912,7 +1931,7 @@ def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://acme.wd5.myworkdayjobs.com/job/AI-Engineer",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": body,
                 "source": "google_jobs",
             },
@@ -1946,7 +1965,7 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
         "company": "Acme",
         "location": "Remote",
         "url": "https://boards.greenhouse.io/acme/jobs/1",
-        "posted": "2026-07-12",
+        "posted": _days_ago(10),
         "text": full,
         "source": "greenhouse",
     }
@@ -1955,7 +1974,7 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
         "company": "Acme",
         "location": "Remote",
         "url": "https://remoteok.com/redirect/9999",
-        "posted": "2026-07-12",
+        "posted": _days_ago(10),
         "text": "Build RAG agentic LLM systems.",  # the short, score-inflated stub
         "source": "remoteok",
     }
@@ -2118,7 +2137,7 @@ def test_one_malformed_posting_cannot_kill_the_whole_harvest(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/3",
-                "posted": "2026-07-10",
+                "posted": _days_ago(12),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "evil",
             },
@@ -2261,7 +2280,7 @@ def test_corrupt_watchlist_surfaces_error(tmp_path, monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG LLM systems.",
                 "source": "fake",
             }
@@ -2706,7 +2725,7 @@ def _depth_only(monkeypatch, captured):
                 "title": "AI Engineer",
                 "location": "Remote",
                 "url": f"https://x/{slug}",
-                "posted": "2026-07-20",
+                "posted": _days_ago(2),
                 "text": "python",
                 "salary": "",
             }
@@ -5464,7 +5483,7 @@ def _vendor_depth(monkeypatch, vendor):
                 "company": vendor,
                 "location": "Remote",
                 "url": f"https://x/{slug}",
-                "posted": "2026-07-20",
+                "posted": _days_ago(2),
                 "text": "python",
                 "salary": "",
             }
