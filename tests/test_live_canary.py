@@ -26,6 +26,7 @@ Only keyless sources are covered. Adzuna, USAJOBS and Google-for-Jobs need
 credentials, and a scheduled public workflow should not carry them.
 """
 
+import inspect
 import re
 
 import pytest
@@ -101,13 +102,54 @@ def _check_shape(rows, name, expect_company=True):
         assert not missing, f"{name}: row missing {missing}"
 
 
+def _bot_wall(e) -> bool:
+    """A 403 carrying Cloudflare's challenge marker: the vendor's bot defence
+    answered, not its API."""
+    hdrs = getattr(e, "headers", None) or {}
+    return getattr(e, "code", None) == 403 and (
+        hdrs.get("cf-mitigated", "").lower() == "challenge"
+    )
+
+
+def _net_error(name, e):
+    """Sort a network error into the file's taxonomy instead of skipping them all.
+
+    A 4xx other than 408/429 is the endpoint ANSWERING that the resource is not
+    there -- reachable, and wrong, which is drift and fails. A Cloudflare challenge
+    is a third outcome: the vendor's bot defence answered, not its API, so nothing
+    was parsed and nothing can be judged; it skips, with a message that says it will
+    not clear on its own. Timeouts, DNS, 5xx, 408 and 429 are someone else's bad day
+    and skip as before.
+    """
+    code = getattr(e, "code", None)
+    if _bot_wall(e):
+        pytest.skip(
+            f"{name} BLOCKED by a Cloudflare challenge (HTTP 403, cf-mitigated: "
+            "challenge) — an access problem, not parser drift, and it will not clear "
+            "on its own; a harvest gets 0 rows from this source until it does"
+        )
+    if isinstance(code, int) and 400 <= code < 500 and code not in (408, 429):
+        pytest.fail(
+            f"{name}: HTTP {code} from its API — the endpoint answered that the "
+            "resource is not there. A vendor moving or retiring its API is drift."
+        )
+    pytest.skip(f"{name} unreachable ({type(e).__name__}) — their outage, not ours")
+
+
 @pytest.mark.parametrize("name", WHOLE_BOARD)
 def test_whole_board_source_still_parses(name):
+    """`strict=True` where the adapter takes it, for the reason given on
+    test_query_driven_source_still_parses, so the failure names the HTTP status
+    the adapter would otherwise swallow. themuse failed here from August with
+    "parsed 0 rows from a reachable endpoint" and no reason; under strict it names
+    the 404. An adapter without `strict` is called exactly as before."""
     _cfg()
+    fn = sources.BREADTH_ALL[name]
+    kw = {"strict": True} if "strict" in inspect.signature(fn).parameters else {}
     try:
-        rows = sources.BREADTH_ALL[name](BROAD_QUERY)
+        rows = fn(BROAD_QUERY, **kw)
     except NET_ERRORS as e:
-        pytest.skip(f"{name} unreachable ({type(e).__name__}) — their outage, not ours")
+        _net_error(name, e)
     _check_shape(rows, name)
 
 

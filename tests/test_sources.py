@@ -1193,6 +1193,37 @@ def test_themuse_ignores_a_query_because_it_cannot_search(monkeypatch):
     _assert_contract(out, "themuse")
 
 
+def test_themuse_fails_soft_by_default_and_raises_under_strict(monkeypatch):
+    """Every slice has errored since August (a 404 to this package's client). A
+    harvest must still fail soft -- one dead source cannot sink a scan -- but the
+    canary passes `strict=True` and must SEE the status; swallowed, it could only
+    report "parsed 0 rows from a reachable endpoint" with no reason. The 403
+    challenge shape is used because it is the one carrying extra headers."""
+    import email.message
+    import urllib.error
+
+    calls = []
+
+    def walled(url):
+        calls.append(url)
+        hdrs = email.message.Message()
+        hdrs["cf-mitigated"] = "challenge"
+        raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs, None)
+
+    monkeypatch.setattr(sources, "get_json", walled)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+
+    assert sources.search_themuse([]) == []
+    assert len(calls) == len(sources.THEMUSE_CATEGORIES), (
+        "a dead slice must end only its own category"
+    )
+
+    calls.clear()
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        sources.search_themuse([], strict=True)
+    assert ei.value.code == 403 and len(calls) == 1
+
+
 def _themuse_page(url):
     import re as _re
 

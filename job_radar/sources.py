@@ -3466,7 +3466,7 @@ THEMUSE_CATEGORIES = (
 )
 
 
-def search_themuse(queries):
+def search_themuse(queries, strict: bool = False):
     """The Muse -- keyless, and the least tech-skewed source here (11% tech titles
     when measured), which is the reason to carry it at all.
 
@@ -3489,6 +3489,17 @@ def search_themuse(queries):
     Cost is themuse_max_pages x 20 categories requests per run (default 5 -> 100
     requests, ~2,000 rows). `seen` dedups across slices because a job can carry two
     categories.
+
+    `strict` is for the live canary only, as on `search_himalayas`. Failing soft
+    turns a dead endpoint into twenty dead slices and an empty list, so the canary
+    could only say "parsed 0 rows from a reachable endpoint" -- and since August that
+    is all it has said, while the real answer was an HTTP status it never saw.
+    Probed 2026-11-16 with this package's own client: `/api/public/jobs` and
+    `/api/public/companies` return 404 with the site's HTML page, and
+    `/developers/api/v2` redirects to `/about`. (curl, over HTTP/2, gets a 403
+    Cloudflare challenge on the same URL instead; the client fingerprint decides
+    which wall you hit.) `strict=True` re-raises the first network error so the
+    canary reports the status. The engine never passes it.
     """
     out: list[dict] = []
     seen: set = set()
@@ -3501,6 +3512,8 @@ def search_themuse(queries):
                     f"?page={page}&category={q(category)}"
                 )
             except NET_ERRORS:
+                if strict:
+                    raise
                 break  # a dead slice ends this category; the others still run
             except Exception:  # noqa: BLE001
                 break
