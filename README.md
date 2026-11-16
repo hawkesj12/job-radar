@@ -136,7 +136,7 @@ The engine then adds `score`, `signals`, `sources` (the set of adapters that saw
 
 **Depth — 8 adapters, keyless.** Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Workday, Rippling, Teamtailor. One request per company for six of them; Workday and Rippling additionally fetch one detail call per role, because neither returns a description on its list endpoint. These are the employer's own applicant-tracking system, so the record is canonical: the real apply URL, the full description, the employer's own team name. You see a role the hour it posts. Workday is the enterprise one — it reaches the manufacturers, insurers, hospitals, municipalities, and national labs that never appear on the startup boards.
 
-**Breadth — 8 keyless adapters, whole-market.** Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Hacker News "Who is Hiring", Braintrust, The Muse. The Muse is the least tech-skewed source here — 11% tech titles when measured — which is why it is carried despite having no title search.
+**Breadth — 8 keyless adapters, whole-market.** Remotive, Jobicy, Arbeitnow, RemoteOK, Himalayas, Hacker News "Who is Hiring", Braintrust, The Muse (currently yields no rows: its API went dark in early November 2026 and returns HTTP 404). The Muse is the least tech-skewed source here — 11% tech titles when measured — which is why it is carried despite having no title search.
 
 **Keyed search — 3 adapters, title and location queryable.** Adzuna, USAJOBS, and Google for Jobs via SerpApi. This is the only lane that can serve a per-request live fetch, and the only one that reaches every field and location rather than remote-tech. All three degrade to a printed notice and an empty list when their key is unset, so the tool always runs free.
 
@@ -203,7 +203,7 @@ accidental one — the caps are visible knobs, not hidden in a URL.
 | ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | depth boards                 | the whole board, up to each cap | one request each — except SmartRecruiters (pages at 100), and Workday/Rippling (one request per role for the body) |
 | himalayas                    | ~1,000 newest                   | browse is date-ordered, so a bounded lane still gets the freshest rows                                             |
-| themuse                      | ~1,960 (20 slices x 5 pages)    | the vendor caps each slice at page 99; all 20 slices verified disjoint                                             |
+| themuse                      | ~1,960 (20 slices x 5 pages)    | the vendor caps each slice at page 99; all 20 slices verified disjoint. **Currently 0: its API went dark in early Nov 2026 (HTTP 404)** |
 | adzuna / usajobs             | 3 pages/query                   | vendor page sizes of 50 and 500                                                                                    |
 | google_jobs                  | 1 page/query                    | metered — SerpApi's free tier is 250 searches a **month**                                                          |
 | remotive / remoteok / jobicy | one request                     | that is the entire corpus                                                                                          |

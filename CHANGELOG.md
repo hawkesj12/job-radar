@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.0] - 2026-11-16
 
+### Known issues
+
+- **The Muse yields no rows.** Its public API stopped answering in early November
+  2026 — the weekly canary passed on 2026-11-02 and failed on 2026-11-09 — and a probe on
+  2026-11-16 found `/api/public/jobs` and `/api/public/companies` returning HTTP 404 and
+  the API documentation page redirecting to the site's About page. The `themuse` adapter
+  fails soft, so a harvest gets 0 rows from it and no error. The adapter and the default
+  board list are left in place for this release.
+
 ### Removed — BREAKING
 
 - **`team` and `category` are both gone; there is ONE org/function column,
@@ -300,6 +309,12 @@ Paris, France` (now `IT`) and a MongoDB role in `Dublin; Ireland` (now `IE`).
   nor creates any of the boundary change's decisions.
 
 ### Added
+
+- **`sources.search_themuse(queries, strict=False)`.** A new keyword on a public
+  function, matching `search_himalayas` and `search_remotive`: `strict=True` re-raises
+  the first network error instead of failing soft, so the live canary can report the
+  HTTP status rather than "parsed 0 rows". The engine never passes it; a harvest is
+  unchanged.
 
 - **`salary_currency_basis` — the currency refusal is now labelled instead of silent.**
   `_adjacent_evidence` sets a currency only when exactly one ISO code sits in its
