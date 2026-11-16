@@ -2898,6 +2898,15 @@ def _hn_rows(tree, out: list) -> None:
         parts = [p.strip() for p in text.split("|")]
         if len(parts) < 2 or not parts[0]:
             continue
+        # AN EMPTY SEGMENT IS A TYPO, NOT A FIELD. "Planlab.ai | | Product Engineer
+        # (Design) & Platform Engineer | ONSITE in London, UK" (live, 2026-11-16) has a
+        # doubled pipe, and positional reading made the title "" and the location the
+        # title -- 1 of 446 rows, and the reason the canary failed hn. Interior blanks
+        # are dropped; the company check above still runs on the raw first segment, so
+        # a comment that LEADS with a pipe is skipped exactly as before.
+        parts = [parts[0]] + [p for p in parts[1:] if p]
+        if len(parts) < 2:
+            continue
         if _is_hn_seeker_post(text):
             continue
         # STRUCTURE BEFORE THE STRIP, or not at all -- the same invariant `sections`
@@ -2918,11 +2927,18 @@ def _hn_rows(tree, out: list) -> None:
                 0
             ].split("|")
         ]
+        # Blanks dropped as for `parts` -- but the fallback below still keys on the RAW
+        # segment count. "experienceflyover.com | Chicago, Las Vegas |<p>Currently
+        # hiring..." ends its header with a pipe; compacted it looks short, falls back
+        # to the body-bearing `parts`, and a hiring blurb became the location (live,
+        # 2026-11-16). Keyed on the raw count it stays "", as it was.
+        head_long = len(head_parts) > 2
+        head_parts = head_parts[:1] + [p for p in head_parts[1:] if p]
         # Fall back when the split leaves no location segment: a comment whose block tag
         # precedes its pipes would otherwise EMPTY a location that is currently
         # populated. 4 of 196 comments split short; 0 lose a location today, and this
         # keeps that true for a thread that formats differently next month.
-        loc_parts = head_parts if len(head_parts) > 2 else parts
+        loc_parts = head_parts if head_long else parts
         hn_url, hn_recovered = _hn_url(c.get("text") or "", parts[0], text, c.get("id"))
         # SCAN the segments, do not index them. The convention is loose: measured
         # across 174 comments in one thread, the remote token lands in slot 2 (62x),

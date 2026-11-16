@@ -668,6 +668,16 @@ Paris, France` (now `IT`) and a MongoDB role in `Dublin; Ireland` (now `IE`).
 
 ### Fixed
 
+- **A doubled pipe in a Hacker News header no longer empties the title.** HN rows are
+  read positionally (`Company | Title | Location | …`), so `Planlab.ai | | Product
+  Engineer (Design) & Platform Engineer | ONSITE in London, UK` shipped `title: ""` and
+  the real title as its `location`. Empty interior segments are now dropped before the
+  positions are read. Measured on the live threads `[2026-11-16, 446 rows]`: 2 rows
+  change — that one, and Tivly's `location` gaining the `Full-time` segment that slides
+  into the slot its own doubled pipe left empty. A header that ends in a pipe keeps its
+  `location` empty rather than falling back to body prose; a comment that LEADS with a
+  pipe is still skipped.
+
 - **A section whose text could not be located shipped with its offset keys ABSENT, not
   null.** `clean_with_sections` refuses to guess an offset when the splitter and `clean`
   disagree about the same bytes — that refusal is the design's only self-check and is

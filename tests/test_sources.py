@@ -1984,6 +1984,40 @@ def test_hn_header_ends_at_a_block_tag_not_a_newline():
     )
 
 
+def test_hn_a_doubled_pipe_does_not_empty_the_title():
+    """Live, 2026-11-16: "Planlab.ai | | Product Engineer (Design) & Platform Engineer
+    | ONSITE in London, UK | ...". Read positionally, the empty segment became the
+    title and the real title became the location -- 1 of 446 rows, and the whole of
+    the hn canary failure. A leading pipe still means no company and is still skipped.
+    """
+    from job_radar.sources import _hn_rows
+
+    doubled = (
+        "Planlab.ai | | Product Engineer (Design) &amp; Platform Engineer | ONSITE in "
+        "London, UK | 100k-160k GBP<p>We are building AI tools for architects."
+    )
+    out: list = []
+    _hn_rows({"children": [{"text": doubled, "id": 1, "author": "a"}]}, out)
+    assert out[0]["title"] == "Product Engineer (Design) & Platform Engineer"
+    assert out[0]["company"] == "Planlab.ai"
+    assert "Product Engineer" not in out[0]["location"]
+    assert "London" in out[0]["location"]
+
+    leading: list = []
+    _hn_rows({"children": [{"text": "| Acme | Engineer | Remote", "id": 2}]}, leading)
+    assert leading == [], "no company in the first segment -- skipped, as before"
+
+    # A header that ENDS with a pipe must not, once compacted, look too short and fall
+    # back to the body-bearing segments -- that put a hiring blurb in `location`.
+    trailing = (
+        "experienceflyover.com | Chicago, Las Vegas |<p>Currently hiring BI Analyst "
+        "and Network Specialist<p>Apply below."
+    )
+    out3: list = []
+    _hn_rows({"children": [{"text": trailing, "id": 3, "author": "c"}]}, out3)
+    assert "hiring" not in out3[0]["location"]
+
+
 def _hn_one(text, company_id=1):
     from job_radar.sources import _hn_rows
 
