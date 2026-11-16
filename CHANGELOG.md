@@ -1838,12 +1838,15 @@ prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including
   that publishes only an org unit therefore leaves `category` `None` **correctly** —
   this has been filed as a bug more than once, and deriving one from the other was
   tried downstream and reverted after it filed 895 backend engineers under Science and
-  Engineering.
+  Engineering. **Superseded within this release:** `team` and `category` were then
+  merged into `department` — see **Removed — BREAKING**. The `function` / `org_unit`
+  split still holds in `catalog/_SCHEMA.md` for a profile, not in the record.
 - Corrected three claims that had gone stale: `CLAUDE.md` and
   `tests/test_sources.py` both stated that the downstream consumer reads `department`
   (it does not — the column is absent from its production schema and its code reads it
   zero times), and `catalog/_SCHEMA.md` described a Braintrust `level` mapping that was
-  already removed. The `department` byte-identity gate is unchanged and still green.
+  already removed. The `department` byte-identity gate was unchanged and green at the
+  time; it was deleted later in this release, with `team` (see **Removed — BREAKING**).
 - **The README's NDJSON key-count table was measured on a harvest that no longer
   exists, and it was four fields stale.** It published 50 / 31 / 30 keys against a
   7,568-row local harvest, and stayed at those figures when `industry`,
