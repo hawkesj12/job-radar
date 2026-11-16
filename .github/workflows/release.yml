@@ -156,6 +156,38 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           awk -v v="$VER" '$0 ~ "^## \\["v"\\]"{f=1;next} /^## \[/{f=0} f' CHANGELOG.md \
             | sed '/./,$!d' > notes.md
+          # GITHUB REJECTS A RELEASE BODY OVER 125,000 CHARACTERS ("body is too long"),
+          # and this job runs AFTER publish -- so an over-long section means PyPI has
+          # the version and the Release is never cut. 0.9.0's folded section measured
+          # 131,497 characters. Cut at the last whole entry under a 120,000-BYTE budget
+          # (bytes >= characters, so the margin holds however GitHub counts) and say so
+          # in the body, with a link to the full section at this tag. Sections are
+          # ordered BREAKING first, so what a cut drops is the tail of Fixed. A section
+          # under the budget passes through byte-for-byte.
+          python3 - notes.md "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md" <<'PY'
+          import sys
+          path, url = sys.argv[1], sys.argv[2]
+          budget = 119_000  # 120,000 less room for the truncation note itself
+          text = open(path, encoding="utf-8").read()
+          if len(text.encode("utf-8")) > 120_000:
+              lines = text.split("\n")
+              total = sum(1 for ln in lines if ln.startswith("- "))
+              cut = 0
+              for i, ln in enumerate(lines):
+                  if ln.startswith(("- ", "### ")):
+                      if len("\n".join(lines[:i]).encode("utf-8")) > budget:
+                          break
+                      cut = i
+              kept = lines[:cut]
+              while kept and (not kept[-1].strip() or kept[-1].startswith("### ")):
+                  kept.pop()
+              shown = sum(1 for ln in kept if ln.startswith("- "))
+              kept += ["", "---", "",
+                       f"**Truncated: {shown} of {total} entries shown** -- GitHub caps a "
+                       f"Release body at 125,000 characters. Full notes: {url}"]
+              open(path, "w", encoding="utf-8").write("\n".join(kept) + "\n")
+              print(f"release notes truncated: {shown} of {total} entries")
+          PY
           if [ -s notes.md ]; then
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
           else
