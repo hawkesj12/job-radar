@@ -2000,8 +2000,23 @@ def test_hn_a_doubled_pipe_does_not_empty_the_title():
     _hn_rows({"children": [{"text": doubled, "id": 1, "author": "a"}]}, out)
     assert out[0]["title"] == "Product Engineer (Design) & Platform Engineer"
     assert out[0]["company"] == "Planlab.ai"
-    assert "Product Engineer" not in out[0]["location"]
-    assert "London" in out[0]["location"]
+    assert out[0]["location"] == "ONSITE in London, UK", (
+        "the slot that became the title is not also read as a location"
+    )
+
+    # A BLANK AFTER THE TITLE MUST NOT SHIFT THE LOCATION. Live Tivly header, verbatim
+    # shape. Compacting the list slid "Full-time" into slot 3; raw indices keep the
+    # location exactly what it was before the doubled-pipe fix.
+    tivly = (
+        "Tivly | Principal Software Engineer (Java) | | [REMOTE (US) only currently "
+        "residing in: Alabama, Florida, Georgia] | Full-time | [$170k\u2013$190k + bonus]"
+        "<p>Tivly helps small businesses."
+    )
+    out_t: list = []
+    _hn_rows({"children": [{"text": tivly, "id": 4, "author": "d"}]}, out_t)
+    assert out_t[0]["title"] == "Principal Software Engineer (Java)"
+    assert out_t[0]["location"].startswith("[REMOTE (US) only")
+    assert "Full-time" not in out_t[0]["location"]
 
     leading: list = []
     _hn_rows({"children": [{"text": "| Acme | Engineer | Remote", "id": 2}]}, leading)
