@@ -1194,7 +1194,7 @@ def test_themuse_ignores_a_query_because_it_cannot_search(monkeypatch):
 
 
 def test_themuse_fails_soft_by_default_and_raises_under_strict(monkeypatch):
-    """Every slice has errored since August (a 404 to this package's client). A
+    """Every slice has errored since November 2026 (a 404 to this package's client). A
     harvest must still fail soft -- one dead source cannot sink a scan -- but the
     canary passes `strict=True` and must SEE the status; swallowed, it could only
     report "parsed 0 rows from a reachable endpoint" with no reason. The 403

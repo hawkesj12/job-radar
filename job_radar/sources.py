@@ -3508,8 +3508,9 @@ def search_themuse(queries, strict: bool = False):
 
     `strict` is for the live canary only, as on `search_himalayas`. Failing soft
     turns a dead endpoint into twenty dead slices and an empty list, so the canary
-    could only say "parsed 0 rows from a reachable endpoint" -- and since August that
-    is all it has said, while the real answer was an HTTP status it never saw.
+    could only say "parsed 0 rows from a reachable endpoint" -- which is all it has
+    said since its first failure on 2026-11-09 (it passed on 2026-11-02), while the
+    real answer was an HTTP status it never saw.
     Probed 2026-11-16 with this package's own client: `/api/public/jobs` and
     `/api/public/companies` return 404 with the site's HTML page, and
     `/developers/api/v2` redirects to `/about`. (curl, over HTTP/2, gets a 403

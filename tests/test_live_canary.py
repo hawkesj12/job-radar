@@ -140,7 +140,7 @@ def _net_error(name, e):
 def test_whole_board_source_still_parses(name):
     """`strict=True` where the adapter takes it, for the reason given on
     test_query_driven_source_still_parses, so the failure names the HTTP status
-    the adapter would otherwise swallow. themuse failed here from August with
+    the adapter would otherwise swallow. themuse failed here from 2026-11-09 with
     "parsed 0 rows from a reachable endpoint" and no reason; under strict it names
     the 404. An adapter without `strict` is called exactly as before."""
     _cfg()
