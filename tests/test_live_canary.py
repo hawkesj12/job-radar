@@ -453,7 +453,7 @@ def _unmapped_tokens(rows):
         # `[]` is stated-worldwide: one word covering every token by definition.
         if r.get("remote_areas") == []:
             continue
-        for tok in (t.strip() for t in raw.replace("&", ",").split(",")):
+        for tok in _scope_tokens(raw):
             if not tok:
                 continue
             total += 1
@@ -475,6 +475,34 @@ def _unmapped_tokens(rows):
                 missed += 1
                 samples.add(tok)
     return total, missed, samples
+
+
+def _scope_tokens(raw):
+    """Split a joined `remote_scope_raw` back into names, WHOLE ISO NAME FIRST.
+
+    15 ISO names contain a comma ("Micronesia, Federated States of", "Bonaire, Sint
+    Eustatius and Saba"), and himalayas' `remote_scope_raw` is its country LIST joined
+    with ", " for display. A bare comma split cut those into halves that resolve to
+    nothing, and this canary failed from August on 10 distinct "unmapped names" --
+    'Federated States of', 'Bonaire', 'British', 'State of', ... -- every one a
+    fragment of a country the package had ALREADY mapped: `stated_scope` reads the
+    list, never the join (its docstring: "Nothing re-splits it now"), and
+    `iso3166.alpha2` resolves all of them. The bug was this splitter, not the vocab.
+
+    So two adjacent parts that form an ISO name are rejoined, the same whole-name-first
+    rule `stated_scope` applies to a string. No ISO name has more than one comma, so a
+    pair is enough.
+    """
+    parts = [t.strip() for t in raw.replace("&", ",").split(",")]
+    out, i = [], 0
+    while i < len(parts):
+        if i + 1 < len(parts) and iso3166.alpha2(f"{parts[i]}, {parts[i + 1]}"):
+            out.append(f"{parts[i]}, {parts[i + 1]}")
+            i += 2
+        else:
+            out.append(parts[i])
+            i += 1
+    return out
 
 
 @pytest.mark.parametrize("name", SCOPE_SOURCES)
