@@ -164,7 +164,14 @@ jobs:
           # in the body, with a link to the full section at this tag. Sections are
           # ordered BREAKING first, so what a cut drops is the tail of Fixed. A section
           # under the budget passes through byte-for-byte.
-          python3 - notes.md "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md" <<'PY'
+          #
+          # NOTHING BELOW MAY STOP THE RELEASE BEING CUT. By the time this runs the
+          # version is on PyPI and cannot be withdrawn; a Release with generated notes
+          # beats no Release. So the cut writes a side file and swaps it in only on
+          # success (a crash leaves the full notes, never half a file), its failure is
+          # a warning, and a failed --notes-file create falls back to --generate-notes.
+          python3 - notes.md "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md" <<'PY' || echo "::warning::release-notes truncation failed; using the full section"
+          import os
           import sys
           path, url = sys.argv[1], sys.argv[2]
           budget = 119_000  # 120,000 less room for the truncation note itself
@@ -185,11 +192,20 @@ jobs:
               kept += ["", "---", "",
                        f"**Truncated: {shown} of {total} entries shown** -- GitHub caps a "
                        f"Release body at 125,000 characters. Full notes: {url}"]
-              open(path, "w", encoding="utf-8").write("\n".join(kept) + "\n")
+              with open(path + ".cut", "w", encoding="utf-8") as f:
+                  f.write("\n".join(kept) + "\n")
+              os.replace(path + ".cut", path)
               print(f"release notes truncated: {shown} of {total} entries")
           PY
-          if [ -s notes.md ]; then
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
+          if [ -s notes.md ] && gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*; then
+            echo "release created from CHANGELOG.md"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+            echo "::warning::release from CHANGELOG.md failed or was empty; falling back to generated notes"
+            # A create that made the Release but failed an upload must not be retried
+            # as a create -- that fails on "already exists". Re-attach instead.
+            if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+            fi
           fi
