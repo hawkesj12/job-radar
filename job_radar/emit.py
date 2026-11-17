@@ -45,7 +45,46 @@ from . import attribution
 _ET = ZoneInfo("America/New_York")  # every timestamp in job-radar is Eastern
 
 
-def _nested(r: dict) -> dict:
+def _sources(r: dict) -> list[str] | None:
+    """Every adapter that produced this row, from whatever SHAPE the caller holds.
+
+    ONE reader for a field that arrives in three shapes and was being read two
+    different ways at two different exits, which is how they came to disagree:
+
+      * a `set` -- what `engine._merge` builds and what a live harvest row carries
+      * a `list` -- the same value after ANY json round trip, and what a caller that
+        loaded our own NDJSON back hands us
+      * absent, with the singular `source` holding `", ".join(sorted(tokens))` --
+        what a STORE row carries, because `shortlist.COLUMNS` has no `sources`
+        column at all and `_build_row` folds the merge into `source`
+
+    `_nested` read only the first (`isinstance(..., set)`), so a list-valued
+    `sources` emitted `null` -- the merge record silently destroyed by a round trip.
+    `manifest` read the first two and then fell back to `[r["source"]]`, so a store
+    row counted one row under a FABRICATED source named `"adzuna, greenhouse"`, a
+    string no adapter has ever been called. Same field, two exits, two failures.
+
+    Splitting the store's joined string back is lossless for the SET, and provably
+    so rather than by inspection: no registered source token contains a comma or a
+    space (19 of 19, `sources.DEPTH_ALL | BREADTH_ALL`), so `", ".join` has exactly
+    one inverse. What it does NOT recover is WHICH source won the merge -- the store
+    never wrote that down, so the singular `source` becomes a REPRESENTATIVE rather
+    than a winner. See `_nested`'s `source` key.
+
+    THREE call sites read this, and all three are exits where the field lost its shape:
+    `_nested`, `manifest`, and `cli`'s attribution credit line. The third was missed
+    when the first two were fixed.
+    """
+    got = r.get("sources")
+    if isinstance(got, (set, frozenset, list, tuple)):
+        return sorted(str(s) for s in got if s)
+    one = r.get("source")
+    if not one:
+        return None
+    return sorted(t for t in str(one).split(", ") if t)
+
+
+def _nested(r: dict, include_text: bool = True, omit_empty: bool = False) -> dict:
     """One harvested posting -> the emitted record.
 
     Nests `location`, and keeps each derived `*_basis` next to the value it explains
@@ -59,11 +98,12 @@ def _nested(r: dict) -> dict:
     only to NDJSON. If those two ever need to agree, this mapping is the one place to
     change.
 
-    `department` rides along unchanged. It is deprecated, not gone: jobfitr pins a
-    released version and reads it today, so removing it here would break a consumer
-    at a minor version. It goes at 1.0.
+    `team` is GONE as of 0.9.0 -- the org-unit field is `department`, which is the
+    word five of the seven org-unit adapters read from the vendor. See the record
+    contract.
     """
-    return {
+    srcs = _sources(r)
+    out = {
         "id": r.get("id") or None,
         "dedup_key": r.get("dedup_key") or None,
         "title": {
@@ -73,10 +113,9 @@ def _nested(r: dict) -> dict:
             "qualifiers": r.get("title_qualifiers"),
         },
         "company": r.get("company") or None,
-        "parent_company": r.get("parent_company"),
-        "category": r.get("category"),
-        "team": r.get("team"),
+        "department": r.get("department"),
         "seniority": r.get("seniority"),
+        "seniority_raw": r.get("seniority_raw"),
         "seniority_basis": r.get("seniority_basis"),
         "tags": r.get("tags"),
         "location": {
@@ -87,7 +126,10 @@ def _nested(r: dict) -> dict:
             "all": r.get("locations"),
         },
         "remote": {
-            "is_remote": r.get("remote"),
+            # NO `is_remote`. A bool sat here until 0.9.0 and was exactly
+            # `type == "remote"` with None preserved, so it was a second home for one
+            # fact -- and the weaker home, since it cannot say `hybrid` and reported
+            # 1,679 hybrid rows as `false`. Read `type`; it answers more precisely.
             "type": r.get("remote_type"),
             # WHERE a remote worker may sit. `areas` are ISO codes, `regions` are
             # multi-country tokens, and they are separate because they are different kinds
@@ -105,35 +147,118 @@ def _nested(r: dict) -> dict:
         "harvested_at": r.get("harvested_at"),
         "employment_type": r.get("employment_type") or None,
         "employment_type_raw": r.get("employment_type_raw"),
+        # WHETHER A PERSON CAN APPLY AT ALL. Grouped rather than flat because each
+        # carries a basis, and a consumer that reads the state without the basis
+        # cannot tell a sentence-scoped answer from a section-scoped one. `None`
+        # throughout means the posting did not say -- 94% of rows for both.
+        "sponsorship": {
+            "state": r.get("sponsorship"),
+            "basis": r.get("sponsorship_basis"),
+        },
+        "clearance": {
+            "state": r.get("clearance"),
+            "basis": r.get("clearance_basis"),
+        },
         "salary": {
             "raw": r.get("salary") or None,
             "min": r.get("salary_min"),
             "max": r.get("salary_max"),
             "currency": r.get("salary_currency"),
+            # WHY the currency is null, when it is. A bare figure and a figure
+            # whose currency we refused to guess are the same bytes without this
+            # -- 36.0% of amount-bearing rows on the 2026-08-25 harvest.
+            "currency_basis": r.get("salary_currency_basis"),
             "period": r.get("salary_period"),
             "basis": r.get("salary_basis"),
+            # WHAT the figure measures, beside HOW it was extracted. A consumer
+            # filtering for base pay needs both: `basis` says we read it correctly,
+            # `kind` says it is not an equity grant.
+            "kind": r.get("salary_kind"),
             # KEPT APART from min/max on purpose. Adzuna predicts a salary with a
             # model on 93% of its rows; merging those into the same keys would make
             # a guess indistinguishable from a figure an employer committed to.
-            "estimated_min": r.get("salary_estimated_min"),
-            "estimated_max": r.get("salary_estimated_max"),
         },
         "url": r.get("url") or None,
         "direct_apply": r.get("direct_apply"),
         "text": r.get("text") or None,
-        "source": r.get("source") or None,
-        "sources": sorted(r["sources"]) if isinstance(r.get("sources"), set) else None,
+        # Sits beside `text` on purpose: a consumer reading the body needs to know in
+        # the same breath whether the SOURCE truncated it (`excerpt`) or whether we
+        # built it out of structured fields (`synthesized`). `None` means nobody
+        # characterized it -- there is no `full`, see vocab.TEXT_BASES.
+        "text_basis": r.get("text_basis"),
+        # NO `or None`, and that is not an oversight. `[] or None` is `None`, which
+        # would collapse "we looked and the body had no headers" into "there was no
+        # body" -- the exact two-state distinction this field exists to carry. Every
+        # `or None` above is on a str-typed field where "" and None mean the same
+        # thing; every list- or dict-typed field here already omits it, and `sections`
+        # follows `remote_areas` rather than the line above it.
+        "sections": r.get("sections"),
+        # A REAL ADAPTER TOKEN OR NOTHING. A store row folds a merge into this field
+        # as `", ".join(sorted(tokens))`, so a two-source row arrived here as the
+        # string "adzuna, greenhouse" -- which is not a source, resolves against no
+        # entry in `attribution`, and matches nothing a consumer can key on. The
+        # store never recorded WHICH source won the merge, so this is a REPRESENTATIVE,
+        # not the winner -- the first of the sorted tokens, chosen because it is
+        # deterministic. That distinction is the whole honesty of the field: on a
+        # merged row both adapters really did produce it, so one real token is
+        # lossy-but-true rather than a fabricated winner. `sources` beside it carries
+        # the whole set, and attribution is discharged off THAT, never off this key.
+        # A single-source row is unaffected.
+        "source": srcs[0] if srcs else None,
+        "sources": srcs,
         "source_extra": r.get("source_extra"),
         "score": r.get("score"),
         "signals": r.get("signals") or None,
-        # DEPRECATED -- see the docstring. Preserved byte-identical.
-        "department": r.get("department") or None,
     }
+    if not include_text:
+        # DROPPED, not nulled. `text: null` is already taken: it means the source sent
+        # no body (smartrecruiters, 250 of 250 rows), and collapsing "you asked us not
+        # to send it" into that is the same two-states-in-one-value lie the contract
+        # exists to remove. An absent key is the only value JSON has left.
+        del out["text"], out["text_basis"]
+    if omit_empty:
+        out = _prune(out)
+    return out
 
 
-def records(rows) -> str:
-    """Rows -> NDJSON text. One JSON object per line, no trailing blank line."""
-    return "\n".join(json.dumps(_nested(r), ensure_ascii=False) for r in rows)
+def _prune(o):
+    """Drop None and "" keys, recursively, from the nested record.
+
+    RECURSIVE because this shape nests: `location`, `remote`, `salary` and `title` are
+    objects, and pruning only the top level would leave `salary: {raw: null, min: null,
+    …}` -- eight nulls in a wrapper, which is most of what makes an empty record long.
+
+    `[]` AND `{}` SURVIVE, same rule as `engine._shape`. `remote.areas: []` means the
+    posting STATED it is open anywhere and `sections: []` means we read the body and
+    found no headers; both are facts that took work to establish and neither is `null`,
+    which means nobody said. Only None and "" go -- they already mean "nothing here".
+    An object that prunes to empty is KEPT as `{}` rather than dropped, so a consumer
+    reading `record["salary"]["min"]` gets None instead of a KeyError on the wrapper.
+    """
+    if isinstance(o, dict):
+        return {k: _prune(v) for k, v in o.items() if v is not None and v != ""}
+    if isinstance(o, list):
+        return [_prune(v) for v in o]
+    return o
+
+
+def records(rows, include_text: bool = True, omit_empty: bool = False) -> str:
+    """Rows -> NDJSON text. One JSON object per line, no trailing blank line.
+
+    `include_text=False` DROPS the `text`/`text_basis` keys rather than nulling them,
+    because `text: null` already means something else here -- the source sent no body
+    at all (smartrecruiters, 250 of 250) -- and a reader cannot tell that from "the
+    caller asked us not to send it". An absent key is the only honest way to say the
+    second thing. `text_basis` leaves with it: it characterizes a body that is no
+    longer in the record.
+    """
+    return "\n".join(
+        json.dumps(
+            _nested(r, include_text=include_text, omit_empty=omit_empty),
+            ensure_ascii=False,
+        )
+        for r in rows
+    )
 
 
 def manifest(rows, errors, discovered, cfg, started_at=None) -> str:
@@ -145,7 +270,11 @@ def manifest(rows, errors, discovered, cfg, started_at=None) -> str:
     """
     by_source: dict[str, int] = {}
     for r in rows:
-        for s in r.get("sources") or ([r["source"]] if r.get("source") else []):
+        # `_sources`, not a local fallback to `[r["source"]]`. That fallback counted a
+        # store row's joined `source` as one source literally named
+        # "adzuna, greenhouse" -- a name no adapter has, in the one output a consumer
+        # reads to tell "the market was quiet" from "four adapters were down".
+        for s in _sources(r) or ():
             by_source[s] = by_source.get(s, 0) + 1
     return json.dumps(
         {

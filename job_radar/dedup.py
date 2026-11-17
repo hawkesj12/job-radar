@@ -273,6 +273,15 @@ def normalize_location(loc: str) -> str:
     with `;` ("Berlin, Germany; Munich, Germany") and that is ONE posting with one
     job id -- it must not key differently from the same role elsewhere, and its
     other places are carried in `locations[]` rather than in the key.
+
+    `;` ONLY, DELIBERATELY -- this does NOT read `vocab.LOCATION_SEPARATORS`, which the
+    engine uses and which also carries `|` and the bullet. Adopting them here was
+    measured against the consumer's 67,481-row store: 1,488 rows change key, and only 2
+    new keys collapse more than one old key -- and both of those are multi-city postings
+    with distinct board job ids, which the `job_ref` veto below likely makes moot anyway.
+    `id = short_id(dedup_key)` is user-facing, so that is 1,488 job ids changing under
+    anyone holding one, to buy at most two merges. The engine may read a string more
+    finely than the key does; the key only has to be STABLE.
     """
     first = (loc or "").split(";")[0]
     first = _LOC_NOISE.sub(" ", first.lower())

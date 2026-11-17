@@ -3,9 +3,11 @@ LLM no-op guarantee. Run: pytest"""
 
 import json
 import os
+import time
 import types
 import urllib.error
 from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from job_radar import (
     funnel,
     llm,
     scoring,
+    sections,
     seed,
     sources,
     shortlist,
@@ -37,6 +40,32 @@ def test_config_defaults():
     c = config.load_config(None)
     assert c.max_age_days == 60 and c.min_score == 22
     assert c.llm.enabled is False
+
+
+def test_to_date_converts_an_instant_to_eastern_and_leaves_a_calendar_day_alone():
+    """The epoch branch converted to ET; the string branch three lines later did
+    `str(val)[:10]`, keeping the VENDOR's calendar day. Measured against live vendor
+    APIs on 3,732 corpus rows: ashby 16.3% of dates wrong, hn 10.5%, greenhouse 0.00%,
+    lever 0.00%. Always one day too NEW, so the role dodged the staleness penalty too.
+
+    The guard is the point: a date-only or zone-less string is NOT an instant and must
+    not shift, or this fix moves the 68% of the corpus that is correct today."""
+    # an instant: 02:00 UTC is the previous day in Eastern
+    assert util.to_date("2026-05-23T02:00:50.464+00:00") == "2026-05-22"
+    assert util.to_date("2026-08-21T02:17:57Z") == "2026-08-20"
+    # NOT instants -- no offset, so no timezone to convert from
+    assert util.to_date("2026-05-22") == "2026-05-22"
+    assert util.to_date("2026-05-22T14:00:00") == "2026-05-22"
+    # already Eastern: same day in, same day out
+    assert util.to_date("2026-05-22T14:00:00-04:00") == "2026-05-22"
+    # `.astimezone()` raises OverflowError, NOT ValueError, at the edge of the
+    # datetime range -- and "0001-01-01T00:00:00Z" is in catalog/_raw/4dayweek.json.
+    # An uncaught raise here takes out a whole harvest.
+    assert util.to_date("0001-01-01T00:00:00Z") == "0001-01-01"
+    # unchanged behaviour
+    assert util.to_date(1785719389) == "2026-08-02"
+    assert util.to_date("not a date") == ""
+    assert util.to_date("") == ""
 
 
 def test_default_config_enables_every_registered_adapter():
@@ -303,6 +332,46 @@ def test_the_record_carries_areas_regions_and_the_raw_string():
     assert (q["city"], q["state"], q["country"]) == ("Atlanta", "GA", "US")
 
 
+def test_an_adapter_that_supplied_the_raw_owns_the_parse():
+    """`remote_scope_raw is None` is the adapter saying "I recorded no boundary evidence",
+    and it is the only state in which the location string is ours to read.
+
+    Before this, `None` meant both "unstated" and "derive me", so an adapter had no way to
+    say "there is no boundary here, do not invent one". google_jobs could not stop
+    `Anywhere` -- which under `&ltype=1` is Google's SEARCH MODE, not the posting's words --
+    from becoming a stated-worldwide claim on 43 of 43 work-from-home rows. 11 of those 43
+    state a US-only bound in their own title, body or URL, and through
+    `scoring._region_allowed` an empty list is the one unconditional bypass in the scoring
+    layer, so each satisfied a filter that excludes it.
+
+    Measured at 781e504: 43 rows lose the `[]`, 348 adapter-supplied boundaries are kept,
+    and ZERO rows lose a boundary the location legitimately stated."""
+    from job_radar import engine
+
+    # google_jobs now records Google's own word and keeps the boundary unstated.
+    g = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/3",
+             "source": "google_jobs", "location": "Anywhere",
+             "remote_scope_raw": "Anywhere",
+             "remote_type": "remote", "remote_basis": "stated"}
+        )
+    )  # fmt: skip
+    assert g["remote_areas"] is None, "a search-mode token is not a stated boundary"
+    assert g["remote_scope_raw"] == "Anywhere", "Google's word survives as evidence"
+    assert g["remote_type"] == "remote", "the vendor's work_from_home flag is untouched"
+
+    # The SAME string, from a source that recorded no raw, still parses as before -- the
+    # rule keys on who spoke, not on the value.
+    d = engine.derive_remote(
+        engine._coerce(
+            {"title": "AI Engineer", "company": "A", "url": "https://x/4",
+             "source": "greenhouse", "location": "Anywhere"}
+        )
+    )  # fmt: skip
+    assert d["remote_areas"] == []
+
+
 def test_a_us_town_named_after_a_country_is_not_dropped():
     """Turkey TX, Peru IN, Greece NY, China ME, Italy TX and Egypt TX are real US places,
     and the non-US filter matches country NAMES against raw text. The pipeline already did
@@ -439,15 +508,133 @@ def test_the_body_literal_gates_change_no_verdict():
         assert scoring.remote_signal("Engineer", "Austin, TX", body)[0] == want, body
 
 
+def test_a_full_week_in_the_office_is_onsite_not_hybrid():
+    """`_HYBRID_RE`'s day-count alternatives never looked at the number, so "in office 5
+    days a week" -- a plain statement of an ONSITE schedule -- was read as evidence of a
+    split one. 38 rows in a 7,545-row harvest, 34 hybrid and 3 remote.
+
+    CONCENTRATION, because it changes what the number means: 35 of the 38 are Postman, 2
+    Anthropic, 1 OpenAI. Narrow and real, not a broad win.
+
+    BLIND SPOT, stated so a reader finds it: the numeral branch cannot see a spelled-out
+    count above five. 31 corpus bodies write "four days a week in the office" and every one
+    is genuinely hybrid today, so the gap costs nothing measurable -- but this test cannot
+    detect a posting that writes "seven days", and neither can the pattern."""
+    from job_radar import scoring
+
+    # Verbatim from the corpus, with row counts at 781e504.
+    postman = "At Postman we value in person collaboration. We are in office 5 days a week for all roles based out of our offices."  # 35 rows
+    assert scoring.remote_signal("Engineer", "San Francisco", postman) == (
+        "onsite",
+        "text",
+    )
+    # ONSITE must be tested BEFORE hybrid: this same string also matches `_HYBRID_RE` via
+    # "days in the office", so behind hybrid the branch is unreachable.
+    assert scoring._HYBRID_RE.search(postman.lower()) is not None
+
+    for body in (
+        "This role requires working in-office 5 days per week in San Francisco.",  # 1 row
+        "Will be based in San Francisco, CA and be expected in office 5 days per week.",
+    ):
+        assert scoring.remote_signal("Engineer", "San Francisco", body)[0] == "onsite"
+
+    # A genuine split week is untouched.
+    assert (
+        scoring.remote_signal("Engineer", "Austin", "We are in office 3 days a week.")[
+            0
+        ]
+        == "hybrid"
+    )
+
+
+def test_a_qualified_telework_is_hybrid_not_remote():
+    """`_ROLE_REMOTE_RE` carries a bare `\\btelecommut\\w*|\\btelework\\w*`, and nothing
+    claimed the QUALIFIED phrasings before it -- so a percentage or a part-time telework
+    came out `remote`. Every telework/telecommute occurrence in a 7,545-row harvest was
+    read: 35 hits, 26 distinct contexts, and the qualified ones dominate.
+
+    The bare stems are deliberately still there. "Telecommuting is available for this
+    position" IS a role-level assertion and `test_the_body_literal_gates_change_no_verdict`
+    pins it; the defect was the missing hybrid claim, not the stem."""
+    from job_radar import scoring
+
+    # Verbatim corpus shapes, counts at 781e504.
+    for body in (
+        "40 hrs/week 50% Telecommuting Permitted. Multiple Positions Available.",  # 9 rows
+        "Up to 50% telework permitted. Multiple Positions Available.",
+        "Part-time telecommuting is an option. Hybrid work from our office.",  # 2 rows
+        "Telework Type: Part-Time Telework Work Location: Clay, NY",  # 2 rows
+    ):
+        assert scoring.remote_signal("Engineer", "Austin, TX", body) == (
+            "hybrid",
+            "text",
+        ), body
+
+    # ...and one whose own words say office is ONSITE, not merely "not remote". 4 rows.
+    assert scoring.remote_signal(
+        "Engineer",
+        "Ogden, UT",
+        "Telework Type: Full-Time Office/Project Work Location:",
+    ) == ("onsite", "text")
+
+    # The unqualified assertion still reads as remote -- the stem was never the bug.
+    assert (
+        scoring.remote_signal(
+            "Engineer", "Austin, TX", "Full-time telecommuting is an option."
+        )[0]
+        == "remote"
+    )
+
+
+def test_a_location_that_IS_an_arrangement_word_is_read_as_one():
+    """`vocab.remote_type` is the exact whole-string normalizer every adapter already uses
+    for a vendor's `workplaceType`, and `remote_signal` never asked it about the LOCATION --
+    only the loose `_REMOTE_RE`. Cloudflare writes its location as the literal `In-Office`
+    and `Distributed`; both went unclassified. +22 onsite, +19 remote, 0 flips at 781e504.
+
+    ALL 41 ROWS ARE ONE EMPLOYER ON ONE SOURCE. A real per-row fix on a shape only some
+    vendors write, not a general capability.
+
+    Exact-match is the safety property. Adding `distributed` to `_REMOTE_RE` -- which is
+    applied to the TITLE -- would stamp remote on 22 currently-unclassified
+    distributed-systems titles to fix 19 location rows."""
+    from job_radar import scoring
+
+    assert scoring.remote_signal("Engineer", "In-Office", "") == ("onsite", "location")
+    assert scoring.remote_signal("Engineer", "Distributed", "") == (
+        "remote",
+        "location",
+    )
+
+    # The negatives that make it safe -- a substring match would take all four.
+    for title, loc in (
+        ("Senior Distributed Systems Engineer", "Austin, TX"),
+        ("Software Engineer - Distributed Systems", "Austin, TX"),
+    ):
+        assert scoring.remote_signal(title, loc, "") == (None, None), title
+
+    # LAST, not first: a location of exactly "Remote" whose body states a split week stays
+    # hybrid, which is the documented "City (Remote)" demotion. 2 rows.
+    assert scoring.remote_signal(
+        "Engineer", "Remote", "Our hybrid schedule is three days in the office."
+    ) == ("hybrid", "text")
+
+
 def test_remote_signal_records_how_it_decided():
     """`is_remote` called remote_posting, took a bare bool and wrote NOTHING -- so a row
     admitted because its TITLE said remote was byte-identical in the record to a row
     nobody classified. 462 title-decided rows and 1,642 body-decided ones in a 31,790-row
     harvest, which is why a downstream consumer invented a basis outside REMOTE_BASES."""
-    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == ("remote", "title")
+    assert scoring.remote_signal("Senior AI Engineer - Remote", "Austin, TX", "") == (
+        "remote",
+        "title",
+    )
     # the BOUNDARY is no longer remote_signal's job -- it moved to engine.derive_remote,
     # because a source can state a boundary without saying anything about remoteness.
-    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == ("remote", "location")
+    assert scoring.remote_signal("AI Engineer", "Remote - Brazil", "") == (
+        "remote",
+        "location",
+    )
     assert scoring.remote_signal(
         "AI Engineer", "Austin, TX", "This is a remote role."
     ) == ("remote", "text")
@@ -529,7 +716,7 @@ def test_coerce_records_the_remote_decision_without_overwriting_a_source():
     # it scans the body and 69% of postings are discarded a moment later.
     p = engine.derive_remote(engine._coerce(row))
     assert (p["remote_type"], p["remote_basis"]) == ("remote", "title")
-    assert p["remote"] is True, "the derived bool must reflect a newly-derived type"
+    assert "remote" not in p, "the derived bool was removed at 0.9.0; read remote_type"
     # a source that sent its own structured signal keeps it
     kept = engine.derive_remote(
         engine._coerce(
@@ -621,6 +808,24 @@ def test_ats_from_url():
     assert dedup.ats_from_url("https://example.com/careers") is None
 
 
+def _days_ago(n: int) -> str:
+    """A `posted` date N days before today, on the SAME clock the age gate reads.
+
+    THESE FIXTURES WERE A TIME BOMB. They hard-coded `"posted": "2026-07-10"` and
+    friends, and `engine._consume` / `shortlist.surface` drop a row whose
+    `util.age_int` exceeds `max_age_days` (60) measured against the REAL clock. The
+    suite went red on 2026-09-14 -- 18 failures on a tree whose code had not changed
+    -- and both CI and the release workflow stayed red on `main` from then on.
+    Bumping the literals would only re-arm it for another 60 days.
+
+    Derived from `util.today_et()` because that is what `age_int` compares against:
+    Eastern, not UTC and not naive local, so a fixture built just after midnight UTC
+    cannot land on the far side of the gate. The relative SPACING of the old literals
+    (07-10 / 07-12 / 07-20 = 12 / 10 / 2 days before a mid-July "today") is kept.
+    """
+    return (date.fromisoformat(util.today_et()) - timedelta(days=n)).isoformat()
+
+
 # ── store: the load-bearing upsert ───────────────────────────────────────────
 def _post(company, title, score, url):
     return {
@@ -628,7 +833,7 @@ def _post(company, title, score, url):
         "title": title,
         "score": score,
         "url": url,
-        "posted": "2026-07-10",
+        "posted": _days_ago(12),
         "sources": {"remoteok"},
         "text": "x",
         "signals": "ai",
@@ -663,6 +868,58 @@ def test_applied_is_sticky_when_role_leaves_feed(tmp_path):
     # next run: the role is gone from the market (empty postings)
     merged2 = shortlist.upsert(csvp, [], today="2026-07-12")
     assert any(r["status"] == "applied" for r in merged2)  # history persists
+
+
+def test_a_0_8_store_needs_no_migration_because_the_column_never_moved(tmp_path):
+    """THE UPGRADE PATH EVERY EXISTING USER HITS, and it was untested — the sticky test
+    above writes in the CURRENT format, so nothing read a 0.8.x store.
+
+    An earlier 0.9.0 renamed this column `department` -> `team` and that rename COST a
+    sticky row its org unit: `upsert` carries a stored row forward untouched when the
+    posting is absent, so a renamed column came back blank on any role that had left
+    the market, and a row that is never re-harvested never self-heals. The rename was
+    reverted — `department` is the word five of the seven org-unit adapters read from
+    the vendor (`departments[].name`, `department`, `department.label`), so keeping it
+    makes `shortlist.COLUMNS` byte-identical across the whole release and deletes the
+    migration rather than testing it. This pins both halves: the header does not move,
+    and a sticky row keeps its value.
+    """
+    import csv as _csv
+
+    old_header = [
+        "id", "first_seen", "posted", "age_days", "score", "llm_score", "llm_note",
+        "status", "salary", "company", "title", "department", "employment_type",
+        "location", "source", "url", "signals", "dedup_key",
+    ]
+    csvp = tmp_path / "shortlist.csv"
+    with csvp.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=old_header)
+        w.writeheader()
+        w.writerow(dict(zip(old_header, [
+            "abc123", "2026-05-01", "2026-04-28", "30", "70", "", "", "applied", "",
+            "Acme", "Staff Engineer", "Platform Engineering", "FULL_TIME", "Austin, TX",
+            "greenhouse", "https://x/1", "", "acme|staff engineer|austin tx",
+        ])))
+
+    # a run that does NOT re-harvest it -- a role that left the market, which is
+    # exactly what sticky status exists for
+    shortlist.upsert(csvp, [], today="2026-08-21")
+    rows = list(_csv.DictReader(csvp.open(encoding="utf-8")))
+
+    # PRESERVED: the header migrates and the application history is intact.
+    assert list(rows[0]) == shortlist.COLUMNS
+    assert list(rows[0]) == old_header  # the header did not move AT ALL
+    assert "team" not in rows[0]
+    assert rows[0]["status"] == "applied"
+    assert rows[0]["first_seen"] == "2026-05-01"
+
+    # THE ROW KEEPS ITS ORG UNIT. Under the reverted `department` -> `team` rename
+    # this read `""`: a role that had LEFT THE MARKET lost its org unit permanently,
+    # because `upsert` carries a stored row forward untouched when the posting is
+    # absent, so a sticky row never passes through `_build_row` and never self-heals.
+    # A back-fill in `load_all` was the only place that could have fixed it. Keeping
+    # the vendors' own word for the column removes the problem instead of patching it.
+    assert rows[0]["department"] == "Platform Engineering"
 
 
 def test_surface_excludes_applied_and_low_score(tmp_path):
@@ -715,7 +972,7 @@ def test_a_scan_persists_its_harvest_with_the_llm_enabled(tmp_path, monkeypatch)
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-10",
+                "posted": _days_ago(12),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "remotive",
             }
@@ -798,7 +1055,6 @@ def test_no_column_can_carry_a_live_formula(tmp_path):
             "department": hostile,
             "employment_type": hostile,
             "salary": hostile,
-            "industry": hostile,
             "posted": util.to_date(hostile),
         }
     )
@@ -951,10 +1207,625 @@ def test_salary_from_text_accepts_pay_rejects_funding():
     assert util.salary_from_text("a $20-40 discount") == ""  # bare range, ambiguous
 
 
+# REAL BODIES, TRIMMED, from the 2026-08-24 harvest -- each one a posting where a
+# salary-shaped figure that is NOT pay stands in front of the pay range. Hand-written
+# fixtures could not have produced this set: three of the four were found only by
+# diffing a candidate change across 102,553 corpus rows, and the shapes (an ARR band,
+# a deal size, a company-growth line) are not what anyone writes from imagination.
+_DECOY_ALGOLIA = (
+    "In 2021, we raised $150 million in Series D funding, quadrupling our valuation "
+    "to $2.25 billion.\n"
+    "Experience at our current stage and beyond ($150-300M+ ARR range, high growth)\n"
+    "On-Target Earnings Pay Range\n$181,500—$234,900 USD\n"
+)
+_DECOY_MUCKRACK = (
+    "Experience in multiple phases of company growth (startup, $10-$50M, $50M to "
+    "100M, 100M+)\n"
+    "The base salary for this role in the United States is between "
+    "$120,000 - $145,000 USD\n"
+)
+_FIRST_MATCH_WINS_OTTER = (
+    "Own the technical sale in strategic Enterprise accounts ($200K–$1M+ ACV), "
+    "partnering with Enterprise AEs.\n"
+    "Salary range\nOTE Range: $189,000 to $248,000 USD per year\n"
+)
+_FIRST_MATCH_WINS_HOUSEBUYERS = (
+    "Our Company went from $0 to $50 million in annual revenue in its first 3 years.\n"
+    "Compensation Range: $140,000-$220,000 per year (inclusive of base salary and "
+    "bonus/commission)"
+)
+# TWO PASSING MATCHES, which the two bodies above do NOT have -- and that difference is
+# the whole reason these exist. In Otter/HouseBuyers the decoy is not a match at all
+# under the shipped `_SAL_RE` (`$1`, `$0` are single digits), so only one match passes
+# and first-vs-last is indistinguishable on them. A mutant returning the LAST passing
+# match instead of the first survived the full suite until these were added. Both are
+# real: 3,179 corpus rows carry a display AND more than one passing match, most of them
+# an employer stating the same band twice in different notation.
+_TWO_PASSING_CODEPATH = (
+    "Compensation: $110,000 to $150,000 per year\n"
+    "We offer plans, legal services, home/auto insurance discounts.\n"
+    "Pay range\n$110,000—$150,000 USD"
+)
+_TWO_PASSING_NEBIUS = (
+    "We offer competitive salaries, ranging from $109,500-$136,800 (United States).\n"
+    "Pay Transparency\nBase Compensation Range\n$109,000—$136,000 USD"
+)
+
+
+# THE TWO ROWS WHERE `_SAL_MAGNITUDE` IS THE ONLY GUARD THAT CAN REJECT. Both decoys
+# carry an anchor (`k`, and a comma), so `has_anchor` is True and the `_SAL_UNIT` check
+# never runs -- the magnitude veto is load-bearing alone. Found by mutation: making
+# `_SAL_MAGNITUDE` inert left the whole suite green while changing these two corpus rows
+# (Anduril to `$100k to $10`, Van Leeuwen to `$105,000 - 140,000`). Note the second is
+# the EMPLOYER's typo -- "140,000m annual compensation" -- which is why a fixture nobody
+# copied from real output would not contain it.
+_MAGNITUDE_ONLY_ANDURIL = (
+    "These projects range in cost from $100k to $10M. They are day 2 work.\n"
+    "US Salary Range\n$166,000—$220,000 USD"
+)
+_MAGNITUDE_ONLY_VANLEEUWEN = (
+    "Compensation + Benefits\n$105,000 - 140,000m annual compensation depending on "
+    "experience\n"
+    "Salary Range\n$105,000—$145,000 USD"
+)
+
+
+# THE ANCHOR/UNIT GUARD'S `continue`, WHICH CARRIES 7 OF THE 16 GAINS and which
+# `test_..._returns_empty_when_every_match_fails_a_guard` LOOKS like it covers and
+# structurally cannot: that test asserts "", and a mutant that gives up on this guard
+# also returns "" on its inputs. Killing it needs a first match that fails the unit
+# check and a later one that passes. Anduril is the real shape -- `$22 - $28` is
+# followed by `.84/hour`, so `_SAL_UNIT` does not match at the boundary and there is no
+# comma or k to anchor it, while `$25 - $33` is followed by `/hour` and passes.
+_UNIT_ONLY_ANDURIL = (
+    "US Hourly Range\n"
+    "Materials Associate: $22 - $28.84/hour\n"
+    "Senior Materials Associate: $25 - $33/hour\n"
+)
+
+
+def test_salary_from_text_skips_a_decoy_and_reaches_the_real_range():
+    """THE BUG THIS FIXES. `_SAL_RE.search` returned the first match and both guards
+    said `return ""`, so ONE salary-shaped decoy consumed the only attempt and the pay
+    range later in the same posting was unreachable. Algolia's `$150-300M+ ARR` is
+    vetoed by `_SAL_MAGNITUDE`; its real range sits after it. 16 rows of a 102,553-row
+    harvest gain a `salary_min` from this, across 11 distinct employers."""
+    assert util.salary_from_text(_DECOY_ALGOLIA) == "$181,500—$234,900"
+    assert util.salary_from_text(_DECOY_MUCKRACK) == "$120,000 - $145,000"
+    # These two skip on the MAGNITUDE veto specifically -- see the fixture note above.
+    assert util.salary_from_text(_MAGNITUDE_ONLY_ANDURIL) == "$166,000—$220,000"
+    assert util.salary_from_text(_MAGNITUDE_ONLY_VANLEEUWEN) == "$105,000—$145,000"
+    # And this one skips on the ANCHOR/UNIT guard, the other `continue`. Both forms
+    # below fail without it: the real body, and the minimal case it reduces to.
+    assert util.salary_from_text(_UNIT_ONLY_ANDURIL) == "$25 - $33"
+    assert (
+        util.salary_from_text("a $20-40 discount. Base salary: $120,000 - $145,000 per year")
+        == "$120,000 - $145,000"
+    )
+
+
+def test_salary_from_text_is_fill_only_over_a_body_with_an_earlier_money_range():
+    r"""THE CONTRACT PROPERTY, AND NOTHING PINNED IT UNTIL NOW -- which is the actual
+    finding. A candidate fix that widened `_SAL_RE` from `\d{2,3}` to `\d{1,3}` changed
+    **126 records that already carried a display string**, most of them to "", and the
+    full suite stayed GREEN at 689 passed while it did so. A green suite was not
+    evidence for this property and had not been for the whole release.
+
+    Both bodies below produce a display string TODAY. Under the widening, `$200K–$1`
+    and `$0 to $50` become matches, land first, and `_SAL_MAGNITUDE` vetoes the tail --
+    so each row LOSES a correct salary. This asserts the byte-identical string, which
+    is the only form that catches a substitution as well as a loss."""
+    assert util.salary_from_text(_FIRST_MATCH_WINS_OTTER) == "$189,000 to $248,000"
+    assert (
+        util.salary_from_text(_FIRST_MATCH_WINS_HOUSEBUYERS) == "$140,000-$220,000"
+    )
+
+
+def test_salary_from_text_returns_the_FIRST_passing_match_not_a_later_one():
+    """FILL-ONLY DEPENDS ON "STRICTLY FIRST-PASSING" AND NOTHING ELSE PINS IT. The
+    proof that this change cannot alter a row that already has a display string is:
+    `finditer`'s first element is the match `search` returned, and the guards are
+    unchanged, so the loop's first iteration reproduces the old answer exactly. Any
+    ranking rule -- prefer the last match, the largest, the one nearest a
+    compensation cue -- breaks that on contact, because a row whose first match passes
+    could then return a different one.
+
+    Found by mutation, not by design: a `return the LAST passing match` mutant scored
+    692 passed against the rest of this file. Both employers below state their band
+    twice in different notation, so the two candidates are near-identical and a
+    ranking rule would look harmless on them -- which is exactly why they are the
+    fixture."""
+    assert util.salary_from_text(_TWO_PASSING_CODEPATH) == "$110,000 to $150,000"
+    assert util.salary_from_text(_TWO_PASSING_NEBIUS) == "$109,500-$136,800"
+
+
+def test_salary_from_text_returns_empty_when_every_match_fails_a_guard():
+    """The loop must still give up. Scanning to the end and finding nothing acceptable
+    is not the same code path as finding nothing at all, and only one of the two
+    existed before: with `search`, a rejected first match returned "" immediately, so
+    the exhausted-loop exit is new and untested by everything above it."""
+    assert util.salary_from_text("We raised $20-40 million, then $10-$50M more") == ""
+    assert util.salary_from_text("a $20-40 discount and a $30-60 rebate") == ""
+    assert util.salary_from_text("no money here at all") == ""
+
+
 def test_has_is_whole_word():
     # callers pass already-lowercased text (see scoring.score); has() is case-exact
     assert util.has("ai", "senior ai engineer")
     assert not util.has("ai", "available training")  # not a substring hit
+
+
+# clean() had NO test at all, which is how it shipped inverted for every release. The
+# fixture below is real Greenhouse `content`, trimmed: HTML-escaped HTML, whose own
+# text carries a second layer of escaping.
+_GREENHOUSE_BODY = (
+    "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;strong&gt;About Us"
+    "&lt;/strong&gt;&lt;/p&gt;&lt;/div&gt;\n"
+    "&lt;ul&gt;\n"
+    "&lt;li&gt;Experience presenting to the C-Suite&lt;/li&gt;\n"
+    "&lt;li&gt;Willing to travel as needed (&amp;lt;25%) to hit the goals&lt;/li&gt;\n"
+    "&lt;li&gt;Bachelor&#39;s degree required&lt;/li&gt;\n"
+    "&lt;/ul&gt;\n"
+    "&lt;p&gt;Pay Range: $120,000 &amp;ndash; $150,000&amp;nbsp;&lt;/p&gt;"
+)
+
+
+def test_clean_decodes_entities_before_it_strips_tags():
+    """The bug, stated as a test: this ran the strip FIRST, found no `<...>` in an
+    escaped body, and then let unescape turn `&lt;div&gt;` into `<div>` -- so the
+    function that removes markup was the one creating it. Greenhouse escapes 100% of
+    its bodies, which is ~65% of a harvest."""
+    out = util.clean(_GREENHOUSE_BODY)
+    assert "<div" not in out and "<li" not in out and "<p>" not in out
+    assert "About Us" in out and "Bachelor's degree required" in out
+
+
+def test_clean_recovers_a_salary_that_tags_used_to_hide():
+    """Not cosmetic. `salary_from_text` matched 0 of 809 live Greenhouse postings and
+    424 of 809 after this fix, because the pay figures sat between tags."""
+    assert util.salary_from_text(util.clean(_GREENHOUSE_BODY)).startswith("$120,000")
+
+
+def test_clean_keeps_bullets_on_their_own_lines():
+    """A block closer becomes a newline, not a space. The median Greenhouse posting is
+    16 `<li>` items and nothing else separates them, so collapsing to spaces runs every
+    requirement into one line."""
+    lines = util.clean(_GREENHOUSE_BODY).splitlines()
+    assert "Experience presenting to the C-Suite" in lines
+    assert "Bachelor's degree required" in lines
+    assert not any(ln != ln.strip() for ln in lines)  # no leading space from `<li>`
+    # _GREENHOUSE_BODY alone does NOT pin _BLOCK_END: it has literal newlines between its
+    # items, faithful to 2,554 of 2,697 real bodies, so the final whitespace collapse
+    # recovers the breaks on its own and the test passed with _BLOCK_END disabled. This
+    # run-together fragment is the 3-in-2,697 shape that only _BLOCK_END can separate.
+    assert util.clean("&lt;li&gt;First&lt;/li&gt;&lt;li&gt;Second&lt;/li&gt;") == (
+        "First\nSecond"
+    )
+    # `<br>` is the same case and was missing from the pattern entirely -- 7,610 of them
+    # across 1,495 of 2,697 bodies.
+    assert (
+        util.clean("Remote-first&lt;br /&gt;Flexible hours")
+        == "Remote-first\nFlexible hours"
+    )
+
+
+def test_clean_does_not_eat_prose_between_angle_brackets():
+    """The regression that made the tag pattern strict. `<[^>]+>` is the obvious
+    pattern and it deletes the clause in `(<25%) ... hit the goals` on real postings --
+    once entities are decoded there is a literal `<` with prose after it. Measured on 12
+    of 2,697 live bodies."""
+    out = util.clean(_GREENHOUSE_BODY)
+    assert "(<25%) to hit the goals" in out
+    # ORDER MATTERS in this assertion and the first version of it got the order wrong:
+    # with `&gt;50` first there is no `<`...`>` span at all, so the loose pattern passed
+    # it and the test proved nothing. `<` first is the shape that discriminates -- the
+    # loose pattern returns "Budgets 50".
+    assert util.clean("Budgets &lt;2% of revenue while managing teams of &gt;50") == (
+        "Budgets <2% of revenue while managing teams of >50"
+    )
+
+
+def test_an_inline_tag_leaves_no_space_where_it_stood():
+    """`_TAG.sub(" ", ...)` replaced every tag with a space, which is right for a block
+    tag and wrong for a bold or a link. Measured across 2,712 live bodies from 9 boards:
+    4,580 spaces sitting before a punctuation mark, on 67.7% of rows with a body -- and
+    a tag boundary landing mid-word split "the" into "t he". Both strings below are
+    verbatim from live postings (himalayas, clickhouse).
+    """
+    assert util.clean("At <a href='#'>Smartsheet</a>, your ideas are heard") == (
+        "At Smartsheet, your ideas are heard"
+    )
+    assert util.clean("the United States<span>, t</span>he typical salary") == (
+        "the United States, the typical salary"
+    )
+
+
+def test_an_inline_tag_between_two_words_still_separates_them():
+    """THE GUARD, and the reason the rule is not simply "delete inline tags". A word
+    split by a tag always CONTINUES in lower case; two distinct words do not. So an
+    uppercase letter after the run means these were two words and the space stays --
+    without it `<strong>Requirements</strong>Must have` collapses to the single token
+    "RequirementsMust".
+
+    A module-level `re.I` on the pattern case-folds the `(?![A-Z])` lookahead too, which
+    turns this guard into a no-op while leaving every test green; that is why the flag is
+    scoped to the tag half. This test is what notices.
+    """
+    assert util.clean("<strong>Requirements</strong>Must have 5 years") == (
+        "Requirements Must have 5 years"
+    )
+    # And the same shape through the section reader, where it decides a boundary.
+    text, _secs = util.clean_with_sections(
+        "<p><strong>Deploy</strong><strong>X</strong>Deploy</p>"
+    )
+    assert text == "Deploy X Deploy"
+
+
+def test_clean_leaves_a_plain_text_body_alone():
+    """Eleven of nineteen sources send plain text. The fix must be a no-op for them."""
+    assert util.clean("  Senior  Engineer\n\n  Remote (US)  ") == (
+        "Senior Engineer\nRemote (US)"
+    )
+    assert util.clean("") == "" and util.clean(None) == ""
+    # A non-breaking space is whitespace to a reader and not to `[ \t]+`. 0.8.2 collapsed
+    # it; the first version of this fix did not, leaving a literal U+00A0 on 67% of live
+    # bodies -- enough to break the multi-token keyword "prompt engineering" on a posting
+    # that used one between the words.
+    assert util.clean("prompt&amp;nbsp;engineering") == "prompt engineering"
+
+
+# ── sections: the structure clean() would otherwise destroy (0.9.0) ───────────
+def test_sections_are_read_before_the_tags_are_stripped():
+    """THE ORDERING INVARIANT, as an executable assertion. The same body yields
+    structure from the raw vendor string and NOTHING once it has been cleaned, because
+    a header is only a header while it is still wrapped in a tag."""
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    assert secs, "no sections from the raw body"
+    assert util.clean_with_sections(text)[1] == [], (
+        "cleaned text still yielded sections -- the invariant is not what it claims"
+    )
+
+
+def test_sections_offsets_index_the_records_own_text():
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    for s in secs:
+        assert 0 <= s["start"] <= s["end"] <= len(text)
+    # Non-overlapping and in document order: the lookup walks forward, so a heading
+    # whose words recur later in the posting cannot capture the wrong span.
+    bounds = [(s["start"], s["end"]) for s in secs]
+    assert bounds == sorted(bounds)
+    assert all(a[1] <= b[0] for a, b in zip(bounds, bounds[1:]))
+
+
+def test_two_sections_with_identical_text_get_different_spans():
+    """The forward `pos` cursor, pinned. Dropping it -- `text.find(seg)` instead of
+    `text.find(seg, pos)` -- passes every other test in this file, because no fixture
+    happens to repeat a section's text. Measured against the shipped code, dropping it
+    moves 190 spans across 105 of 2,697 live bodies -- silently, and all in the same
+    direction: a later occurrence collapses onto an earlier one."""
+    text, secs = util.clean_with_sections(
+        "&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;"
+        "&lt;p&gt;Five years of Python.&lt;/p&gt;"
+        "&lt;p&gt;&lt;strong&gt;Nice to have&lt;/strong&gt;&lt;/p&gt;"
+        "&lt;p&gt;Five years of Python.&lt;/p&gt;"
+    )
+    assert len(secs) == 2
+    assert secs[0]["start"] != secs[1]["start"], (
+        "the second span collapsed onto the first"
+    )
+    assert secs[0]["end"] <= secs[1]["start"]
+    assert text[secs[1]["start"] : secs[1]["end"]] == "Five years of Python."
+
+
+def test_an_unclosed_bold_tag_cannot_make_the_header_scan_quadratic():
+    """`(.*?)` under re.S sends every unclosed `<strong>` scanning to end-of-string,
+    and the next opener repeats it -- 16,000 of them in a 158 KB body took 7.6 seconds
+    before the bound went on. Real postings carry at most ONE unclosed tag, so this is
+    insurance, not a live fix; the test exists so the bound cannot be quietly removed.
+    """
+    body = ("<strong>x" * 4000) + ("filler " * 500)
+    start = time.perf_counter()
+    sections.split(body)
+    assert time.perf_counter() - start < 2.0, "the header scan went quadratic again"
+
+
+def test_the_header_bound_is_wide_enough_for_a_real_header():
+    """The companion to the test above, and the one that matters more. That test proves
+    a bound EXISTS; this proves it is wide enough. An over-tight bound fails silently --
+    the header is simply never found, the section boundary disappears, and the body
+    still parses. At `{0,60}` the suite stays green while 2,947 section boundaries
+    vanish across 1,645 of 2,697 real bodies.
+
+    The longest real header seen carries 739 characters of inner markup (p50 is 27), so
+    a 740-character header must still extract. `{0,400}` is the tightest bound that
+    fails this.
+    """
+    header = "Responsibilities " + ("and more duties " * 46)  # 753 chars
+    assert len(header) > 739
+    parts = sections.split(f"<p><strong>{header}</strong></p><p>Ship things.</p>")
+    assert parts, "a real-length header was not extracted -- the bound is too tight"
+    assert parts[0][1].strip() == header.strip()
+    assert "Ship things." in parts[0][2]
+
+
+def test_a_span_never_points_into_its_own_header():
+    """The failure the design's docstring rules out, pinned. `pos` advanced only over
+    section BODIES, so every header stayed inside the next search window -- and a
+    section whose opening words also appear in the header above it matched THERE.
+    Measured on 6,697 real bodies: 14 of 63,209 sections carried a span pointing into
+    their own header, and `text[start:end]` returned the right STRING in every one, so
+    nothing downstream could detect it. Only the position was wrong.
+
+    A zero-length section is the same bug in its clearest form: it used to anchor
+    BEFORE its own header rather than after it, on all 4,516 of them.
+    """
+    text, secs = util.clean_with_sections(
+        "&lt;strong&gt;Deploy&lt;/strong&gt;&lt;strong&gt;X&lt;/strong&gt;Deploy"
+    )
+    assert text == "Deploy X Deploy"
+    # The body under "X" is the SECOND "Deploy" at index 9, not the header at index 0.
+    assert text[secs[1]["start"] : secs[1]["end"]] == "Deploy"
+    assert secs[1]["start"] == 9
+    # And the empty section under the first header sits after that header, not at 0.
+    assert secs[0]["start"] == secs[0]["end"] == 6
+
+
+def test_the_pre_header_intro_carries_a_null_header_not_an_empty_string():
+    """`""` is not a contract value. The intro entry is the one section with no header
+    of its own, so it is the only place this can regress."""
+    _text, secs = util.clean_with_sections(
+        "&lt;p&gt;We are hiring.&lt;/p&gt;"
+        "&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;&lt;p&gt;Python.&lt;/p&gt;"
+    )
+    assert secs[0]["header"] is None and secs[0]["type"] is None
+    assert all(s["header"] is None or s["header"] for s in secs)
+
+
+def test_a_section_that_cannot_be_located_gets_no_offsets_rather_than_wrong_ones(
+    monkeypatch,
+):
+    """The load-bearing test, and the only one that pins the design's single self-check.
+
+    Asserting `text[start:end] == section_text` proves nothing -- it is true by
+    construction, because the offsets are produced BY searching for that text. What can
+    actually go wrong is the splitter and `clean` disagreeing about the same bytes, and
+    the contract is that such a section arrives with its `type` and `header` and NO
+    LOCATION. Never with a plausible-looking guess.
+
+    THE REFUSAL IS SPELLED `None` NOW, NOT AN ABSENT KEY -- the design is unchanged, the
+    shape is not. Omitting the keys gave the nested object two schemas while the 48-field
+    top-level keyset stayed perfectly uniform, so `s["start"]` raised KeyError on 3,116
+    of 103,489 rows (3.01%), 4,692 of 993,070 spans, 694 companies. This test asserted
+    the omission, so it PASSED while the defect shipped -- the assertion below is the
+    corrected one, and the sibling test above pins that a consumer can index every span.
+    """
+    monkeypatch.setattr(
+        util.sections,
+        "split",
+        lambda body: [("requirements", "Experience", "text that is not in the body")],
+    )
+    text, secs = util.clean_with_sections(_GREENHOUSE_BODY)
+    assert len(secs) == 1
+    assert secs[0]["type"] == "requirements" and secs[0]["header"] == "Experience"
+    assert secs[0]["start"] is None and secs[0]["end"] is None
+    assert text == util.clean(_GREENHOUSE_BODY)  # the body itself is unaffected
+
+
+def test_a_body_with_no_headers_yields_no_sections_not_a_copy_of_itself():
+    """Eighteen of nineteen sources send plain text. The module this was ported from
+    returned the WHOLE BODY as one unclassified section, which would have put a second
+    complete copy of every description into every one of their records."""
+    assert util.clean_with_sections("Plain prose. No markup at all.") == (
+        "Plain prose. No markup at all.",
+        [],
+    )
+    assert util.clean_with_sections(None) == ("", [])  # HN can send a null body
+    assert util.clean_with_sections("") == ("", [])
+
+
+def test_a_header_with_nothing_under_it_is_an_empty_span_not_a_failure():
+    """4,516 of 31,258 entries on the nine-board corpus are one bold line immediately
+    followed by the next. That is an empty section, and giving it ABSENT offsets would
+    make it indistinguishable from the genuine disagreement above."""
+    _text, secs = util.clean_with_sections(
+        "&lt;strong&gt;Requirements&lt;/strong&gt;&lt;strong&gt;Benefits&lt;/strong&gt;"
+        "&lt;p&gt;Health cover.&lt;/p&gt;"
+    )
+    empty = [s for s in secs if s["start"] == s["end"]]
+    assert empty, "expected at least one zero-length section"
+    assert all("start" in s for s in secs)
+
+
+# ── which <strong> is a HEADING (0.9.0). Markup below is verbatim from live boards ──
+def test_mid_sentence_emphasis_is_not_a_section_heading():
+    """0.9.0 promoted every `<strong>` it found, so emphasis inside a sentence became a
+    header and the REST OF THAT SENTENCE became its section: 5,753 sections across
+    2,056 rows `[local 94-board harvest, 0.9.0]`, spans opening on the word "to".
+
+    Body is verbatim clickhouse. The measurement that matters is not that the header is
+    gone -- it is that the sentence is still one span.
+    """
+    body = (
+        "<p>We are seeking an experienced <strong>Solutions Architect</strong> to help "
+        "expand our presence in Germany.</p>"
+    )
+    text, secs = util.clean_with_sections(body)
+    # No heading in the body at all, so `[]` -- the documented "this posting has no
+    # headers" value, not an intro entry.
+    assert secs == [], "mid-sentence emphasis was promoted to a heading"
+    assert "Solutions Architect to help expand" in text
+
+
+def test_a_label_value_paragraph_is_a_heading_even_though_prose_follows_it():
+    """THE CLAUSE THAT MUST NOT BE TIGHTENED, and the reason the rule tests only what
+    comes BEFORE the emphasis.
+
+    Requiring the bold to be the whole line scores better on every span-quality metric
+    -- and deletes this shape, which is 487 of 487 postings at one employer and took
+    `eeo_legal` coverage from 100% to 0% on three boards when measured. A metric built
+    from "does this span end mid-sentence" cannot see that cost, because a deleted
+    section has no span to judge. Verbatim anthropic.
+    """
+    body = (
+        "<p><strong>Visa Sponsorship: </strong>We are not currently able to sponsor "
+        "visas for fellows.</p>"
+    )
+    _text, secs = util.clean_with_sections(body)
+    assert [s["header"] for s in secs] == ["Visa Sponsorship:"]
+    assert secs[0]["type"] == "eeo_legal"
+
+
+def test_inside_a_list_item_a_heading_must_terminate_its_label():
+    """A bullet's bold lead-in is a TERM, not a heading -- unless it terminates its
+    label with a colon. The discriminator is morphology, not the container: excluding
+    list items outright instead destroys 130 typed headers, 34 of them at a non-tech
+    employer, because `<li><strong>Experience:</strong> 7+ years` is the same construct
+    as the paragraph above with a different wrapper.
+
+    All three bullets are verbatim (clickhouse, anthropic). The colon counts whether the
+    employer put it inside the tag or outside it -- reading only the first spelling made
+    the rule disagree with itself on 149 sections of one shape.
+    """
+    body = (
+        "<ul>"
+        "<li><strong>Experience:</strong> 7+ years in SRE.</li>"
+        "<li><strong>Strategic Technical Partnership</strong>: Be a thought partner.</li>"
+        "<li><strong>Close the delivery loop.</strong> Track forecast-versus-delivered.</li>"
+        "</ul>"
+    )
+    _text, secs = util.clean_with_sections(body)
+    assert [s["header"] for s in secs] == [
+        "Experience:",
+        "Strategic Technical Partnership",
+    ], "a colonless bullet lead-in was read as a heading"
+
+
+def test_two_adjacent_bold_runs_are_two_headings():
+    """`<strong>A</strong><strong>B</strong>` with no block tag between them is real
+    markup, not a fixture artifact: 160 occurrences across 52 of 2,752 live bodies and
+    9 of 11 vendors. A block-initial rule that does not know this reads the FIRST bold's
+    text as content disqualifying the second, and drops it.
+
+    The `<h2>` form is verbatim anthropic. This also pins the lookup that finds the
+    boundary: searching `finditer(body, 0, m.start())` truncates the string at `endpos`,
+    so the lookahead cannot see the opener that follows -- and that opener sits at
+    exactly `m.start()`. The rule then silently reverts and this test is the only thing
+    that notices.
+    """
+    _text, secs = util.clean_with_sections(
+        "<h2><strong>Key responsibilities</strong><strong><br></strong></h2>"
+        "<ul><li>Lead the team.</li></ul>"
+    )
+    assert secs[0]["header"] == "Key responsibilities"
+    _text, secs = util.clean_with_sections(
+        "<p><strong>PLEASE NOTE</strong><strong>: Due to federal requirements.</strong></p>"
+    )
+    assert [s["header"] for s in secs] == [
+        "PLEASE NOTE",
+        ": Due to federal requirements.",
+    ]
+
+
+def test_a_bolded_value_after_a_bolded_label_is_not_a_heading():
+    """The cost of treating two adjacent bold runs as two headings, paid down.
+
+    The relaxation is right for `<strong>Key responsibilities</strong><strong><br>
+    </strong>` and wrong the moment an employer bolds a label AND its value: this
+    verbatim affirm compensation table otherwise yields sections headed "2", "$16,000-
+    $24,000" and "$5,000", and databricks' metadata header yields one headed a
+    recruiter's personal name. Two employers, two unrelated block types -- a shape, not
+    one template.
+
+    The discriminator is the colon rule at the second boundary, not a new idea: inside a
+    leaf a bold is a heading only if it terminates its label; at an adjacency, only if
+    the bold BEFORE it did not.
+    """
+    _text, secs = util.clean_with_sections(
+        "<p><strong>Equity grade: </strong><strong>2<br></strong>"
+        "<strong>New hire equity: </strong><strong>$16,000-$24,000<br></strong></p>"
+    )
+    assert [s["header"] for s in secs] == ["Equity grade:", "New hire equity:"], (
+        "a bolded value was promoted to a section heading"
+    )
+
+
+def test_a_heading_with_no_letter_or_digit_is_not_a_heading():
+    """275 sections corpus-wide were headed by ".", ":", "," or ">>" -- an employer
+    bolding a separator. No convention makes that a heading, and a consumer rendering
+    a section list gets a row titled "." """
+    _text, secs = util.clean_with_sections(
+        "<p><strong>.</strong></p><p><strong>Requirements</strong></p><p>Python.</p>"
+    )
+    assert [s["header"] for s in secs] == [None, "Requirements"]
+
+
+def test_about_you_is_a_requirements_header_not_a_company_blurb():
+    """The ordering bug, pinned. `about_company`'s `^about [a-z]` catches "About You",
+    and it did so on 2,085 entries across 82 employers until it moved after
+    `requirements`. The real company header must NOT move with it."""
+    assert sections.classify("About You") == "requirements"
+    assert sections.classify("About you and the role") == "requirements"
+    assert sections.classify("About Anthropic") == "about_company"
+    assert sections.classify("About Us") == "about_company"
+    # THE OTHER HALF, and the larger one. `about_company`'s bare `^about [a-z]` also
+    # claimed "About the Role", which is a RESPONSIBILITIES header -- 5,256 entries
+    # across 326 employers, 2.5x the "About You" case above. Ordering cannot fix it,
+    # because responsibilities runs LAST; only the negative lookahead can. Both guards
+    # are load-bearing and this is the one place that says so.
+    assert sections.classify("About the Role") == "responsibilities"
+    assert sections.classify("About this role") == "responsibilities"
+    assert sections.classify("About the job") == "responsibilities"
+    assert sections.classify("About the opportunity") == "responsibilities"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "You have:",  # 855 entries / 50 employers
+        "You bring to the team:",
+        "What we are looking for",  # 332 / 50
+        "Who we\u2019re looking for",  # 156 / 22 -- CURLY apostrophe, the common form
+        "Bonus if:",  # 179 / 60
+        "We\u2019d love to hear from you if you have:",  # 94 / 5
+    ],
+)
+def test_the_five_measured_pattern_additions_classify(header):
+    """Each was measured as UNCLASSIFIED against a 730-employer corpus rather than
+    guessed at, and verified corpus-wide to steal nothing from `responsibilities`."""
+    assert sections.classify(header) == "requirements"
+
+
+def test_an_employer_header_that_means_nothing_stays_unclassified():
+    """55% of header entries classify to nothing, and that is the honest answer --
+    forcing marketing copy into a bucket asserts something the employer never said."""
+    assert sections.classify("Monthly family dinner night") is None
+    assert sections.classify("Building something special") is None
+    # THE 70-CHARACTER CEILING, and it has to be tested with a string that WOULD
+    # otherwise classify -- the first version of this line used `"x" * 80`, which
+    # matches no pattern at any length, so it passed with the ceiling raised to 700.
+    # One employer's template bolds an entire paragraph; without the ceiling that
+    # paragraph becomes a section header.
+    long_but_matching = (
+        "We are looking for someone with responsibilities spanning the entire "
+        "platform organisation and its partner teams"
+    )
+    assert len(long_but_matching) > 70
+    assert sections.classify(long_but_matching[:60]) is not None  # short: classifies
+    assert sections.classify(long_but_matching) is None  # long: refused by the ceiling
+
+
+def test_clean_is_idempotent():
+    """Verified on all 809 bodies of a live board; pinned here so a future pass that
+    decodes or strips one more time cannot start eating text on re-entry.
+
+    The bound this asserts is TWO layers of escaping, which is what real sources send
+    (`&amp;nbsp;` on 711 of 809 bodies, `&amp;amp;` on all 809). A body escaped three
+    times would still leave one entity behind for a second call to decode -- that case
+    does not occur in the corpus, and chasing it with a fixed-point loop was measured
+    and rejected: unbounded decoding destroys prose on 12 of 2,697 bodies.
+    """
+    once = util.clean(_GREENHOUSE_BODY)
+    assert util.clean(once) == once
 
 
 # ── source parser (the brittle provider-JSON → posting mapping) ───────────────
@@ -965,7 +1836,7 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
                 "title": "AI Engineer",
                 "location": {"name": "Remote - US"},
                 "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
-                "updated_at": "2026-07-10T00:00:00Z",
+                "updated_at": "2026-07-10T00:00:00-04:00",
                 "departments": [{"name": "Engineering"}],
                 "content": "<p>Build &amp; ship LLM systems.</p>",
             }
@@ -978,6 +1849,13 @@ def test_greenhouse_parser_maps_fields(monkeypatch):
     assert j["title"] == "AI Engineer"
     assert j["location"] == "Remote - US"
     assert j["url"].endswith("/acme/jobs/1")
+    # THE FIXTURE CARRIES AN ET OFFSET BECAUSE GREENHOUSE DOES. Measured on 3,064 live
+    # date values across three boards: 100% are -04:00/-05:00, 0 are `Z`. So this test
+    # pins the guarantee that matters for 68% of the corpus -- an ET-offset instant
+    # must NOT shift when `to_date` converts. The conversion path itself is exercised
+    # by test_to_date_converts_an_instant_to_eastern..., which has a real `Z` case; a
+    # `Z` fixture here would freeze a shape this vendor has never sent and would stop
+    # catching the regression that would actually hurt.
     assert j["posted"] == "2026-07-10"
     assert j["department"] == "Engineering"
     assert "&" in j["text"] and "<p>" not in j["text"]  # html unescaped + stripped
@@ -995,7 +1873,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "fake",
             },
@@ -1004,7 +1882,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/2",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "fake2",
             },
@@ -1013,7 +1891,7 @@ def test_harvest_end_to_end(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/3",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Manage the office.",
                 "source": "fake",
             },
@@ -1044,7 +1922,7 @@ def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://adzuna.example/redirect/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": body,
                 "source": "adzuna",
             },
@@ -1053,7 +1931,7 @@ def test_google_jobs_wins_canonical_link_on_equal_score_dedup(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://acme.wd5.myworkdayjobs.com/job/AI-Engineer",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": body,
                 "source": "google_jobs",
             },
@@ -1087,7 +1965,7 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
         "company": "Acme",
         "location": "Remote",
         "url": "https://boards.greenhouse.io/acme/jobs/1",
-        "posted": "2026-07-12",
+        "posted": _days_ago(10),
         "text": full,
         "source": "greenhouse",
     }
@@ -1096,7 +1974,7 @@ def test_employer_copy_wins_over_a_shorter_aggregator_copy(monkeypatch, employer
         "company": "Acme",
         "location": "Remote",
         "url": "https://remoteok.com/redirect/9999",
-        "posted": "2026-07-12",
+        "posted": _days_ago(10),
         "text": "Build RAG agentic LLM systems.",  # the short, score-inflated stub
         "source": "remoteok",
     }
@@ -1259,7 +2137,7 @@ def test_one_malformed_posting_cannot_kill_the_whole_harvest(monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/3",
-                "posted": "2026-07-10",
+                "posted": _days_ago(12),
                 "text": "Build RAG agentic LLM systems.",
                 "source": "evil",
             },
@@ -1402,7 +2280,7 @@ def test_corrupt_watchlist_surfaces_error(tmp_path, monkeypatch):
                 "company": "Acme",
                 "location": "Remote",
                 "url": "https://x/1",
-                "posted": "2026-07-12",
+                "posted": _days_ago(10),
                 "text": "Build RAG LLM systems.",
                 "source": "fake",
             }
@@ -1847,7 +2725,7 @@ def _depth_only(monkeypatch, captured):
                 "title": "AI Engineer",
                 "location": "Remote",
                 "url": f"https://x/{slug}",
-                "posted": "2026-07-20",
+                "posted": _days_ago(2),
                 "text": "python",
                 "salary": "",
             }
@@ -2678,10 +3556,13 @@ def test_a_rank_word_that_is_the_job_is_not_stripped():
 
 
 def test_hybrid_is_expressible_and_unknown_is_not_onsite():
+    """THREE states, in one field. A `remote` bool sat beside `remote_type` until
+    0.9.0 and could only express two of them, so every hybrid role read as `false` --
+    true, and indistinguishable from on-site to anything that only checked the flag."""
     r = engine._coerce({"title": "Engineer", "remote_type": "hybrid"})
     assert r["remote_type"] == "hybrid"
-    assert r["remote"] is False  # derived: hybrid is not fully remote
-    assert engine._coerce({"title": "Engineer"})["remote"] is None  # unknown != False
+    assert engine._coerce({"title": "Engineer"})["remote_type"] is None  # != "onsite"
+    assert "remote" not in r and "remote" not in engine._coerce({"title": "E"})
 
 
 def test_absent_optional_text_is_none_not_empty_string():
@@ -2838,7 +3719,7 @@ def test_every_locations_element_has_the_same_keys():
             "location": "Waco, TX",
         }
     )
-    want = {"raw", "city", "state", "country", "url"}
+    want = {"raw", "city", "state", "country"}
     for row in (multi, single):
         for el in row["locations"]:
             assert set(el) == want, f"element keys {sorted(el)} != {sorted(want)}"
@@ -2976,3 +3857,2018 @@ def test_no_file_is_read_without_an_explicit_encoding():
     assert not offenders, (
         "read_text() with no encoding (cp1252 on Windows):\n" + "\n".join(offenders)
     )
+
+
+# ── salary_from_display: the parser that made README:41's promise true ──────────
+# Before this, `salary_basis="parsed"` was true on 12 rows corpus-wide while 3,500
+# carried a fully formed pay range in `salary` with every structured column null.
+
+
+def test_multiplier_distributes_leftward_or_salary_min_is_wrong_by_1300x():
+    """`$200-260K` is 200,000-260,000. The K is written once and distributes left.
+
+    THE REGRESSION THIS PINS: `_G_NUM` binds the multiplier per-number, so the
+    unguarded pattern reads lo=200, hi=260,000 -- a `salary_min` of 200 on a $200K
+    job, in the column README:39 calls what the employer COMMITTED to. 26 rows of
+    the 2026-08-20 harvest. Asserted on the VALUE, not on "it parsed": a test that
+    only checked salary_min is not None passes against the bug.
+    """
+    got = vocab.salary_from_display("$200-260K", period="year")
+    assert got["salary_min"] == 200_000.0, got
+    assert got["salary_max"] == 260_000.0, got
+    # The guard must not touch a range that needs no help.
+    plain = vocab.salary_from_display("$150,000 - $250,000", period="year")
+    assert plain["salary_min"] == 150_000.0 and plain["salary_max"] == 250_000.0
+
+
+def test_absurd_ratio_is_refused_rather_than_parsed():
+    """`$150,000 - 250,000k` is a quarter of a BILLION. A wrong number carrying
+    basis='parsed' is worse than the null it replaced, so the parse is refused."""
+    assert vocab.salary_from_display("$150,000 - 250,000k")["salary_min"] is None
+    assert vocab.salary_from_display("$306 - $390,000")["salary_min"] is None
+
+
+def test_small_figures_need_a_stated_period_or_are_refused():
+    """`$30-120` is an hourly rate or a thousands-shorthand and nothing in the string
+    can tell. Emitting it period-less manufactures exactly the unusable rows this
+    change exists to remove."""
+    assert vocab.salary_from_display("$30-120")["salary_min"] is None
+    with_period = vocab.salary_from_display("$30-120", period="hour")
+    assert with_period["salary_min"] == 30.0 and with_period["salary_period"] == "hour"
+
+
+def test_magnitude_vetoes_a_stated_period_it_cannot_believe():
+    """A real Greenhouse posting labels a $140,000-$220,000 band an 'Estimated Hourly
+    Pay Range'. Believing it writes `hour` on a six-figure salary and every aggregate
+    downstream is silently wrong -- the exact harm vocab.salary()'s docstring names.
+
+    Refusing a STATED period on magnitude is disbelieving a witness; INVENTING one
+    from magnitude is guessing, and that stays forbidden."""
+    got = vocab.salary_from_display("$140,000 — $220,000", period="hour")
+    assert got["salary_min"] == 140_000.0
+    assert got["salary_period"] is None, "an hourly six-figure band was believed"
+
+
+def test_a_period_is_still_never_invented():
+    """The rule that survives all of the above: no period in the text, no period in
+    the record. vocab.salary() -- 'A period is never guessed.'"""
+    assert vocab.salary_from_display("$200,000 - $250,000")["salary_period"] is None
+
+
+def test_a_lone_figure_is_not_a_range():
+    """`up to $200,000` and `$120,000` cannot be split into a floor and a ceiling,
+    and writing a ceiling into salary_min is the failure this refuses outright."""
+    assert vocab.salary_from_display("$120,000")["salary_min"] is None
+    assert vocab.salary_from_display("up to $200,000")["salary_min"] is None
+
+
+def test_currency_and_period_come_from_the_text_beside_the_figure():
+    """The employer states the currency next to the number; reading it is not
+    inference. `country` is the obvious alternative and is measurably wrong: on the
+    3,500 target rows, country='CA' rows whose body names one code say CAD on 107 and
+    USD on 18 -- a Canadian-located job paying USD is real, so a country rule is
+    wrong in BOTH directions. 823 rows have no country at all."""
+    p = {
+        "salary": "$168,000 — $231,000",
+        "text": "The range for candidates located in Canada is between: "
+        "$168,000 — $231,000 CAD The Okta Experience is...",
+    }
+    engine.derive_salary(p)
+    assert p["salary_currency"] == "CAD", p
+    assert p["salary_min"] == 168_000.0
+
+    q = {
+        "salary": "$135,575 — $175,450",
+        "text": "Learn more about our total rewards below. Annual Base Salary "
+        "$135,575 — $175,450 USD Total Rewards...",
+    }
+    engine.derive_salary(q)
+    assert q["salary_currency"] == "USD" and q["salary_period"] == "year"
+
+
+def test_two_currencies_in_the_window_is_a_refusal_not_a_coin_flip():
+    """A posting quoting a US band and a Canada band contains both codes. A
+    document-wide scan takes whichever comes first and calls it evidence."""
+    p = {
+        "salary": "$100,000 — $150,000",
+        "text": "US $100,000 — $150,000 USD or in Canada the equivalent in CAD.",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 100_000.0
+    assert p["salary_currency"] is None, "picked one of two candidates"
+
+
+def test_a_model_prediction_is_never_written_into_the_commitment_columns():
+    """CAUGHT BY MEASURING, NOT BY REVIEW. This once wrote 109106.0 into salary_min
+    with basis='parsed' on a row whose 109106.69 was a model output.
+
+    THIS TEST WAS INERT UNTIL 0.9.0 AND ITS OWN DOCSTRING WAS PART OF THE PROBLEM. It
+    said the guard was the EMPTY DISPLAY STRING -- a predicted row carries `salary: ""`
+    and `derive_salary` returns at its display check. Four other sites said the same.
+    Deleting that display check in an isolated export left this test GREEN
+    (`1/710 tests collected`, this test named): the fixture below used to be
+    `{"salary": "", "text": ...}`, and with the check gone `salary_from_display("")`
+    returns all-None and the NEXT line returns. The test never exercised the guard it
+    was named for, and a guard that quietly does not run reads as assurance.
+
+    THE FIXTURE IS NOW THE SHAPE THAT ACTUALLY LEAKED. Measured on 1a1414d,
+    `derive_salary` had no quarantine of its own: handed a predicted row still carrying
+    `$129,584–$129,584` -- EN-DASH, U+2013, the exact rendering 6,633 rows held
+    [live prod, engine 0.8.2] -- it wrote `salary_min=129584.0, salary_basis='parsed',
+    salary_kind='base'`. `salary_from_display` accepts that string: it is a range, ratio
+    1.0. It refuses the modern point form `$109,106` only because `util.salary_range`
+    stopped rendering `$X–$X`, which is a second upstream behaviour and not a guard here
+    either. So this fixture is not a contrivance -- it is what production emitted, and
+    it is the case no test covered.
+
+    NOT A LIVE LEAK, AND THE DISTINCTION IS THE POINT. At HEAD no adapter can emit that
+    string: `util.salary_range` renders a point estimate as `$129,584`, dashless. This
+    pins the property against a RE-INTRODUCTION of the 0.8.2 rendering and against a
+    library caller passing `derive_salary` rows from its own 0.8.2-era store -- a real
+    caller, since this is a public library function. Overstating it as a live leak is
+    the failure that reads as rigour.
+
+    The guard is now `engine.derive_salary`'s PREDICTED_PAY_SOURCES branch, keyed on the
+    source name because nothing else in the record separates a prediction from an honest
+    absence. This test exists to keep the PROPERTY true however it is implemented, so it
+    asserts the property and not the mechanism."""
+    p = {
+        "source": "adzuna",
+        # What a regression in `_adzuna_pay` would emit -- and what the last release
+        # shipping the estimate columns really did emit, 6,633 times.
+        "salary": "$129,584\u2013$129,584",
+        "text": "Estimated salary $129,584\u2013$129,584 a year",
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_min") is None, "a prediction reached the commitment column"
+    assert p.get("salary_basis") is None
+    # NOT asserting `salary_kind is None`, and the reason is worth a sentence because an
+    # assertion that passes for a reason that has moved is worse than no assertion. The
+    # guard sits below the fill-only return so a non-predicted Adzuna row keeps its kind
+    # (see the test below), and the kind is assigned above that return by a deliberate,
+    # measured decision -- so this fixture DOES come out `salary_kind='base'`. That is
+    # unreachable in production: a real predicted row carries `salary == ""`, the kind is
+    # assigned under `if p.get("salary")`, and it is measured `None` on one. The
+    # commitment column is what this test guards, and it is null either way.
+
+    # AND THE SHAPE THE ADAPTER EMITS TODAY, which is the cheaper half of the same
+    # property: no display string, nothing to parse.
+    q = {"source": "adzuna", "salary": "", "text": "$109,106\u2013$109,106 a year"}
+    engine.derive_salary(q)
+    assert q.get("salary_min") is None and q.get("salary_basis") is None
+
+    # A REAL ADZUNA RANGE IS UNTOUCHED BY THE QUARANTINE. The guard keys on the source
+    # AND on the vendor having sent no numbers, so `basis='stated'` rows keep their
+    # figures and still get a `salary_kind`. Without this assertion the guard could be
+    # widened to "refuse adzuna outright" and no test would notice.
+    r = {
+        "source": "adzuna",
+        "salary": "$115,000\u2013$145,000",
+        "text": "Base salary $115,000\u2013$145,000 a year",
+        "salary_min": 115_000.0,
+        "salary_max": 145_000.0,
+        "salary_basis": "stated",
+    }
+    engine.derive_salary(r)
+    assert r["salary_min"] == 115_000.0 and r["salary_basis"] == "stated"
+    assert r.get("salary_kind") == "base", "a real vendor range lost its kind"
+
+
+def test_the_prediction_quarantine_is_scoped_to_sources_that_predict():
+    """THE GUARD MUST NOT BECOME "refuse any row with no vendor figure". Every source
+    that states pay only in prose depends on `derive_salary` reading its display string,
+    and Phase 1's body scan depends on it more. A greenhouse row carrying the identical
+    fake-range shape is parsed, because greenhouse publishes no predictions -- the
+    quarantine is about WHO SAID IT, not what it looks like."""
+    p = {
+        "source": "greenhouse",
+        "salary": "$129,584\u2013$129,584",
+        "text": "The base salary range is $129,584\u2013$129,584 a year",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 129_584.0, "the quarantine leaked past its own source set"
+    assert p["salary_basis"] == "parsed"
+
+
+def test_a_non_predicted_adzuna_row_keeps_its_kind_but_not_its_figure():
+    """THE COLLATERAL THE FIRST DRAFT OF THE QUARANTINE CAUSED, pinned so it cannot come
+    back. The guard was written above the `salary_kind` assignment, where it fired on any
+    Adzuna row with no structured figures -- including one whose EMPLOYER stated pay as a
+    display string -- and stripped the kind off it.
+
+    Unreachable from `_adzuna_pay` as it stands: enumerated over its branches,
+    `util.salary_range` returns non-empty exactly when `vocab.salary` fills at least one
+    of min/max, so "display string and no numbers" occurs on none of them. It is reachable
+    for a LIBRARY CALLER constructing a row, which is what this test is. Pinning an
+    unreachable case is cheap; discovering that a guard silently widened is not.
+
+    WAS NAMED `..._keeps_its_kind_and_its_parse`, which its own second assertion
+    disproves: the figure IS quarantined and only the kind survives. A wrong test name
+    is a wrong comment one layer out, and this is the first test anyone touching the
+    body scan will read."""
+    p = {
+        "source": "adzuna",
+        "salary": "$115,000\u2013$145,000",
+        "text": "The base salary range for this position is $115,000\u2013$145,000 per year.",
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_kind") == "base", "a stated range lost its kind to the guard"
+    # The figure itself is still quarantined -- the source cannot be trusted for a
+    # commitment, and this row is indistinguishable in the record from a prediction.
+    assert p.get("salary_min") is None
+
+
+def test_the_sections_fixture_a_scoped_body_scan_will_need():
+    """DELIBERATELY INERT UNTIL PHASE 1 EXISTS, AND SAYING SO IS THE POINT OF IT.
+
+    `derive_salary` reads `p["sections"]` NOWHERE today, so nothing below exercises a
+    section-scoped path -- there is not one. This fixture is here so that when the scan
+    lands, the row it will act on is already pinned with a compensation span pointing at
+    a figure a predicted-pay source must never have parsed. The assertion it makes today
+    is real but narrow: the quarantine returns before any reader of `sections` could run.
+
+    Recorded plainly because the alternative is worse. The version of this suite before
+    0.9.0 shipped a fixture that looked like it tested a guard and did not, and nobody
+    noticed for a release. A test that cannot fail yet should say which change will make
+    it able to."""
+    p = {
+        "source": "adzuna",
+        "salary": "",
+        "text": "About us. Compensation. $129,584\u2013$129,584 a year. Benefits.",
+        "sections": [
+            {"type": "compensation", "start": 10, "end": 47, "heading": "Compensation"}
+        ],
+    }
+    engine.derive_salary(p)
+    assert p.get("salary_min") is None, "a prediction reached the commitment column"
+    assert p.get("salary_basis") is None
+
+def test_derive_salary_fills_but_never_overwrites_a_vendors_own_figures():
+    """A vendor's structured object is better evidence than our parse of its prose,
+    and basis='stated' must keep meaning what it says."""
+    p = {
+        "salary": "$1 - $2",
+        "text": "$1 - $2",
+        "salary_min": 200_000.0,
+        "salary_max": 250_000.0,
+        "salary_basis": "stated",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 200_000.0 and p["salary_basis"] == "stated"
+
+
+def test_a_point_value_is_not_rendered_as_a_range():
+    """220 of 220 Adzuna predictions rendered as `$188,569–$188,569`; a reader sees a
+    range and reads a precise employer offer."""
+    from job_radar.util import salary_range
+
+    assert salary_range(109106, 109106) == "$109,106"
+    assert salary_range(165000, 225000) == "$165,000–$225,000"
+
+
+def test_a_salary_string_is_rendered_in_its_own_currency():
+    """P6. This function hard-coded a dollar sign, so a Toronto role rendered
+    `$168,000-$231,000` for CAD and a Warsaw one `$25,200` for PLN -- about a quarter
+    of a real salary. It could not be fixed at a call site: there was no way to tell
+    it what the money was.
+
+    46 rows, NOT the 1,147 that show a non-USD figure behind a bare `$`. Three of the
+    four callers pass a currency that is USD by construction; only `_himalayas_rows`
+    has a real vendor currency, and it was handing it to `vocab.salary` while giving
+    this function nothing. The rest are greenhouse and lever strings where the
+    EMPLOYER typed the dollar sign -- not this function's output."""
+    from job_radar.util import salary_range
+
+    assert salary_range(168000, 231000, "CAD") == "CAD 168,000–CAD 231,000"
+    assert salary_range(25200, None, "pln") == "PLN 25,200"
+    # USD and unknown keep the bare `$`, so no existing US row moves.
+    assert salary_range(165000, 225000, "USD") == "$165,000–$225,000"
+    assert salary_range(165000, 225000, None) == "$165,000–$225,000"
+
+
+def test_a_hyphenated_quantity_is_not_a_pay_period():
+    """FOUND BY HAND-READING OUTPUT, not by review: a real Greenhouse body reads
+    '$186,400 — $233,000 USD PLEASE NOTE: our policy requires a 90-day waiting
+    period', and `day` was harvested out of '90-day' -- $186,400 PER DAY. 66 of 872
+    period assignments (7.6%) were absurd this way: 55 day, 9 week, 2 month.
+
+    Asserted on `_adjacent_evidence` DIRECTLY, and on a magnitude the implied-annual
+    veto cannot rescue. The obvious version of this test -- a six-figure band next to
+    "90-day" -- passes with the hyphen guard REMOVED, because the veto catches it
+    downstream for an unrelated reason. It would have pinned nothing.
+    """
+    # $45/hr is ~$11,700/yr if read as daily: plausible enough to survive the veto,
+    # so only the hyphen guard can stop `day` here.
+    _, period, _n = engine._adjacent_evidence(
+        "the rate is $45 - $65 USD. Our policy requires a 90-day waiting period.",
+        "$45 - $65",
+    )
+    assert period is None, "harvested `day` out of `90-day`"
+
+    # And end to end on the row that exposed it.
+    p = {
+        "salary": "$186,400 — $233,000",
+        "text": "the range for this position is: $186,400 — $233,000 USD PLEASE NOTE: "
+        "Our policy requires a 90-day waiting period before reconsideration.",
+    }
+    engine.derive_salary(p)
+    assert p["salary_min"] == 186_400.0
+    assert p["salary_period"] is None
+
+
+def test_an_absurd_implied_annual_vetoes_the_period_whatever_the_unit():
+    """The first version of this veto covered `hour` and `year` and missed day, week
+    and month entirely. Implied-annual is the general form; per-unit thresholds only
+    cover the units someone thought of."""
+    for unit in ("day", "week", "month"):
+        got = vocab.salary_from_display("$216,000 — $270,000", period=unit)
+        assert got["salary_min"] == 216_000.0
+        assert got["salary_period"] is None, f"believed {unit} on a six-figure band"
+    # A genuinely large ANNUAL package is not vetoed for being large.
+    big = vocab.salary_from_display("$1,400,000 - $1,900,000", period="year")
+    assert big["salary_period"] == "year"
+
+
+def test_a_vendor_stated_period_is_checked_at_all():
+    """P7: the magnitude veto lived inside `salary_from_display`, so it guarded the
+    PARSED lane and nothing else -- a vendor-STATED figure reached the record having
+    passed no sanity check whatever. `salary()` is the chokepoint all nineteen
+    adapters reach, so the veto lives there now.
+
+    Real rows from a 102,799-row harvest: an ashby posting sends 19-48 with the
+    interval `year`, and a lever one sends 1-1. 29 of 29 rows the floor catches are
+    hourly rates labelled `year`."""
+    got = vocab.salary(19, 48, currency="USD", period="year")
+    assert got["salary_min"] == 19.0, "the figures are kept; only the period is refused"
+    assert got["salary_period"] is None, "an annual salary of $48 was believed"
+    assert vocab.salary(115_900, 139_300, currency="USD", period="month")["salary_period"] is None
+
+
+def test_a_weak_currency_keeps_the_period_its_vendor_stated():
+    """THE CEILING IS DENOMINATED IN USD, SO IT MAY ONLY BE APPLIED TO USD when it is
+    checking a vendor's own field. Ungated it fired on 27 stated rows and 24 of them
+    were CORRECT monthly salaries in weak currencies -- a single run of that guard
+    would have deleted the period from every Philippine, Hungarian, Colombian and
+    Czech row in the corpus.
+
+    A weak currency INFLATES the raw number, which is why the gate is on the ceiling
+    and not on the `year` floor: inflation cannot trip a floor."""
+    for cur, lo, hi in (
+        ("PHP", 90_000, 120_000),
+        ("HUF", 1_800_000, 2_400_000),
+        ("COP", 17_500_000, 21_175_000),
+        ("CZK", 150_000, 300_000),
+    ):
+        got = vocab.salary(lo, hi, currency=cur, period="month")
+        assert got["salary_period"] == "month", f"{cur} monthly salary lost its period"
+    # ...and the floor still fires on a weak currency, because it cannot false-positive.
+    assert vocab.salary(1, 2, currency="SGD", period="year")["salary_period"] is None
+
+
+def test_a_monthly_band_labelled_year_loses_the_label():
+    """The `year` floor is scaled too, and that was expected to over-fire and measured
+    the opposite: 29 stated rows unscaled, 47 scaled, and all 18 newly caught are one
+    defect -- a MONTHLY band filed as `year`.
+
+    THE EVIDENCE IS NOT UNIFORM ACROSS THOSE 18 and this test only pins the two that
+    need no scale table to believe. The HUF pair is the strongest row in the set: one
+    employer, one title, one band, filed once as `year` and twice as `month`."""
+    got = vocab.salary(1_045_000, 1_567_500, currency="HUF", period="year")
+    assert got["salary_min"] == 1_045_000.0, "the figures are kept"
+    assert got["salary_period"] is None, "a monthly HUF band was believed as annual"
+    assert vocab.salary(70_000, 95_000, currency="PHP", period="year")["salary_period"] is None
+    # ...and a real US low-wage ANNUAL row keeps whatever it has: scaling by 1.0 is
+    # the old behaviour, so nothing USD moves that did not move before.
+    assert vocab.salary(31_000, 38_000, currency="USD", period="year")["salary_period"] == "year"
+
+
+def test_a_scraped_period_is_still_vetoed_in_a_strong_currency():
+    """THE ROW THAT KILLED THE FIRST TWO DESIGNS, pinned so it cannot come back.
+
+    In the parsed lane the period was scraped out of nearby prose by
+    `engine._adjacent_evidence`, so the ceiling is really a STRAY-WORD detector: five
+    CAD annual salaries in the corpus took `week` from a weekly lunch stipend, an
+    office-days policy and `40h/week`.
+
+    GATING the ceiling on `currency in (None, "USD")` republishes all five as
+    `CAD 160,000 per week` -- measured at 7 parsed rows changed, 6 of them broken.
+    SCALING it does not, because CAD is USD-scale: 160,000 x 52 / 1.37 is $6.1M
+    implied, still absurd. If this test ever fails, the scale table has been edited
+    into a gate."""
+    got = vocab.salary_from_display("CAD $160,000–$245,000", period="week", currency="CAD")
+    assert got["salary_min"] == 160_000.0
+    assert got["salary_period"] is None, "a stray `week` was believed on a CAD salary"
+
+
+def test_the_period_is_read_from_slash_notation_too():
+    """`/hr` is 30 of 4,703 display strings. 28 were rescued only because the body
+    happened to spell the unit out nearby; reading the string does not need luck."""
+    assert vocab.salary_from_display("$63-84/hr")["salary_period"] == "hour"
+    assert vocab.salary_from_display("$120 - $170 /hour")["salary_period"] == "hour"
+
+
+# ── title decomposition ────────────────────────────────────────────────────────
+# `decompose_title` READS dedup._TITLE_NOISE / _QUAL_RE and must never edit them:
+# `_TITLE_NOISE` is used by `different_openings` (dedup.py:244), so a change there
+# moves MERGES, and a wrong merge deletes a job. Every table below is local to vocab.
+
+
+def test_the_delimiter_no_longer_decides_whether_decoration_is_captured():
+    """Comma-delimited titles had decoration captured on 99.9% (3,262 rows); dash-,
+    pipe- and colon-delimited titles on 17.2% (1,388). Same decoration, opposite
+    handling, decided by which key the employer pressed. The dash was not merely
+    uncaptured -- it was DELETED and the tail welded into the root, producing a role
+    name no employer wrote."""
+    dash = vocab.decompose_title("Staff Software Engineer- Foundation Model Inference")
+    comma = vocab.decompose_title("Staff Software Engineer, Foundation Model Inference")
+    assert dash["title_root"] == comma["title_root"] == "Software Engineer"
+    assert "foundation model inference" in (dash["title_qualifiers"] or [])
+
+    tokyo = vocab.decompose_title("Forward Deployed Engineer - Tokyo")
+    assert tokyo["title_root"] == "Forward Deployed Engineer"
+    assert tokyo["title_qualifiers"] == ["tokyo"]
+    assert (
+        vocab.decompose_title("AI Engineer | Platform")["title_root"] == "AI Engineer"
+    )
+
+
+
+def test_coerce_strips_edge_whitespace_without_moving_the_dedup_key():
+    """`title` and `location` arrive from vendors with edge whitespace on 9,874 and
+    1,894 rows of a 102,799-row harvest, and `engine._coerce` forced them to `str`
+    without ever stripping them.
+
+    THE ASYMMETRY IS THE DEFECT. `shortlist._build_row` has stripped exactly these two
+    fields for releases, so the CSV was clean while the record and the NDJSON shipped
+    the raw value -- a library consumer got the dirt the CLI user never saw.
+
+    THIS TEST EXISTED NOWHERE BEFORE, like the title_root one above: the full suite was
+    green on both sides of the bug.
+    """
+    from job_radar import dedup
+
+    # all five classes measured in the corpus, including the three a reader cannot see
+    for ws in (" ", "\u00a0", "\u202f", "\t", "\n"):
+        p = {
+            "title": f"{ws}Data Engineer{ws}",
+            "location": f"{ws}Austin, TX{ws}",
+            "company": "Acme",
+            "url": "https://x/1",
+            "source": "greenhouse",
+        }
+        engine._coerce(p)
+        assert p["title"] == "Data Engineer", repr(ws)
+        assert p["location"] == "Austin, TX", repr(ws)
+
+    # `company` IS stripped as of 0.9.0. This assertion pinned the OPPOSITE, on the
+    # reasoning that "on a depth adapter `company` comes from the watchlist, not the
+    # vendor, so this is the wrong layer." That premise died when `harvest` began
+    # filling `company` from Greenhouse's own `company_name`: it is now
+    # vendor-supplied, and about one Greenhouse board in ten ships edge whitespace
+    # in it -- ' Higher Logic', 'Home Chef  ', ' ALO', 'Brandtech+ ', 'Horace Mann '.
+    # `url` and `source` are still NOT stripped: measured at 0 rows each.
+    p = {"title": "t", "location": "l", "company": "  Acme  ", "url": "  u  ",
+         "source": "greenhouse"}
+    engine._coerce(p)
+    assert p["company"] == "Acme" and p["url"] == "  u  "
+
+    # Stripping runs BEFORE the nullable pass, so a whitespace-only location becomes
+    # None rather than a string that looks present and holds nothing.
+    p = {"title": "t", "location": "   ", "company": "c", "url": "u", "source": "s"}
+    engine._coerce(p)
+    assert p["location"] is None
+
+    # THE GUARANTEE THAT MADE THIS SAFE: `dedup_key` is the store's primary key and
+    # `id = short_id(dedup_key)` is user-facing, so a moved key renames a job someone
+    # may be holding. `normalize_title`/`normalize_location` already collapse every
+    # non-alphanumeric run, so stripping cannot move it -- pinned, not assumed.
+    for ws in (" ", "\u00a0", "\u202f", "\t", "\n"):
+        dirty = {"company": "Acme", "title": f"{ws}Data Engineer{ws}",
+                 "location": f"{ws}Austin, TX{ws}"}
+        clean = {"company": "Acme", "title": "Data Engineer", "location": "Austin, TX"}
+        assert dedup.dedup_key(dirty) == dedup.dedup_key(clean), repr(ws)
+
+
+def test_title_root_never_manufactures_a_word_no_employer_wrote():
+    """`vocab._WORD_RE` is the tokenizer AND `title_root` is rebuilt by joining what it
+    finds, so a character absent from the class is DELETED and the word splits at the
+    hole. Until 0.9.0 the class was ASCII-only and `Sênior` came out `S nior` -- the
+    only field in the record that manufactured text rather than dropping it.
+
+    THIS TEST EXISTED NOWHERE BEFORE. The full suite was green on both sides of this
+    bug, so the fix arrived with no coverage at all and these assertions are the first
+    thing that would notice it coming back.
+    """
+    # the bug itself, in four scripts an employer actually used. `Sênior` now loses
+    # its rank word to P4b's fold -- exactly as the ASCII spelling always has -- so the
+    # assertion here is that the LETTERS survive, which is what this test is about. An
+    # earlier version expected the whole title back, because the accented rank was not
+    # a `_SENIORITY` member yet and so was never stripped.
+    for title, root in [
+        ("Sênior Security Engineer", "Security Engineer"),
+        ("Développeur Full Stack", "Développeur Full Stack"),
+        ("Ingénieur DevOps", "Ingénieur DevOps"),
+        ("Müşteri Temsilcisi", "Müşteri Temsilcisi"),
+    ]:
+        assert vocab.decompose_title(title)["title_root"] == root, title
+
+    # NFD input reaches the same answer. `Sênior` decomposed is `S` + `e` + U+0302,
+    # and without the combining range in the class it splits at the mark -- the exact
+    # bug above, arriving through an encoding the corpus happens not to contain.
+    import unicodedata
+
+    nfd = unicodedata.normalize("NFD", "Sênior Security Engineer")
+    assert nfd != "Sênior Security Engineer"  # the fixture really is decomposed
+    assert vocab.decompose_title(nfd)["title_root"] == "Security Engineer"
+
+    # LATIN ONLY, ON PURPOSE. A bilingual title must still root at its English half:
+    # the ASCII-only class was accidentally an English extractor, and widening to a
+    # Unicode-wide `\w` regressed 85 titles by welding the other script back in.
+    assert vocab.decompose_title("Data Engineer / データエンジニア")["title_root"] == (
+        "Data Engineer"
+    )
+    assert vocab.decompose_title("Amazon Account Manager 亚马逊运营经理")[
+        "title_root"
+    ] == "Amazon Account Manager"
+
+    # `+#/&` are load-bearing and predate all of this; `_` is still a separator, and
+    # `×`/`÷` sit inside the Latin-1 letter block but are operators, not letters.
+    assert vocab._WORD_RE.findall("C++ C# and/or R&D") == ["C++", "C#", "and/or", "R&D"]
+    assert vocab._WORD_RE.findall("data_engineer") == ["data", "engineer"]
+    assert vocab._WORD_RE.findall("3 × 4 ÷ 2") == ["3", "4", "2"]
+
+    # THE HONEST LIMIT THIS ONCE RECORDED IS CLOSED. It read: "this fixes the
+    # manufactured string, NOT the seniority -- `_SENIORITY` is keyed on ASCII, so
+    # `sênior` is still not a member." P4b folds the lookup, so both spellings now
+    # reach the same rung. See `test_seniority_survives_a_diacritic`.
+    assert vocab.decompose_title("Sênior Security Engineer")["seniority"] == "senior"
+    assert vocab.decompose_title("Senior Security Engineer")["seniority"] == "senior"
+
+
+def test_an_intra_word_hyphen_is_not_a_delimiter():
+    """222 corpus titles carry one. Splitting on a bare hyphen shatters `Full-Stack`
+    and `Go-to-Market`; requiring whitespace on BOTH sides misses the 122 titles
+    written `Engineer- Backend` or `Engineer -Backend`. Whitespace on at least one
+    side is the measured test."""
+    assert vocab.decompose_title("Full-Stack Engineer")["title_root"] == (
+        "Full Stack Engineer"
+    )
+    assert vocab.decompose_title("Go-to-Market Engineer")["title_root"] == (
+        "Go to Market Engineer"
+    )
+    # one-sided space still splits
+    assert (
+        vocab.decompose_title("Sr Software Engineer -Public Sector")["title_root"]
+        == "Software Engineer"
+    )
+
+
+def test_a_leading_segment_that_names_no_role_is_not_the_root():
+    """Employers put a requisition number, a company or a product in front of the
+    role. Segment 0 is the DOMAIN there and the role is further right -- 28 rows,
+    every one rooted at a req number or a product before this."""
+    for title, want in (
+        ("Airbag - Senior Developer", "Developer"),
+        ("G71 - Full Stack Engineer", "Full Stack Engineer"),
+        ("Dynamo AI — Forward Deployed Engineer", "Forward Deployed Engineer"),
+        ("RQ11391 - Solutions Designer - CRM - Senior", "Solutions Designer"),
+    ):
+        assert vocab.decompose_title(title)["title_root"] == want, title
+
+
+def test_a_generic_role_noun_is_still_the_root_and_is_never_swapped_for_its_domain():
+    """THE LINE THIS FIX MUST NOT CROSS, and it was measured before being drawn.
+    Falling through on a GENERIC root swaps the role for the domain -- `Engineering
+    Manager, Payments` would root at `Payments`, which is a worse claim than
+    `Manager`. The fall-through fires only when segment 0 contains NO role noun at
+    all. 395 corpus titles have the `<role>, <domain>` shape and must be untouched."""
+    assert (
+        vocab.decompose_title("Manager, Forward Deployed Engineering")["title_root"]
+        == "Manager"
+    )
+    assert vocab.decompose_title("Engineering Manager, Payments")["title_root"] == (
+        "Engineering Manager"
+    )
+    assert vocab.decompose_title("Staff Product Manager, Agentic AI")["title_root"] == (
+        "Product Manager"
+    )
+
+
+def test_a_level_mark_follows_the_role_and_a_leading_numeral_is_a_count():
+    """`2 Full Stack AI Engineer, 1 GTM` is a HEADCOUNT and was read as level II;
+    `Tier III Service Desk Engineer` is a support tier read as level III, with the
+    root mangled to `Tier Service Desk Engineer`."""
+    headcount = vocab.decompose_title("2 Full Stack AI Engineer, 1 GTM")
+    assert headcount["title_level"] is None
+    tier = vocab.decompose_title("Tier III Service Desk Engineer")
+    assert tier["title_level"] is None
+    assert tier["title_root"] == "Service Desk Engineer"
+    # a real level mark still reads
+    assert vocab.decompose_title("Software Engineer II")["title_level"] == "II"
+
+
+def test_decomposition_invents_nothing_and_destroys_nothing():
+    """The conservation gate, as a regression guard rather than a discovery tool: it
+    passes 100% today and would have caught none of the eight filed findings. What it
+    DOES catch is a future change that fabricates a token or drops a discriminative
+    one -- the `NO REMOTE` -> `NO` class."""
+    for title in (
+        "Senior Software Engineer, AI",
+        "Forward Deployed Engineer - Tokyo",
+        "Staff Backend Engineer - Databases Tempo | US | Remote",
+        "Manager, Forward Deployed Engineering",
+    ):
+        d = vocab.decompose_title(title)
+        title_toks = {w.lower() for w in vocab._WORD_RE.findall(title)}
+        root_toks = {w.lower() for w in vocab._WORD_RE.findall(d["title_root"])}
+        assert root_toks <= title_toks, f"fabricated a token: {title}"
+        assert d["title_root"].strip(), f"empty root: {title}"
+
+
+# ── 0.9.0: classification — employment_type from vendor metadata ────────────
+def _row(**kw):
+    """A minimal record that passes the boundary, plus whatever the test is about."""
+    return engine._coerce(
+        {"title": "Engineer", "company": "Acme", "url": "https://x/1", **kw}
+    )
+
+
+def test_employment_type_is_read_from_any_metadata_key_by_value_not_by_name():
+    """Greenhouse metadata keys are EMPLOYER-authored, so a key alias list cannot be
+    written once and stay right: 61 distinct keys carry a resolvable value in the live
+    store, including `Employment Classification (UKG)` and `Full-Time/Part-Time
+    Status`. Meanwhile `Job Type` and `Worker Type` — two of the four most obvious
+    names — resolve to nothing, because their values are `Standard` and `Employee`.
+    The value carries the meaning; the key never did."""
+    for key in ("Employment Type", "Full-Time/Part-Time Status", "TH: Employment Type"):
+        r = _row(source="greenhouse", source_extra={key: "Full-time"})
+        assert r["employment_type"] == "FULL_TIME", f"{key} was not read"
+        assert r["employment_type_raw"] == "Full-time"
+
+
+def test_an_unresolvable_metadata_value_is_left_alone():
+    """`Regular` (151 rows) and `Standard` (124) are not employment types. Only a real
+    map hit is accepted — never the OTHER fallback, which would mean "some string
+    existed", not "a type was stated"."""
+    for value in ("Regular", "Standard", "Employee", "Pipeline"):
+        r = _row(source="greenhouse", source_extra={"Job Type": value})
+        assert r["employment_type"] is None, f"{value!r} was accepted as a type"
+
+
+def test_a_vendors_own_field_beats_its_metadata_bag():
+    """FILL-ONLY. The metadata scan must never overwrite a type the source stated
+    outright, because a dedicated field is better evidence than a custom column."""
+    r = _row(
+        source="greenhouse",
+        employment_type="Part Time",
+        source_extra={"Employment Type": "Full-time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+    assert r["employment_type_raw"] == "Part Time"
+
+
+def test_two_disagreeing_metadata_fields_are_not_a_type():
+    """11 rows carry two different resolvable values at once — two forms filled
+    inconsistently, so nobody stated one coherent fact. `None` is the only answer
+    consistent with "null means the source did not say": a source that said two
+    things has not said one. Both raws are kept so the disagreement is auditable.
+
+    Deliberately the SAME rule the hn parser needs for a posting whose location text
+    states two arrangements — one field stating a span is a range, but two fields
+    disagreeing is an absence."""
+    r = _row(
+        source="greenhouse",
+        source_extra={"Employment Type": "Contractor", "Time Type": "Part Time"},
+    )
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] == "Contractor | Part Time"
+
+
+def test_two_metadata_fields_that_agree_are_still_a_type():
+    """Agreement is not conflict. Two keys spelling the same answer differently is
+    the common case, not the ambiguous one."""
+    r = _row(
+        source="greenhouse",
+        source_extra={"Employment Type": "Full-time", "Time Type": "Full Time"},
+    )
+    assert r["employment_type"] == "FULL_TIME"
+
+
+def test_permanent_is_skipped_under_a_key_that_names_a_term():
+    """`permanent` is flagged by vocab's own comment as the map's shakiest entry — UK/EU
+    usage contrasting with fixed-term, not with part-time. Under a key literally named
+    `Contract Type` the employer is answering the term question, which makes that
+    flagged failure more likely, not less. 36 rows in the live store."""
+    assert (
+        _row(source="gh", source_extra={"Contract Type": "Permanent"})[
+            "employment_type"
+        ]
+        is None
+    )
+    # ...but the same key still yields every other value it carries.
+    assert (
+        _row(source="gh", source_extra={"Contract Type": "Freelance"})[
+            "employment_type"
+        ]
+        == "CONTRACTOR"
+    )
+
+
+def test_a_qualified_contract_string_still_normalizes():
+    """braintrust's adapter builds `f"contract ({contract_type})"`, so `_PUNCT`
+    flattened it to "contract long" and 29 of 29 rows became OTHER while bare
+    "contract" mapped to CONTRACTOR — the adapter defeating its own normalizer. The
+    qualifier survives in the raw, because that is what the vendor sent."""
+    assert vocab.employment_type("contract (long)") == ("CONTRACTOR", "contract (long)")
+    assert vocab.employment_type("contract (short)") == (
+        "CONTRACTOR",
+        "contract (short)",
+    )
+    # A trailing parenthetical is only tried after a DIRECT lookup misses, so it can
+    # never rewrite a value that already resolved.
+    assert vocab.employment_type("Full-time (Remote)")[0] == "FULL_TIME"
+
+
+# ── 0.9.0: classification — seniority ───────────────────────────────────────
+def test_seniority_survives_a_diacritic(): 
+    """P4b. `_SENIORITY` is ASCII-keyed, so the accented spelling of `senior` was not
+    a member and `Senior Software Engineer` written the Portuguese way got
+    `seniority: None`. P4 was the neighbouring defect -- `_WORD_RE` deleted the
+    accented letter, so the ROOT came back as a word no employer wrote -- and fixing
+    it does not fix this one: a repaired token is still outside the table.
+
+    3 rows in a 102,799-row harvest lead their title this way; the other 17 sit
+    mid-title and are deliberately still unread, because moving WHERE a rank may be
+    read is a different change with its own failure mode."""
+    got = vocab.decompose_title("S\u00eanior Software Engineer Fullstack")
+    assert got["seniority"] == "senior"
+    assert got["title_root"] == "Software Engineer Fullstack"
+    assert vocab.decompose_title("J\u00fanior Developer")["seniority"] == "junior"
+    # The positional rule is untouched: a head noun is still the role.
+    assert vocab.decompose_title("Director of Engineering")["seniority"] is None
+
+
+def test_folding_never_invents_a_rank():
+    """The reverse risk, and it is the reason folding is safe rather than merely
+    convenient: across all 102,799 titles the ONLY tokens that fold into a
+    `_SENIORITY` key without already being members are the accented spellings of
+    `senior` and `junior`. Nothing else collides -- so the fold cannot promote an
+    ordinary word into a rank."""
+    for word in ("engineer", "designer", "d\u00e9veloppeur", "t\u00e9cnico", "s\u00e9nior"):
+        key = vocab._rank_key(word)
+        assert (key in vocab._SENIORITY) == (word.strip("\u00e9") in ("s\u00e9nior",) or key in ("senior",))
+    assert vocab._rank_key("S\u00caNIOR") == "senior"
+    assert vocab._rank_key("Engineer") == "engineer"
+
+
+def test_stated_seniority_is_case_folded():
+    """One column held five vendor dialects at once: `seniority='senior'` returned
+    2,229 rows and missed 319 more spelled `Senior` or `Senior Level`, 179 of them for
+    letter case alone."""
+    r = _row(source="himalayas", seniority="Senior")
+    assert r["seniority"] == "senior"
+    assert r["seniority_raw"] == "Senior"
+    assert r["seniority_basis"] == "stated"
+
+
+def test_seniority_is_never_reranked_onto_an_invented_ladder():
+    """THE LINE THIS FIELD IS HELD TO. Every other normalizer here maps onto a
+    vocabulary someone else published; there is no such enumeration for seniority, so
+    a rung order would be this library's opinion.
+
+    Probed live 2026-08-20: SmartRecruiters ships LinkedIn's published enumeration
+    verbatim, in which `Associate` ranks ABOVE `Entry level`. The one ladder available
+    to copy collapses `Associate` to an entry rung — so adopting it would contradict a
+    vendor's own published ordering on the source where it fires on 60% of rows."""
+    assert _row(source="smartrecruiters", seniority="Mid-Senior Level")[
+        "seniority"
+    ] == ("mid-senior level")
+    assert _row(source="smartrecruiters", seniority="Associate")["seniority"] == (
+        "associate"
+    )
+    assert _row(source="themuse", seniority="Mid Level")["seniority"] == "mid level"
+
+
+def test_a_declined_seniority_is_none_but_keeps_its_raw():
+    """ "Not Applicable" and "Any" mean the vendor answered and refused to classify.
+    There is no level, so there is no basis for one — and it deliberately does NOT
+    fall through to the title, because overriding an explicit refusal with our own
+    guess is the opinion this field is kept clear of."""
+    for value in ("Not Applicable", "Any"):
+        r = _row(source="smartrecruiters", title="Senior Engineer", seniority=value)
+        assert r["seniority"] is None, value
+        assert r["seniority_basis"] is None, value
+        assert r["seniority_raw"] == value
+
+
+def test_seniority_raw_is_never_invented_for_a_title_derived_level():
+    """Same rule as `employment_type_raw`: it means "what the VENDOR said". Nobody
+    quoted anything on the title branch, so a raw there would be a fabricated
+    quotation — the one thing a provenance field cannot do."""
+    r = _row(source="greenhouse", title="Senior Software Engineer")
+    assert r["seniority"] == "senior"
+    assert r["seniority_basis"] == "title"
+    assert r["seniority_raw"] is None
+
+
+def test_an_adapter_supplied_seniority_raw_is_not_overwritten():
+    """themuse sends the canonical token AND the display string; the adapter maps them
+    to `seniority` and `seniority_raw` itself, and the boundary must leave both."""
+    r = _row(source="themuse", seniority="senior", seniority_raw="Senior Level")
+    assert r["seniority"] == "senior"
+    assert r["seniority_raw"] == "Senior Level"
+
+
+def test_a_title_that_contradicts_the_metadata_vetoes_the_fill():
+    """A hand-read of 150 sampled fills found the metadata asserting a type the posting
+    itself contradicts — `Store Lead - Part Time` carrying `Full Time` metadata, and
+    `Clinical Lab Scientist (Contract)` carrying `Full-time`. 163 rows, 1.91% of the
+    live fill, landing in `shortlist.csv` where a CLI user reads them."""
+    r = _row(
+        title="Store Lead - Part Time",
+        source="greenhouse",
+        source_extra={"Time Type": "Full Time"},
+    )
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] is None
+
+
+def test_a_title_that_agrees_does_not_veto():
+    """Corroboration is not contradiction. Only a type the metadata did NOT claim
+    withdraws the claim."""
+    r = _row(
+        title="Part Time Weekend Support Representative",
+        source="greenhouse",
+        source_extra={"Time Type": "Part Time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+
+
+def test_a_title_the_metadata_never_claimed_still_fills_when_silent():
+    """The overwhelmingly common case: the title says nothing about schedule at all,
+    so there is nothing to contradict and the metadata stands."""
+    r = _row(
+        title="Senior Software Engineer, Backend",
+        source="greenhouse",
+        source_extra={"Employment Type": "Full-time"},
+    )
+    assert r["employment_type"] == "FULL_TIME"
+
+
+def test_the_title_is_a_veto_and_never_a_rival_answer():
+    """THE ASYMMETRY IS THE DESIGN. Reading a title as a competing answer was measured
+    and abandoned: three attempts surfaced three false-positive classes, each a
+    NON-TECH role invisible on the 94 tech boards this corpus is built from — `b2b`
+    ("B2B Performance Marketing", a market), `trainee` ("Manager Trainee", a permanent
+    trades role) and `contract` ("Contract Management Lead", a domain noun).
+
+    Under a veto those cost one unfilled row each — `None`, which honestly means "not
+    established" — instead of a wrong assertion. This test pins the DIRECTION of
+    failure on a row that genuinely IS contradicted: the metadata's claim is
+    withdrawn, and the title's reading must never take its place."""
+    r = _row(
+        title="Store Lead - Part Time",
+        source="greenhouse",
+        source_extra={"Time Type": "Full Time"},
+    )
+    assert r["employment_type"] != "PART_TIME", "the title was treated as an answer"
+    assert r["employment_type"] is None  # withdrawn, not replaced
+    assert r["employment_type_raw"] is None
+
+
+def test_the_veto_does_not_fire_on_domain_usage():
+    """THE LEAD'S CONDITION on this change, and it was the right one. An employment
+    word can name what the job is ABOUT (`Contract Management Lead`), a market
+    (`B2B Performance Marketing`) or a training grade (`Manager Trainee`) — all
+    permanent roles. Measured on 8,526 live fills: without this guard, **54 of 163
+    vetoes (33.1%) were these**, each a correct fill thrown away. Every one is a
+    NON-TECH role shape, which is why none appear in the 94-board tech corpus."""
+    for title in (
+        "Contract Management Lead | Supply Chain",
+        "Contractor Special Security Officer",
+        "Senior Associate, B2B Performance Marketing",
+        "Manager Trainee",
+        "Commercial Door Technician Trainee",
+    ):
+        r = _row(
+            title=title, source="greenhouse", source_extra={"Time Type": "Full Time"}
+        )
+        assert r["employment_type"] == "FULL_TIME", f"domain usage vetoed: {title}"
+
+
+def test_a_second_axis_in_the_title_is_not_a_contradiction():
+    """`Customer Operations Intern - Part-time` speaks INTERN *and* PART_TIME while the
+    metadata says INTERN — one axis corroborated and a second added. The veto compares
+    by OVERLAP, not difference, so it fires only when the two share no type at all."""
+    r = _row(
+        title="Customer Operations Intern - Part-time Fall 2026",
+        source="greenhouse",
+        source_extra={"Employment Type": "Intern"},
+    )
+    assert r["employment_type"] == "INTERN"
+
+
+def test_two_names_for_one_arrangement_are_not_a_contradiction():
+    """A VOCABULARY GRANULARITY MISMATCH, not a disagreement. An employer's form offers
+    Full-time/Part-time with no per-diem option, so a nursing manager picks Part-time
+    and writes `Per Diem` in the title; `(Fixed-Term Contract)` against TEMPORARY is
+    the same shape. The title is more specific than the form allowed. Vetoing on it
+    discarded 40 rows the metadata had right, and it restores the repo's own rule that
+    a structured signal stands when nothing actually contradicts it.
+
+    The class is 100% NON-TECH — nursing and creative contract work — and measures
+    zero on the 94 tech boards this rule was designed against. Third such class in
+    this lens."""
+    r = _row(
+        title="Per Diem Registered Nurse - Pre-Op/PACU",
+        source="greenhouse",
+        source_extra={"Employment Type": "Part-time"},
+    )
+    assert r["employment_type"] == "PART_TIME"
+    r = _row(
+        title="Patient Access Specialist (Fixed-Term Contract)",
+        source="greenhouse",
+        source_extra={"Worker Sub-Type": "Temporary"},
+    )
+    assert r["employment_type"] == "TEMPORARY"
+    # ...and a genuine cross-axis contradiction still vetoes.
+    assert (
+        _row(
+            title="Store Lead - Part Time",
+            source="greenhouse",
+            source_extra={"Time Type": "Full Time"},
+        )["employment_type"]
+        is None
+    )
+
+
+def test_a_record_is_ordered_for_a_person_to_read():
+    """The owner opened the harvest output and could not read it. `company` came 21
+    fields in, BELOW the 6,870-character `text` body; `title_root` sat 15 fields from
+    the `title` it decomposes. Key order carried no decision at all -- it was whatever
+    each adapter's dict literal listed, then whatever `_coerce` appended.
+
+    `text` is 72% of the median record, so wherever the body sits, everything after it
+    is past a wall of prose. It goes last.
+    """
+    p = engine._coerce(
+        {
+            "title": "Senior AI Engineer",
+            "company": "Acme",
+            "url": "https://x/1",
+            "source": "greenhouse",
+            "location": "Austin, TX",
+            "text": "a body",
+        }
+    )
+    p["score"], p["signals"], p["dedup_key"] = 10, "remote", "acme|ai engineer|us"
+    engine._reorder(p)
+    keys = list(p)
+
+    assert keys[0] == "title", "the role comes first"
+    assert keys.index("company") < keys.index("text"), (
+        "company must not sit below the body -- that is the defect this fixes"
+    )
+    assert keys.index("title_root") == keys.index("title") + 1
+    assert keys[-1] == "sections" and keys[-3] == "text", "the body goes LAST"
+    for group in (("salary", "salary_min", "salary_max"), ("city", "state", "country")):
+        spans = [keys.index(k) for k in group if k in keys]
+        assert spans == sorted(spans) and spans[-1] - spans[0] == len(spans) - 1, (
+            f"{group[0]}'s group is split across the record"
+        )
+
+
+def test_reordering_can_never_drop_a_key():
+    """An allowlist here would mean adding a contract field and silently deleting it
+    from every record until someone remembered `_READING_ORDER` -- the same class of
+    failure as emit._nested's hand-written field list. Unknown keys are KEPT."""
+    p = {"title": "T", "text": "b", "a_brand_new_field": 1, "zzz": None}
+    before = dict(p)
+    engine._reorder(p)
+    assert p == before, "reordering changed a value"
+    assert set(p) == set(before), "reordering lost a key"
+    assert list(p)[0] == "title" and "a_brand_new_field" in p
+
+
+def test_harvest_actually_orders_the_rows_it_returns(monkeypatch):
+    """THE WIRING, not the helper. `test_a_record_is_ordered_for_a_person_to_read`
+    calls `_reorder` directly, so deleting the call site in `harvest` leaves it green
+    while every row a consumer receives goes back to adapter-literal order. This is
+    the test that goes red for that, and it is the shape the record is actually
+    delivered in.
+    """
+
+    def fake_breadth(_queries):
+        # Adapter-literal order: `text` early, `company` late -- the defect verbatim.
+        return [
+            {
+                "title": "AI Engineer",
+                "text": (
+                    "Build things with LLMs. Remote. "
+                    "We are unable to sponsor visas for this role."
+                ),
+                "location": "Remote",
+                "url": "https://x/1",
+                "posted": "2026-08-01",
+                "company": "Acme",
+                "source": "fake",
+            }
+        ]
+
+    cfg = config.Config()
+    cfg.remote_only = False
+    cfg.min_score = -999
+    cfg.max_age_days = 100000
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+    rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+
+    assert rows, "the fixture produced no row to judge"
+    keys = list(rows[0])
+    assert keys[0] == "title"
+    assert keys.index("company") < keys.index("text"), (
+        "harvest returned a row in adapter order -- the _reorder call site is missing"
+    )
+    assert keys[-1] == "sections", "the body must be last in a delivered row"
+    # AND THE ENRICHMENT HOOK ACTUALLY RAN. Deleting `extract.enrich(p)` from
+    # `_consume` left the whole suite green: every sponsorship test calls the module
+    # directly, and `_coerce` still ensures the four keys present-and-`None`, so the
+    # contract test passes and the feed emits `{"state": null}` on every row forever.
+    # That is 0.7.0's `employer_org` failure one layer up -- a field that is wired to
+    # nothing and looks identical to a field with nothing to say.
+    assert rows[0]["sponsorship"] == "not_offered", (
+        "extract.enrich did not run inside _consume -- the hook is missing"
+    )
+    assert rows[0]["sponsorship_basis"] == "sentence"
+
+
+def test_the_output_shape_levers_reach_a_library_caller(monkeypatch):
+    """THE WIRING TEST, and it exists because the first version of this failed it.
+
+    `--no-text` originally passed straight from argparse into `emit.records`. That put
+    the single largest lever on the record (the body is ~72% of its bytes) behind the
+    CLI *and* inside `emit` -- the one module the only known consumer imports nowhere.
+    A CLI answer to a library problem, which is the same mistake this release exists
+    to correct one layer up.
+
+    So the levers live on `Config`, which `harvest` installs process-wide, and this
+    asserts what a LIBRARY caller sees from `engine.harvest()` -- never the CLI.
+    """
+
+    def fake_breadth(_queries):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": "Acme",
+                "url": "https://x/1",
+                "location": "Remote",
+                "posted": "2026-08-01",
+                "text": "Build things with LLMs. Remote.",
+                "source": "fake",
+            }
+        ]
+
+    def harvest_with(**kw):
+        cfg = config.Config()
+        cfg.remote_only, cfg.min_score, cfg.max_age_days = False, -999, 100000
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        monkeypatch.setattr(engine, "enabled_depth", lambda c: {})
+        monkeypatch.setattr(engine, "enabled_breadth", lambda c: [("fake", fake_breadth)])
+        rows, _, _ = engine.harvest(cfg, watchlist_path=None)
+        assert rows, "the fixture produced no row to judge"
+        return rows[0]
+
+    base = harvest_with()
+    assert "text" in base and any(v is None for v in base.values()), (
+        "defaults must keep the body and keep unknown keys present as None"
+    )
+
+    lean = harvest_with(include_text=False)
+    assert "text" not in lean and "text_basis" not in lean
+    assert lean["title"] == base["title"], "a display lever must not change a value"
+
+    dense = harvest_with(omit_empty=True)
+    assert not any(v is None or v == "" for v in dense.values())
+    assert len(dense) < len(base), "omit_empty removed nothing"
+    # Same values for every key that survived -- this drops keys, never rewrites them.
+    assert all(dense[k] == base[k] for k in dense)
+
+
+def test_omit_empty_keeps_the_lists_that_mean_something():
+    """`[]` is not `None` and the contract turns on the difference. `remote_areas: []`
+    means the posting STATED it is open anywhere; `sections: []` means we read the body
+    and it carried no headers. Both took work to establish. Only None and "" go."""
+    cfg = config.Config()
+    cfg.omit_empty = True
+    p = {
+        "title": "E",
+        "remote_areas": [],
+        "sections": [],
+        "source_extra": {},
+        "tags": None,
+        "salary": "",
+    }
+    engine._shape(p, cfg)
+    assert p["remote_areas"] == [] and p["sections"] == [] and p["source_extra"] == {}
+    assert "tags" not in p and "salary" not in p
+
+
+def test_output_levers_default_to_the_shape_that_was_always_emitted():
+    """Both default OFF. `_CONTRACT_FIELDS` are ensured-present-and-None on purpose so
+    a consumer can write `WHERE remote_type IS NOT NULL` and mean it; dropping a key
+    changes `k in record` and `.keys()`, which is a contract change, not a display
+    choice. Nobody opts into that by upgrading."""
+    c = config.Config()
+    assert c.include_text is True and c.omit_empty is False
+    p = {"title": "E", "text": "body", "tags": None}
+    engine._shape(p, c)
+    assert p == {"title": "E", "text": "body", "tags": None}
+
+
+# ── section_text: the reader for the spans clean_with_sections produces ──────
+def test_section_text_distinguishes_absent_from_empty():
+    """FIVE states reach this function, and `str | None` has to carry them honestly.
+
+    The one that matters is `""` vs None. `clean_with_sections` gives a header with
+    nothing under it a ZERO-LENGTH span deliberately -- "an empty section, not a failed
+    lookup", 93,054 of 981,857 located spans. Collapsing that into None destroys the
+    same distinction `sections: []` keeps against `sections: null`.
+    """
+    from job_radar.sections import section_text
+
+    body = "Do the work. Have the skills. Get paid."
+    #       0123456789...
+    rec = {
+        "text": body,
+        "sections": [
+            {"type": "responsibilities", "header": "What you'll do", "start": 0, "end": 13},
+            {"type": "requirements", "header": "What you need", "start": 13, "end": 29},
+            {"type": "benefits", "header": "Perks", "start": 29, "end": 29},  # empty
+            {"type": "eeo_legal", "header": "Legal"},  # located nowhere
+        ],
+    }
+    assert section_text(rec, "responsibilities") == "Do the work. "
+    assert section_text(rec, "requirements") == "Have the skills."
+    # PRESENT AND EMPTY -- must be "" and must NOT be None
+    assert section_text(rec, "benefits") == ""
+    assert section_text(rec, "benefits") is not None
+    # present but unlocatable -> None, and must not raise on the missing `start`
+    assert section_text(rec, "eeo_legal") is None
+    # no section of this kind at all -> None
+    assert section_text(rec, "compensation") is None
+
+    # no body, and a body with no sections at all
+    assert section_text({"text": None, "sections": []}, "requirements") is None
+    assert section_text({"text": body, "sections": None}, "requirements") is None
+    assert section_text({}, "requirements") is None
+
+    # FIRST section of the kind wins when an employer repeats a header
+    twice = {
+        "text": body,
+        "sections": [
+            {"type": "requirements", "start": 0, "end": 4},
+            {"type": "requirements", "start": 5, "end": 12},
+        ],
+    }
+    assert section_text(twice, "requirements") == "Do t"  # not "e work."
+
+
+def test_section_text_refuses_a_span_that_does_not_fit_its_text():
+    """THE SILENT ONE. `text[start:end]` with `end` past the end does NOT raise in
+    Python -- it returns a short slice, or "" when `start` is also past the end.
+
+    0 spans against a body this engine produced; 36,270 against a downstream copy that
+    truncated `text` without the spans that index it. So this arrives from a CONSUMER's
+    data and is indistinguishable from an empty section unless it is checked. A span
+    that does not fit its text is a disagreement, and None is the honest answer.
+    """
+    from job_radar.sections import section_text
+
+    truncated = {"text": "short body", "sections": [
+        {"type": "requirements", "header": "Reqs", "start": 4, "end": 900}]}
+    assert section_text(truncated, "requirements") is None, (
+        "a span running past the text returned a silently short slice"
+    )
+    wholly_past = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 500, "end": 900}]}
+    assert section_text(wholly_past, "requirements") is None, (
+        'a span entirely past the text returned "" and read as an empty section'
+    )
+    backwards = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 8, "end": 3}]}
+    assert section_text(backwards, "requirements") is None
+    negative = {"text": "short body", "sections": [
+        {"type": "requirements", "start": -5, "end": 4}]}
+    assert section_text(negative, "requirements") is None
+
+    # A NON-INT OFFSET, which a record round-tripped through JSON or a CSV can carry.
+    # `"3" < 0` raises TypeError and `text["3":"7"]` raises, so the type check is not
+    # decorative -- without it this is an exception rather than a None. Mutation-tested:
+    # relaxing the guard to `if start is None` survives every other case in this file,
+    # because the unlocatable fixture above has no `start` KEY at all and both guards
+    # catch that one. This is the case that separates them.
+    stringy = {"text": "short body", "sections": [
+        {"type": "requirements", "start": "3", "end": "7"}]}
+    assert section_text(stringy, "requirements") is None
+    explicit_none = {"text": "short body", "sections": [
+        {"type": "requirements", "start": None, "end": None}]}
+    assert section_text(explicit_none, "requirements") is None
+    floaty = {"text": "short body", "sections": [
+        {"type": "requirements", "start": 1.0, "end": 4.0}]}
+    assert section_text(floaty, "requirements") is None
+
+
+# ── salary_kind: WHAT the figure measures, never how it was extracted ────────
+def test_salary_kind_reads_the_label_beside_the_figure():
+    """`salary_basis` records HOW a figure was extracted and never WHAT it measures.
+    That gap is why on-target-earnings bands and a $32,000-$48,000 new-hire EQUITY
+    GRANT sat in columns the README defines as what an employer committed to as base.
+    """
+    k = engine.salary_kind
+    assert k("Equity grade: 4\nNew hire equity: $32,000-$48,000", "$32,000-$48,000") == (
+        "equity"
+    )
+    assert k("OTE Range: $160,000-$205,000 + equity", "$160,000-$205,000") == "ote"
+    # `total_comp` was REMOVED -- its precision measured 3/22 and 5/25 on blind labels.
+    # A bare "total compensation" phrase now refuses rather than asserting.
+    assert k(
+        "The estimated total compensation for this role ranges from $210,000 - $250,000",
+        "$210,000 - $250,000",
+    ) == "unspecified"
+    assert k("USA base pay range per year: $195,000 - $255,000", "$195,000 - $255,000") == (
+        "base"
+    )
+    # AN HOURLY RATE IS BASE PAY, NOT ITS OWN KIND -- the interval is `salary_period`,
+    # which already carries it. Two columns for one fact is how they drift.
+    assert k("Hourly rate: $45-$60", "$45-$60") == "base"
+    assert "hourly_rate" not in vocab.SALARY_KINDS
+
+
+def test_salary_kind_never_infers_base_from_an_absent_label():
+    """`unspecified` means NO QUANTITY WORD IN THE WINDOW -- not "a word I judged
+    insufficiently specific".
+
+    A bare `Salary Range` / `Pay Range` / `Compensation Range` NAMES base pay as
+    distinct from bonus, equity and OTE, so it is a label. That was measured before it
+    was decided: of 30,283 rows with a locatable display string, 11,657 carry a
+    qualified cue (`base salary`, `annual base`) and **14,638 carry only a bare one** --
+    the bare population is the larger, and a detector without those cues refused 77 of
+    150 hand-labelled rows the rubric calls `base`.
+
+    What is still never inferred is a kind from NOTHING. A figure with no quantity word
+    anywhere in its window stays `unspecified`, and so does one whose display string
+    cannot be found in the body at all (28.0% of rows with a salary).
+    """
+    k = engine.salary_kind
+    # a bare quantity word IS a label
+    assert k("Salary Range: $190,000-$270,000", "$190,000-$270,000") == "base"
+    assert k("Pay Range $53,560-$67,000", "$53,560-$67,000") == "base"
+    # ...but a figure with NO quantity word near it is still unspecified
+    assert k("Join our team! $190,000-$270,000 available.", "$190,000-$270,000") == (
+        "unspecified"
+    )
+    # no window at all -- the display string is not in the body
+    assert k("a body that never quotes the figure", "$1-$2") == "unspecified"
+    assert k("", "$1-$2") == "unspecified"
+    assert k("some text", "") == "unspecified"
+    # `bonus` was REMOVED (0/25 on blind labels, twice), so this is no longer a tie --
+    # `base pay` is the only cue left and it wins outright.
+    assert k("bonus $100-$200 base pay", "$100-$200") == "base"
+
+
+def test_salary_kind_ignores_a_cue_in_the_prior_sentence():
+    """THE ROWS THIS RULE EXISTS FOR HAVE NO NEAR-SIDE CUE AT ALL.
+
+    That is the thing three of us missed. The argument for deleting this rule was that
+    once bare quantity words became `base` labels, a cue sits on the near side of the
+    break and wins on proximity anyway. True of the corpus as a whole; false of the rows
+    the rule actually touches, which carry a bare location or nothing:
+
+        "...is just one component of <co>'s total compensation package. New York City:"
+        "Additional compensation such as Bonus, Commission, Equity ... may also apply."
+        "...eligible to be considered for an annual bonus. The range for Chicago is"
+
+    Proximity cannot rescue a row with nothing to be proximate to. Labelled exhaustively
+    and blind, 81 of 86 suppressed rows (94.2%) are genuinely `base` -- so without this
+    rule those 81 assert `bonus` or `total_comp` on a base salary.
+
+    These are real corpus shapes. Do not "simplify" them into something with a near-side
+    cue; the ABSENCE of one is the whole test.
+    """
+    k = engine.salary_kind
+    for text, sal in [
+        ("Your salary is just one component of Betterment's total compensation "
+         "package for employees. New York City: $155,000-$185,000", "$155,000-$185,000"),
+        ("Additional compensation such as Bonus, Commission, Equity and other "
+         "benefits may also apply. $140,000-$220,000", "$140,000-$220,000"),
+        ("You are eligible to be considered for an annual bonus. The range for the "
+         "Chicago metro area is $111,000 - $131,000", "$111,000 - $131,000"),
+    ]:
+        assert k(text, sal) == "unspecified", text[:60]
+
+    # THE COST, kept visible: a genuine governing label in the prior sentence is
+    # discarded too -- about half of such rows on a hand-labelled sample. Precision over
+    # recall; a refusal costs nothing where a wrong assertion is the defect.
+    assert k(
+        "The base pay ranges for a successful candidate are listed below. "
+        "CA, NY, CT, NJ $245,000-$258,500",
+        "$245,000-$258,500",
+    ) == "unspecified"
+
+
+def test_salary_kind_window_snaps_to_word_boundaries():
+    """A FIXED-OFFSET SLICE CAN MANUFACTURE A `\b` THAT WAS NOT THERE.
+
+    `remote` cut mid-word becomes `ote`, and `OTE` is a three-letter case-insensitive
+    token -- the worst possible shape for this. 6 of 813 OTE matches were that; the
+    wider exposure is 3,073 rows whose window contains `ote` only as a substring
+    (`quote`, `note`, `promote`, `denote`) against 763 carrying it as a word.
+    """
+    # "aaaremote" runs 0..9; the naive slice [3:9] is "remote" and yields the phantom
+    # `ote` boundary. Snapping widens left to the real word start and stops at the
+    # space, so the window sees "aaaremote" and no cue matches.
+    assert engine._snap("aaaremote bbb", 3, 9) == (0, 9)
+    assert engine._snap("xx remote yy", 5, 9) == (3, 9)
+
+    # A REAL ROW, not a construction. Koalafi and Cloudflare both put the word `remote`
+    # exactly 90 characters before their figure, so the naive window opens mid-word on
+    # "ote opportunities are available" and matches `\bote\b`. Snapping opens it on
+    # "Remote" instead. Three rows in the corpus have this shape and all three were
+    # labelled `ote` before the snap.
+    # THE OFFSET IS COMPUTED, NOT GUESSED, because the bug only fires when the window
+    # edge lands INSIDE a word. Three real rows have this shape -- Koalafi twice and
+    # Cloudflare -- each with `remote` exactly `_ADJ_WINDOW` characters before its
+    # figure, so the naive window opens on "ote opportunities…" and matches `\bote\b`.
+    # Without the snap all three were labelled `ote`.
+    sal = "$174,000-$226,000"
+    prefix = "This role can be performed remote"
+    body = prefix + " " + "y" * 85 + " " + sal
+    i = body.find(sal)
+    assert body[i - engine._ADJ_WINDOW :][:3] == "ote", "fixture drifted: no mid-word cut"
+    assert engine.salary_kind(body, sal) == "unspecified", (
+        "the window edge manufactured an `ote` cue out of `remote`"
+    )
+
+    # `base compensation` and `base hourly` earn their place because their ABSENCE
+    # caused false positives, not misses: without them the nearest surviving cue in
+    # these two real rows is `equity`.
+    k = engine.salary_kind
+    assert k(
+        "...bonus, equity, and a generous benefits program. "
+        "Base Compensation Range $65,000-$85,000",
+        "$65,000-$85,000",
+    ) == "base"
+    assert k(
+        "We believe in equity when it comes to compensation. For this role, the "
+        "anticipated base hourly range is $16 - $21",
+        "$16 - $21",
+    ) == "base"
+    # a real body where the naive slice would have produced `ote` from `remote`
+    pad = "x" * 200
+    text = pad + "work remotely. Remote opportunities available. Salary Range $90,000"
+    assert engine.salary_kind(text, "$90,000") == "base"
+
+
+def test_salary_kind_ignores_a_quantity_that_is_being_excluded():
+    """THE DOMINANT MULTI-CUE SHAPE, and it puts the WRONG cue closest to the figure.
+
+    "Annual base salary range (excluding equity and bonus): $218,025-$256,500" is a
+    BASE row, but `bonus` is the nearest word to the number by construction. Reading the
+    closest cue returns `bonus` -- actively wrong, and worse than refusing. 3,087 rows
+    put a parenthesis or an exclusion between the label and the number.
+    """
+    k = engine.salary_kind
+    assert k(
+        "Annual base salary range (excluding equity and bonus): $218,025-$256,500",
+        "$218,025-$256,500",
+    ) == "base"
+    assert k(
+        "US base salary range for this position (this does not include bonus, equity "
+        "and benefits): $183,000-$230,000",
+        "$183,000-$230,000",
+    ) == "base"
+    # ONLY A NEGATED PARENTHETICAL IS BLANKED. Blanking every parenthetical also
+    # destroys the ones that CONTAIN the label -- worth 192 rows on the corpus.
+    assert k("Pay Range (Base Pay): $230,000 - $275,000", "$230,000 - $275,000") == "base"
+
+
+def test_salary_kind_picks_the_nearest_cue_not_the_first_one_in_the_table():
+    """PROXIMITY DECIDES, NOT THE ORDER OF `_KIND_CUES`.
+
+    The cue table is ordered most-specific-first so a narrow pattern is not shadowed by
+    a broad one over the same span. It must NOT decide the answer -- `bonus` sits above
+    `base` in that table, so a table-order rule labels every "base salary … plus annual
+    bonus" row `bonus`.
+
+    Both strings below are real corpus windows, not constructed ones. Mutation-tested:
+    replacing `if best_d is None or d < best_d` with `if best_d is None` -- i.e. first
+    cue wins -- passes every OTHER assertion in this file and fails only here.
+    """
+    k = engine.salary_kind
+    assert k(
+        "Base salary range: $135,000 to $170,000 USD, plus annual bonus. "
+        "Final compensation will be determined by experience.",
+        "$135,000 to $170,000",
+    ) == "base"
+    assert k(
+        "What We Offer: The annual base salary range for this position is "
+        "$135,000 - $210,000. Additionally, this position is eligible for a bonus.",
+        "$135,000 - $210,000",
+    ) == "base"
+    # and the mirror, so this is not just "base always wins": a bonus figure with the
+    # word `base` further away must come back `bonus`.
+    # WAS: `bonus`. That member is gone; a real bonus figure now refuses rather than
+    # being labelled, which is the accepted cost of a cue that was right 0 times in 50.
+    assert k(
+        "This is in addition to your base salary. Annual bonus target: $10,000-$20,000",
+        "$10,000-$20,000",
+    ) == "unspecified"
+
+
+def test_equity_fires_only_inside_the_figures_own_clause():
+    """`equity` is SCOPE-RESTRICTED, and the boundary is where this nearly went wrong.
+
+    Unrestricted the cue fires on 81 corpus rows and is right on 15: an equity mention
+    on the NEXT line of a benefits list reads as the figure BEING equity. Restricted to
+    the figure's own clause it fires on 26 and keeps all 15.
+
+    A COLON IS NOT A CLAUSE BREAK, and treating it as one deletes every true positive
+    there is -- all 15 are `"New hire equity: $32,000-$48,000"`, colon included. A colon
+    INTRODUCES the figure it labels; it binds a label to its value, which is the exact
+    relationship this restriction detects. Measured: `.!?;` keeps 26 with all 15;
+    `.!?;:` keeps 11 with ZERO.
+    """
+    k = engine.salary_kind
+    # the labelled shape -- the motivating case for the whole field
+    assert k("Equity grade: 4\nNew hire equity: $32,000-$48,000", "$32,000-$48,000") == (
+        "equity"
+    )
+    assert k("New hire equity: $16,000-$24,000", "$16,000-$24,000") == "equity"
+
+    # a benefits line AFTER the figure is a different clause -- real corpus shapes
+    for text, sal in [
+        ("anticipated annual base salary for Member of Technical Staff: "
+         "$150,000-$200,000\nStock option grant and benefits package", "$150,000-$200,000"),
+        ("Salary: $120,000-$175,000\nValuable stock option plan", "$120,000-$175,000"),
+        ("The compensation band for this role is $70,000-$85,000; equity grant and "
+         "benefits for all team members", "$70,000-$85,000"),
+    ]:
+        assert k(text, sal) != "equity", text[:60]
+
+    # AN ADDITIVE CONNECTOR IS A BOUNDARY TOO, and only for `equity`. A label PRECEDES
+    # its value; a term joined by `+` or `plus` names a SEPARATE item -- the identical
+    # construction that made `bonus` right 0 times in 50. Measured on the shipped
+    # classifier: clause breaks alone retain 29 and are right on 15 (52%); with additive
+    # connectors, 15 and 15 (100%).
+    for text, sal in [
+        ("Salary Range: $180,000-$220,000 / year + attractive RSU package",
+         "$180,000-$220,000"),
+        ("New York City residents* $138,000-$214,000 + RSUs + benefits.",
+         "$138,000-$214,000"),
+        ("What We Offer\nSalary Range: $175,000-$220,000 and an equity grant",
+         "$175,000-$220,000"),
+    ]:
+        assert engine.salary_kind(text, sal) != "equity", text[:56]
+
+    # AND IT MUST NOT REACH `ote`. On-target earnings ARE base plus commission, so a `+`
+    # there describes the FIGURE'S OWN PARTS. Applying this boundary to `ote` destroys a
+    # true positive -- which is why the rule is scoped to one cue and says so.
+    assert engine.salary_kind(
+        "Estimated annual salary of $231,000-$275,000+ OTE, Base + Commissions",
+        "$231,000-$275,000",
+    ) == "ote"
+
+    # the boundary set itself, pinned so a future edit cannot quietly add `:`
+    assert ":" not in engine._CLAUSE_BREAK, (
+        "a colon binds a label to its figure; treating it as a break deletes every "
+        "true positive this cue has"
+    )
+    assert set(engine._CLAUSE_BREAK) == set(".!?;\n")
+
+
+def test_salary_kind_stays_inside_its_closed_vocabulary():
+    """THE PIN, and it cannot be the existing basis test.
+
+    `test_no_adapter_emits_a_basis_outside_its_closed_vocabulary` greps
+    `inspect.getsource(sources)`. `salary_kind` is computed in `engine`, so extending
+    that test to this field would pass VACUOUSLY -- green while asserting nothing. This
+    reads the literal AND exercises the classifier, which is the only combination that
+    can actually fail.
+    """
+    import inspect
+
+    # the literal, so a member added without thought is visible in a diff
+    assert vocab.SALARY_KINDS == frozenset({"base", "ote", "equity", "unspecified"})
+    # every string the classifier can emit is declared in that literal
+    emitted = {
+        kind for kind, _cue in engine._KIND_CUES
+    } | {"unspecified"}
+    assert emitted <= vocab.SALARY_KINDS, emitted - vocab.SALARY_KINDS
+    # and the source agrees -- a cue table entry outside the vocabulary fails here
+    src = inspect.getsource(engine)
+    assert '"hourly_rate"' not in src, "hourly_rate is salary_period's job, not a kind"
+    # `bonus` and `total_comp` were removed on measured precision (0/25 and 3/22-5/25 on
+    # blind labels). A cue for either must not come back without a new measurement.
+    for gone in ('"bonus"', '"total_comp"'):
+        assert f'({gone}, re.compile' not in src, f"{gone} cue is back, unmeasured"
+
+    # exercised, not only read: hostile and ordinary inputs both stay in-vocabulary
+    for text, needle in [
+        ("base pay $1-$2", "$1-$2"), ("", ""), ("no figure here", "$9"),
+        ("(excluding bonus) $5", "$5"), ("ote bonus $7", "$7"),
+    ]:
+        assert engine.salary_kind(text, needle) in vocab.SALARY_KINDS
+
+
+def test_salary_kind_is_set_above_the_fill_only_guard():
+    """A VENDOR-STATED FIGURE WITH AN OTE LABEL IS THE DEFECT THIS FIELD EXISTS FOR.
+
+    `derive_salary` returns early when a vendor already sent numbers. Setting the kind
+    below that guard labelled 411 of 41,665 rows and found ZERO equity -- the field
+    would have been blind to exactly the rows that motivated it.
+    """
+    p = {
+        "title": "t", "company": "c", "url": "u", "source": "greenhouse",
+        "salary": "$160,000-$205,000", "text": "OTE Range: $160,000-$205,000",
+        "salary_min": 160000.0, "salary_max": 205000.0,   # the vendor already sent them
+    }
+    engine.derive_salary(p)
+    assert p["salary_kind"] == "ote"
+    assert p["salary_min"] == 160000.0 and p["salary_max"] == 205000.0  # untouched
+
+    # None -- not "unspecified" -- when there is no figure at all. "no salary" and
+    # "a salary we could not label" are different facts.
+    q = {"title": "t", "company": "c", "url": "u", "source": "s"}
+    engine._coerce(q)
+    engine.derive_salary(q)
+    assert q["salary_kind"] is None
+
+
+def test_salary_kind_reads_ote_out_of_a_parenthetical():
+    """PARENTHESES ARE OTE'S PRIMARY CARRIER, not a marginal case.
+
+    A range described as base PLUS commission IS on-target earnings -- definitional,
+    not a heuristic tuned on a sample. Boards write it that way, and the nearest token
+    INSIDE the parenthetical is `base` or `commission`, so without a cue for the whole
+    form the row reads `base` or `bonus`. Sixteen of ~24 residual errors on a
+    hand-labelled sample were this one shape.
+
+    This is also why only NEGATED parentheticals are blanked: blanking them all would
+    destroy the label on exactly these rows.
+    """
+    k = engine.salary_kind
+    for text in [
+        "the on-target earnings (base pay + commissions) for this role: $160,000-$220,000",
+        "Total OTE Range (Base Salary + Variable) $175,000-$200,000",
+        "Estimated Annual Cash Compensation (Base + On-Target Commission) $180,000-$210,000",
+        "Compensation Range (TTC / OTE) $293,100-$544,200",
+    ]:
+        sal = text.rsplit(" ", 1)[1]
+        assert k(text, sal) == "ote", text[:60]
+
+    # A LONGER MATCH WINS ONLY WHEN IT CONTAINS THE SHORTER ONE. In the third row above
+    # `Commission` matches `bonus` INSIDE the span `Base + On-Target Commission` that
+    # matches `ote`; that is one phrase read at two precisions, not two signals. Two
+    # UNRELATED cues equidistant from the figure are a real ambiguity and still refuse,
+    # however long either is.
+    assert k("bonus $100-$200 base pay", "$100-$200") == "base"
+
+
+def test_every_test_name_a_source_comment_cites_actually_exists():
+    """A COMMENT-TO-TEST CROSS-REFERENCE IS CHECKED BY NOTHING ELSE HERE, and this release
+    came within one merge-resolution choice of proving it. Two commits renamed the same
+    test differently -- `..._but_not_its_parse` and `..._but_not_its_figure` -- while a
+    `sources.py` comment cited it by name. Had the merge taken one commit's rename beside
+    the other's comment, the register would point at a test that does not exist and `ruff`,
+    `mypy` and `pytest` would all have stayed green, because no gate reads a comment.
+
+    This repo treats a wrong comment as a bug, so a comment naming a test that was renamed
+    or deleted is a bug nothing was catching. Cheap to close: 2 names cited today, 517
+    defined."""
+    import pathlib
+    import re
+
+    cited: dict[str, str] = {}
+    for f in sorted(pathlib.Path("job_radar").glob("*.py")):
+        for m in re.finditer(r"\btest_[a-z0-9_]{6,}", f.read_text(encoding="utf-8")):
+            cited.setdefault(m.group(0), f.name)
+
+    defined: set[str] = set()
+    for f in sorted(pathlib.Path("tests").glob("*.py")):
+        defined |= set(
+            re.findall(r"^def (test_[a-z0-9_]+)", f.read_text(encoding="utf-8"), re.M)
+        )
+
+    assert cited, "the scanner found no cited names -- it has stopped scanning"
+    missing = {n: where for n, where in cited.items() if n not in defined}
+    assert not missing, (
+        f"a source comment names a test that does not exist: {missing}. "
+        "Rename the citation with the test, or delete it."
+    )
+
+
+# ── company: FILL-ONLY from the vendor's own name (0.9.0) ────────────────────
+def _vendor_depth(monkeypatch, vendor):
+    """One greenhouse board whose postings carry `vendor` as their own company.
+
+    `vendor=None` models a board the ATS reports no owner for -- the adapter emits the
+    key as None rather than omitting it, so the engine sees an explicit "the source did
+    not say" and must not invent one."""
+
+    def fake(slug, **kw):
+        return [
+            {
+                "title": "AI Engineer",
+                "company": vendor,
+                "location": "Remote",
+                "url": f"https://x/{slug}",
+                "posted": _days_ago(2),
+                "text": "python",
+                "salary": "",
+            }
+        ]
+
+    monkeypatch.setattr(engine, "enabled_depth", lambda c: {"greenhouse": fake})
+    monkeypatch.setattr(engine, "enabled_breadth", lambda c: [])
+
+
+def test_a_watchlist_name_byte_equal_to_the_slug_is_filled_from_the_vendor(monkeypatch):
+    """The defect: `seed._seeded` writes `"name": entry["slug"]` on every mined board,
+    so a user read `langanengineeringandenvironmentalservicesllc` as the employer.
+
+    5,052 of 5,052 `cdx-discovery` boards in the reference universe are byte-equal like
+    this -- 100%, no exceptions -- which is what makes the population exact rather than
+    a guess about casing. Three casing tests were tried first and all three were wrong:
+    they cannot tell a slug from a lowercase brand like `deel`."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[
+            {"name": "abnormalsecurity", "ats": "greenhouse", "slug": "abnormalsecurity"}
+        ],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["Abnormal"]
+
+
+def test_a_missing_watchlist_name_is_also_filled_from_the_vendor(monkeypatch):
+    """`dedup.board_entry` returns {"ats","slug"} with no `name` key at all, so
+    `c.get("name", slug)` fell through to the slug. 0 such entries exist on disk today
+    (`seed._seeded` renames them before they land), but the fallback is live code and
+    the fill must cover it -- otherwise the fix depends on which producer wrote the
+    entry, which is not a property anyone reading the record can see."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    rows, _, errors = engine.harvest(
+        _cfg(), companies=[{"ats": "greenhouse", "slug": "abnormalsecurity"}]
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["Abnormal"]
+
+
+def test_a_curated_watchlist_name_is_never_overwritten_by_the_vendor(monkeypatch):
+    """FILL-ONLY, and this is the assertion that makes it fill-only rather than
+    prefer-vendor. Measured live on 40 curated boards: the vendor disagreed on 6, in
+    BOTH directions -- 'DoorDash' -> 'DoorDash USA' but also 'Canonical Ltd.' ->
+    'Canonical' -- so no prefer-longer/prefer-shorter tie-break exists either.
+    `allwebleads` -> 'AWL' is the shape that settles it: a vendor's own name can be
+    less legible than the slug, which no win rate offsets."""
+    _vendor_depth(monkeypatch, "DoorDash USA")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[{"name": "DoorDash", "ats": "greenhouse", "slug": "doordashusa"}],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["DoorDash"]
+
+
+def test_a_board_the_vendor_does_not_name_keeps_the_slug(monkeypatch):
+    """A wrong name is worse than an ugly one. With no vendor name the slug stands --
+    and `None` must not arrive as the string "None" via the `_REQUIRED_TEXT` pass."""
+    _vendor_depth(monkeypatch, None)
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[
+            {"name": "somemineboard", "ats": "greenhouse", "slug": "somemineboard"}
+        ],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["somemineboard"]
+
+
+def test_a_vendor_company_that_is_only_whitespace_does_not_win(monkeypatch):
+    """`'   '` is not a name. It is a truthy string, so a bare `vendor or name` would
+    have silently replaced the slug with a blank employer column."""
+    _vendor_depth(monkeypatch, "   ")
+    rows, _, errors = engine.harvest(
+        _cfg(),
+        companies=[{"name": "someboard", "ats": "greenhouse", "slug": "someboard"}],
+    )
+    assert not errors
+    assert [r["company"] for r in rows] == ["someboard"]
+
+
+def test_vendor_company_edge_whitespace_is_stripped(monkeypatch):
+    """Greenhouse ships edge whitespace in `company_name` on roughly one board in ten
+    -- ' Higher Logic', 'Home Chef  ', ' ALO', 'Brandtech+ ', 'Horace Mann ' across
+    three live samples taken by two agents against two endpoints. `company` was
+    excluded from `_coerce`'s strip loop because it came from the watchlist; it now
+    comes from the vendor, which is what makes this the right layer."""
+    _vendor_depth(monkeypatch, " Higher Logic")
+    rows, _, _ = engine.harvest(
+        _cfg(),
+        companies=[{"name": "higherlogic", "ats": "greenhouse", "slug": "higherlogic"}],
+    )
+    assert [r["company"] for r in rows] == ["Higher Logic"]
+
+
+def test_a_renamed_frontier_board_still_scores_as_frontier(monkeypatch):
+    """A BUG THIS CHANGE INTRODUCES, fixed in the same commit. `meta` is keyed on
+    `norm(watchlist name)` and `_consume` reads `meta.get(norm(p["company"]))`, so
+    filling the company moved the lookup off its own entry: `frontier` and `local`
+    silently stopped applying to every board the fill renamed. No error, no log line
+    -- only a score that quietly moved by `cfg.frontier_penalty`.
+
+    Measured before the re-key: 19.0 for a filled frontier board against 9.0 for the
+    same board with a curated name. Exposure on disk today is 0 entries (no flagged
+    watchlist entry is byte-equal to its slug), which is why nothing caught it."""
+    _vendor_depth(monkeypatch, "Abnormal")
+    cfg = _cfg()
+    rows, _, _ = engine.harvest(
+        cfg,
+        companies=[
+            {
+                "name": "abnormalsecurity",
+                "ats": "greenhouse",
+                "slug": "abnormalsecurity",
+                "frontier": True,
+            }
+        ],
+    )
+    assert [r["company"] for r in rows] == ["Abnormal"]
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"frontier" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("frontier") for x in sigs), sigs
+
+
+def test_filling_the_company_does_not_move_the_dedup_key_for_whitespace(monkeypatch):
+    """The accepted scope of the strip change, pinned rather than asserted in prose:
+    `norm` collapses non-alphanumerics, so ' Higher Logic' and 'Higher Logic' already
+    key identically. If that stopped being true, every stored row for the board would
+    orphan and lose its `first_seen` and `status`."""
+    from job_radar import dedup
+
+    assert dedup.norm(" Higher Logic") == dedup.norm("Higher Logic")
+    assert dedup.company_block({"company": " ALO"}) == dedup.company_block(
+        {"company": "ALO"}
+    )
+
+
+def test_a_nameless_entry_keeps_its_frontier_and_local_flags(monkeypatch):
+    """TWO SITES, TWO DIFFERENT DEFAULTS FOR ONE MISSING KEY.
+
+    `meta` was keyed on `norm(c.get("name", ""))` while `_consume` reads
+    `meta.get(norm(p["company"]))`, and the stamp defaults to the SLUG -- so an entry
+    with no `name` was filed under `norm("")`, never matched, and `frontier`/`local`
+    silently did nothing for it. Measured before the fix: nameless + `frontier` scored
+    11 against a curated board's 1; nameless + `local` scored 11 against 21.
+
+    PREDATES the company fill and is not caused by it. The fill's own alias did not
+    cover it either, because `norm(name) in meta` is False for an entry that has no
+    name -- which is exactly what that comment's "every board it renames" got wrong.
+
+    Exposure on disk is 0: no entry in any shipped watchlist is nameless. That is why
+    nothing caught it, and why this test exists rather than a measurement.
+    """
+    _vendor_depth(monkeypatch, "Abnormal")
+    cfg = _cfg()
+    rows, _, _ = engine.harvest(
+        cfg, companies=[{"ats": "greenhouse", "slug": "abn", "frontier": True}]
+    )
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"frontier" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("frontier") for x in sigs), sigs
+
+    rows, _, _ = engine.harvest(
+        cfg, companies=[{"ats": "greenhouse", "slug": "abn", "local": True}]
+    )
+    sigs = [x.strip() for x in (rows[0].get("signals") or "").split(",")]
+    # EXACT TOKEN, not a substring: `"local" in signals` is true of any signal
+    # that merely CONTAINS it, so the assert would pass on a signal set that
+    # never carried the flag.
+    assert any(x.startswith("local") for x in sigs), sigs
+
+def test_a_section_that_cannot_be_located_emits_NULL_offsets_not_ABSENT_KEYS():
+    """THE NESTED OBJECT DID NOT HONOR THE TOP LEVEL'S TYPE DISCIPLINE, and nothing at
+    the row level hinted at it -- the 48-field record keyset is perfectly uniform across
+    103,489 rows, which is exactly what made this survive review.
+
+    A failed `find` used to append the entry untouched, so that span carried two keys
+    while every other span carried four. A consumer writing the obvious `s["start"]` got
+    a KeyError on 3,116 of 103,489 rows (3.01%), 4,692 of 993,070 spans, 694 distinct
+    companies -- broad, not one template.
+
+    The refusal to guess an offset is the design and is unchanged. What is pinned here is
+    that the refusal is spelled `None`, and that it stays DISTINGUISHABLE from the
+    zero-length case, which writes an integer meaning "an empty section, located here".
+    Collapsing those two would destroy the only self-check this design has.
+    """
+    # `<br>` inside a header is the known, singular cause of a failed lookup: the
+    # splitter collapses it to a space while the cleaner turns it into a newline, so
+    # `find` misses. 7 of 30,145 headers on a real corpus.
+    raw = "<strong>Key<br/>Duties</strong><p>Ship the thing.</p>"
+    text, spans = util.clean_with_sections(raw)
+    assert spans, "no spans produced, so this proved nothing"
+    for sp in spans:
+        assert set(sp) >= {"type", "header", "start", "end"}, f"missing keys: {sp}"
+        # the shape a naive consumer writes -- it must not raise
+        _ = sp["start"], sp["end"]
+    located = [s for s in spans if s["start"] is not None]
+    for s in located:
+        assert isinstance(s["start"], int) and isinstance(s["end"], int)
+        assert text[s["start"] : s["end"]] or s["start"] == s["end"]
+
+
+def test_salary_currency_basis_vocabulary_is_closed_read_from_the_engine_source():
+    """Every `salary_currency_basis` literal in engine.py is in the vocabulary.
+
+    Enforced by reading the SOURCE, the same mechanism
+    `test_every_basis_field_uses_its_closed_vocabulary` applies to the adapters --
+    but pointed at engine.py, because this basis is decided in the pipeline rather
+    than by any adapter. A typo'd basis fails here rather than in whatever consumer
+    eventually branches on it.
+    """
+    import inspect
+    import re as _re
+
+    src = inspect.getsource(engine)
+    used = set(_re.findall(r'"salary_currency_basis"\]\s*=\s*"([a-z_]+)"', src))
+    assert used, "found no assignments to read -- this test would pass vacuously"
+    illegal = used - vocab.SALARY_CURRENCY_BASES
+    assert not illegal, f"engine emits {sorted(illegal)}"
+    # and every member is actually reachable, so a dead value cannot rot in the set
+    assert used == set(vocab.SALARY_CURRENCY_BASES), (
+        f"vocabulary and code disagree: only {sorted(used)} are assigned"
+    )
+
+
+def test_a_vendor_currency_is_not_labelled_as_a_code_beside_the_figure():
+    """THE FINDING OF THIS PHASE, and the reason there are four values and not three.
+
+    12,299 of 41,944 amount-bearing rows get their currency from the source's own
+    structured field, and on 12,142 of them (98.72%) `_adjacent_evidence` never reads a
+    window at all -- a vendor-structured salary's display string is SYNTHESIZED by the
+    adapter, so `text.find(display)` fails on 98.72% of them -- NOT "by construction",
+    which `vocab.py` records as false: it SUCCEEDS on 157 of the 12,299, and 20 of those
+    carry one ISO code. The basis names how the value was decided, and the vendor field
+    decided it on all 12,299 either way. (ashby 10,321, lever 1,106, himalayas 656,
+    braintrust 54, jobicy 5) [full_flat_raw.ndjson, harvest 2026-08-25].
+
+    Labelling those `iso_adjacent` would assert the employer wrote a code beside a
+    figure when they did not -- the same provenance lie that
+    `test_a_remote_only_board_reports_board_scope_not_a_vendor_field` exists to
+    prevent one field over: the values are right, the provenance is not.
+    """
+    # THE REAL CALLER, not a hand-built dict: `vocab.google_salary` is the adapter
+    # path that makes the mechanism definition REQUIRED rather than merely tidy.
+    # It sets a currency while reporting `salary_basis="parsed"`, so a rule keyed
+    # on `"stated"` would call this `iso_adjacent` and assert an employer wrote a
+    # code beside a figure that Google assembled.
+    got = vocab.google_salary("$120,000 - $150,000 a year")
+    assert got["salary_currency"] == "USD" and got["salary_basis"] == "parsed", (
+        "the divergent state this test exists for is gone; re-derive the rule"
+    )
+    p = dict(got)
+    p["salary"] = "$120,000 - $150,000 a year"
+    p["text"] = "a body that never quotes the band and names no currency code"
+    engine.derive_salary(p)
+    assert p["salary_currency"] == "USD", "the adapter's own value must survive"
+    assert p["salary_currency_basis"] == "vendor_field"
+
+    # And a genuinely vendor-structured row, built through the chokepoint every
+    # adapter reaches rather than by hand, so the record is provably reachable.
+    v = vocab.salary(100_000, 120_000, currency="EUR", period="year", basis="stated")
+    v["salary"] = "100,000 - 120,000"
+    v["text"] = "a body naming no currency code at all"
+    engine.derive_salary(v)
+    assert v["salary_currency"] == "EUR"
+    assert v["salary_currency_basis"] == "vendor_field"
+
+
+def test_one_adjacent_code_is_iso_adjacent_and_two_are_a_labelled_refusal():
+    """The refusal is correct and stays; what changes is that it is now visible.
+
+    `$` is shared by USD/CAD/AUD/SGD/HKD/MXN, so two codes in the window is a refusal
+    rather than a coin flip. Hand-read, 86 of the 89 such rows in the corpus are
+    genuine dual-currency postings -- `Canada Base Salary Band ... / USA Base Salary
+    Band ...`, one quoting three. The employers declined to pick.
+    """
+    one = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range for this role is $120,000 - $150,000 USD annually.",
+    }
+    engine.derive_salary(one)
+    assert one["salary_currency"] == "USD"
+    assert one["salary_currency_basis"] == "iso_adjacent"
+
+    two = {
+        "salary": "$120,000 - $150,000",
+        "text": "USA Band: $120,000 - $150,000 USD. Canada Band: 160,000 CAD.",
+    }
+    engine.derive_salary(two)
+    assert two["salary_currency"] is None, "two codes must not resolve to one"
+    assert two["salary_currency_basis"] == "ambiguous"
+
+
+def test_no_adjacent_code_is_absent_and_absent_covers_an_unreadable_window():
+    """`absent` deliberately spans TWO causes: a window read and holding no code
+    (15,004 rows) and no window readable at all (5 rows) -- empty body, or a display
+    string that does not occur in the body. A consumer behaves identically on both,
+    and a fifth member reading `5` in the census is exactly how `posted_basis` ended
+    up carrying one value across a whole corpus. Named here so the 5 are not
+    rediscovered later as an unlabelled gap.
+    """
+    read = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range for this role is $120,000 - $150,000 annually.",
+    }
+    engine.derive_salary(read)
+    assert read["salary_currency"] is None
+    assert read["salary_currency_basis"] == "absent"
+
+    unreadable = {"salary": "$120,000 - $150,000", "text": ""}
+    engine.derive_salary(unreadable)
+    assert unreadable["salary_currency_basis"] == "absent"
+
+
+def test_the_basis_is_set_exactly_when_there_is_a_figure_to_ask_about():
+    """Set IFF the row carries an amount -- NOT `iff a currency was found`, which was
+    the gate this field was first specified against and would have defeated its whole
+    purpose: the rows worth labelling are the ones where the currency is MISSING.
+    A basis on a row with no figure is the opposite error, answering a question
+    nobody posed.
+    """
+    none_at_all = {"salary": None, "text": "no pay information here"}
+    engine.derive_salary(none_at_all)
+    assert none_at_all.get("salary_currency_basis") is None
+
+    refused = {"salary": "up to $200,000", "text": "up to $200,000"}
+    engine.derive_salary(refused)
+    assert refused.get("salary_min") is None, "the parser must refuse a lone figure"
+    assert refused.get("salary_currency_basis") is None
+
+    has_figure = {
+        "salary": "$120,000 - $150,000",
+        "text": "The range is $120,000 - $150,000.",
+    }
+    engine.derive_salary(has_figure)
+    assert has_figure["salary_min"] is not None
+    assert has_figure["salary_currency_basis"] is not None
+
+
+def test_a_predicted_pay_row_still_gets_a_basis_for_its_vendor_currency():
+    """`PREDICTED_PAY_SOURCES` returns before the text pass, and that early return is
+    a path out of `derive_salary` like any other. A row that leaves by it carrying an
+    amount must not carry a null basis, or the contract "set on every amount-bearing
+    row" holds everywhere except the one branch nobody re-read.
+    """
+    src = next(iter(engine.PREDICTED_PAY_SOURCES))
+    p = {
+        "source": src,
+        "salary_min": 90_000.0,
+        "salary_max": 110_000.0,
+        "salary_currency": "GBP",
+    }
+    engine.derive_salary(p)
+    assert p["salary_currency_basis"] == "vendor_field"
+
+def test_n_codes_counts_a_ONE_code_window_as_one_not_zero():
+    """`n_codes` is the third return of `_adjacent_evidence` and it read **0** for a
+    window holding exactly one code -- byte-identical to a window holding none, which is
+    the one distinction the value exists to make. `codes.pop()` mutated the set and
+    `len(codes)` was read after it.
+
+    NO LIVE EFFECT WHEN FOUND: `_label_currency` tests `salary_currency is not None`
+    first, so the 14,547 one-code rows leave by an earlier branch and were labelled
+    correctly anyway. That is exactly why it needs a test -- reorder those two branches
+    and 14,547 rows silently relabel `absent`, with the count agreeing that they should.
+    Its docstring tells callers not to re-derive the count ("measuring two
+    implementations at once"), so the number it hands them has to be right.
+
+    `len(codes) + 1` survived all 704 tests before this existed.
+    """
+    needle = "$120,000 - $150,000"
+    one = f"Base pay {needle} USD per year"
+    two = f"Range {needle} USD or CAD per year"
+    none_ = f"Base pay {needle} per year"
+
+    assert engine._adjacent_evidence(one, needle) == ("USD", "year", 1)
+    assert engine._adjacent_evidence(two, needle) == (None, "year", 2)
+    assert engine._adjacent_evidence(none_, needle) == (None, "year", 0)
+    # the needle absent from the body is the fourth state, and it is None -- not 0
+    assert engine._adjacent_evidence("no figure here", needle) == (None, None, None)
+

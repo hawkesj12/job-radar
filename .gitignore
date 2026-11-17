@@ -37,3 +37,6 @@ RECORD-SHAPE.md
 # procedure, and the procedure is the point.
 catalog/_raw/
 catalog/_out/
+
+# local run reports -- generated output, never published
+_reports/

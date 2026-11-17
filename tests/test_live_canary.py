@@ -26,6 +26,7 @@ Only keyless sources are covered. Adzuna, USAJOBS and Google-for-Jobs need
 credentials, and a scheduled public workflow should not carry them.
 """
 
+import inspect
 import re
 
 import pytest
@@ -40,8 +41,8 @@ pytestmark = pytest.mark.live
 # what the parser expects, so it is a hard failure rather than a soft one.
 # `braintrust` and `hn` were missing entirely, and braintrust is precisely where a
 # vendor silently dropped a field on us: its `level` key -- which the adapter mapped
-# to `department` -- returns on 0 of 20 rows today. Uncovered sources are where drift
-# hides, so the list is now every keyless breadth adapter.
+# to the since-removed `department` -- returns on 0 of 20 rows today. Uncovered
+# sources are where drift hides, so the list is now every keyless breadth adapter.
 WHOLE_BOARD = [
     "jobicy", "arbeitnow", "remoteok", "themuse", "remotive", "braintrust", "hn",
 ]  # fmt: skip
@@ -101,13 +102,54 @@ def _check_shape(rows, name, expect_company=True):
         assert not missing, f"{name}: row missing {missing}"
 
 
+def _bot_wall(e) -> bool:
+    """A 403 carrying Cloudflare's challenge marker: the vendor's bot defence
+    answered, not its API."""
+    hdrs = getattr(e, "headers", None) or {}
+    return getattr(e, "code", None) == 403 and (
+        hdrs.get("cf-mitigated", "").lower() == "challenge"
+    )
+
+
+def _net_error(name, e):
+    """Sort a network error into the file's taxonomy instead of skipping them all.
+
+    A 4xx other than 408/429 is the endpoint ANSWERING that the resource is not
+    there -- reachable, and wrong, which is drift and fails. A Cloudflare challenge
+    is a third outcome: the vendor's bot defence answered, not its API, so nothing
+    was parsed and nothing can be judged; it skips, with a message that says it will
+    not clear on its own. Timeouts, DNS, 5xx, 408 and 429 are someone else's bad day
+    and skip as before.
+    """
+    code = getattr(e, "code", None)
+    if _bot_wall(e):
+        pytest.skip(
+            f"{name} BLOCKED by a Cloudflare challenge (HTTP 403, cf-mitigated: "
+            "challenge) — an access problem, not parser drift, and it will not clear "
+            "on its own; a harvest gets 0 rows from this source until it does"
+        )
+    if isinstance(code, int) and 400 <= code < 500 and code not in (408, 429):
+        pytest.fail(
+            f"{name}: HTTP {code} from its API — the endpoint answered that the "
+            "resource is not there. A vendor moving or retiring its API is drift."
+        )
+    pytest.skip(f"{name} unreachable ({type(e).__name__}) — their outage, not ours")
+
+
 @pytest.mark.parametrize("name", WHOLE_BOARD)
 def test_whole_board_source_still_parses(name):
+    """`strict=True` where the adapter takes it, for the reason given on
+    test_query_driven_source_still_parses, so the failure names the HTTP status
+    the adapter would otherwise swallow. themuse failed here from 2026-11-09 with
+    "parsed 0 rows from a reachable endpoint" and no reason; under strict it names
+    the 404. An adapter without `strict` is called exactly as before."""
     _cfg()
+    fn = sources.BREADTH_ALL[name]
+    kw = {"strict": True} if "strict" in inspect.signature(fn).parameters else {}
     try:
-        rows = sources.BREADTH_ALL[name](BROAD_QUERY)
+        rows = fn(BROAD_QUERY, **kw)
     except NET_ERRORS as e:
-        pytest.skip(f"{name} unreachable ({type(e).__name__}) — their outage, not ours")
+        _net_error(name, e)
     _check_shape(rows, name)
 
 
@@ -411,7 +453,7 @@ def _unmapped_tokens(rows):
         # `[]` is stated-worldwide: one word covering every token by definition.
         if r.get("remote_areas") == []:
             continue
-        for tok in (t.strip() for t in raw.replace("&", ",").split(",")):
+        for tok in _scope_tokens(raw):
             if not tok:
                 continue
             total += 1
@@ -433,6 +475,34 @@ def _unmapped_tokens(rows):
                 missed += 1
                 samples.add(tok)
     return total, missed, samples
+
+
+def _scope_tokens(raw):
+    """Split a joined `remote_scope_raw` back into names, WHOLE ISO NAME FIRST.
+
+    15 ISO names contain a comma ("Micronesia, Federated States of", "Bonaire, Sint
+    Eustatius and Saba"), and himalayas' `remote_scope_raw` is its country LIST joined
+    with ", " for display. A bare comma split cut those into halves that resolve to
+    nothing, and this canary failed from August on 10 distinct "unmapped names" --
+    'Federated States of', 'Bonaire', 'British', 'State of', ... -- every one a
+    fragment of a country the package had ALREADY mapped: `stated_scope` reads the
+    list, never the join (its docstring: "Nothing re-splits it now"), and
+    `iso3166.alpha2` resolves all of them. The bug was this splitter, not the vocab.
+
+    So two adjacent parts that form an ISO name are rejoined, the same whole-name-first
+    rule `stated_scope` applies to a string. No ISO name has more than one comma, so a
+    pair is enough.
+    """
+    parts = [t.strip() for t in raw.replace("&", ",").split(",")]
+    out, i = [], 0
+    while i < len(parts):
+        if i + 1 < len(parts) and iso3166.alpha2(f"{parts[i]}, {parts[i + 1]}"):
+            out.append(f"{parts[i]}, {parts[i + 1]}")
+            i += 2
+        else:
+            out.append(parts[i])
+            i += 1
+    return out
 
 
 @pytest.mark.parametrize("name", SCOPE_SOURCES)

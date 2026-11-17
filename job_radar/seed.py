@@ -127,7 +127,6 @@ def _seeded(entry: dict) -> dict:
         "name": entry["slug"],
         "ats": entry["ats"],
         "slug": entry["slug"],
-        "industry": "(seeded)",
     }
     for field in ("host", "site"):
         if entry.get(field):

@@ -7,8 +7,29 @@ the market, so your application history is never lost. Written atomically
 (temp -> os.replace), so an interrupted write leaves the previous file intact.
 
 Columns: id, first_seen, posted, age_days, score, llm_score, llm_note, status,
-salary, company, industry, title, department, employment_type, location,
+salary, company, title, department, employment_type, location,
 source, url, signals, dedup_key
+
+THIS IS NOT THE RECORD CONTRACT, and the difference is deliberate. These 18 columns
+are a HUMAN shortlist you open in a spreadsheet; `emit.py`'s NDJSON is the machine
+contract, and a test asserts every `engine._CONTRACT_FIELDS` member appears there.
+So contract fields land here only when a person reading a row wants them —
+`seniority`, `seniority_raw` and `tags` are all deliberately absent, and
+`seniority_raw` in particular would be incoherent without the `seniority` beside it
+that this file also does not carry. Adding a column is a schema change for every
+existing CSV, which is a real cost to a CLI user; decide it here on purpose rather
+than letting a field appear in one surface and vanish from the other by accident.
+
+`department` IS HERE and DID NOT MOVE at 0.9.0. This file carried it while the
+record carried both `department` and `team` as byte-identical duplicates on 100,825
+of 100,878 filled rows -- so unlike the record, in the CSV it was the ONLY place the
+employer's own group appeared. 0.9.0 first resolved that duplicate the other way and
+renamed this column to `team`, which cost a STICKY row its value: `upsert` carries a
+stored row forward untouched when the posting is absent, so a role that had left the
+market came back with the new column blank and never self-healed. Reverting to
+`department` -- the word the vendors themselves use -- makes `COLUMNS` byte-identical
+to 0.8.x, so there is no migration to survive at all. A test asserts that equality
+rather than describing it.
 """
 
 from __future__ import annotations
@@ -134,7 +155,6 @@ COLUMNS = [
     "status",
     "salary",
     "company",
-    "industry",
     "title",
     "department",
     "employment_type",
@@ -237,6 +257,25 @@ def write_all(path, rows: list[dict]) -> None:
 def _build_row(p: dict, today: str) -> dict:
     key = p.get("dedup_key") or dedup_key(p)  # reuse the engine's key when present
     a = age_int(p.get("posted", ""))
+    # KNOWN LIMIT, and it is the root cause of three bugs already fixed elsewhere.
+    # `COLUMNS` has `source` and no `sources`, so a cross-source merge -- a set -- is
+    # flattened here into a comma-joined string inside a SINGULAR column. The value
+    # that comes back out, "adzuna, greenhouse", is not a source: no adapter has that
+    # name, it resolves against no `attribution` entry, and nothing can key on it.
+    #
+    # Three readers each grew their own decoder for that, and each was wrong until it
+    # was fixed: `emit._nested` emitted `sources: null`, `emit.manifest` counted a row
+    # under the fabricated name, and `cli`'s attribution credit line silently dropped
+    # it (12 such tokens in a 7,568-row local harvest). All three now route through
+    # `emit._sources`, which splits on `", "` -- lossless for the SET because no
+    # registered source token contains a comma or a space, 19 of 19 -- but never
+    # recovers WHICH source won the merge, because that is not written down anywhere.
+    #
+    # THE DECODER CANNOT REACH A FOURTH READER. `shortlist.csv` is a public artifact:
+    # a spreadsheet, a `pandas.read_csv`, or anyone's script sees the joined string
+    # with no decoder at all. Adding a `sources` column would fix it at the source and
+    # end the need for any decoder -- but that changes the CSV header, which is a
+    # user-facing schema change and deliberately not made here. Filed, not fixed.
     src = ", ".join(
         sorted(p.get("sources") or ([p.get("source")] if p.get("source") else []))
     )
@@ -251,9 +290,8 @@ def _build_row(p: dict, today: str) -> dict:
         "status": "new",
         "salary": p.get("salary", ""),
         "company": p.get("company", ""),
-        "industry": p.get("industry", ""),
         "title": (p.get("title", "") or "").strip(),
-        "department": p.get("department", ""),
+        "department": p.get("department") or "",
         "employment_type": p.get("employment_type", ""),
         "location": (p.get("location", "") or "").strip(),
         "source": src,

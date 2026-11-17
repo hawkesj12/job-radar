@@ -6,6 +6,1885 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-16
+
+### Known issues
+
+- **The Muse yields no rows.** Its public API stopped answering in early November
+  2026 — the weekly canary passed on 2026-11-02 and failed on 2026-11-09 — and a probe on
+  2026-11-16 found `/api/public/jobs` and `/api/public/companies` returning HTTP 404 and
+  the API documentation page redirecting to the site's About page. The `themuse` adapter
+  fails soft, so a harvest gets 0 rows from it and no error. The adapter and the default
+  board list are left in place for this release.
+
+### Removed — BREAKING
+
+- **`team` and `category` are both gone; there is ONE org/function column,
+  `department`.** The FLAT record — what `harvest()` returns and what a library
+  consumer receives — goes **49 keys → 48**, measured as the union of keys over a
+  102,553-row harvest `[2026-08-24]` and recomputed against this tree.
+
+  **Three different counts describe this record and they must not be swapped.** The
+  flat record is 49→48; the NDJSON wire format, which NESTS (`title.raw`,
+  `remote.type`), is **50 leaf fields → 49**; and `engine._CONTRACT_FIELDS`, the subset
+  guaranteed present-and-`None`, is **36 → 35**. The middle one is a trap: its AFTER
+  value equals the flat record's BEFORE value, so quoting "49" without saying which
+  reads as no change at all. `_coerce` alone returns 44 keys — the pipeline adds
+  `score`, `signals`, `dedup_key`, `harvested_at` and `sources` after that boundary,
+  plus whatever an adapter supplies. The "45 fields → 44" an earlier draft of this
+  entry published matched none of these, was never sourced, and no test pinned it.
+
+  **`team` and `department` were one field under two names.** of 100,878 filled rows in a 102,799-row
+  harvest `[2026-08-20]`, **100,825 were byte-identical and 53 matched `category`
+  instead; zero carried a value absent from both.** That corpus reached only 11 of 19
+  sources, so the claim was re-established by reading **all nineteen adapters** — the
+  only method that covers a source that did not run. Eleven assign a value, and every
+  one writes both keys **from the same expression in the same record literal**,
+  differing only in whether absent is spelled `""` or `None`.
+
+  **`department` is the name that survived, because it is the vendors' own word.** Five
+  of the seven adapters that fill this field read a vendor key literally called
+  `department`: Greenhouse `departments[].name`, Ashby `department`, Workable
+  `department`, SmartRecruiters `department.label`, Rippling `department.label`. Only
+  Lever and Ashby name a `team` at all: Lever reads `team` first and `department`
+  second, Ashby reads `department` first and `team` second. USAJOBS reads neither — its
+  org unit is `SubAgency`. An earlier draft of this release resolved the duplicate the other way; keeping
+  the vendors' word is both more honest and **strictly less breaking**, and the two
+  paragraphs below are the difference it makes.
+
+  **`department` now means ONE thing, which is the actual fix.** At 0.8.2 it was four:
+  an org unit (Greenhouse, Ashby), a job family (Adzuna `IT Jobs`), a seniority
+  (Braintrust `level`), and the EMPLOYER (USAJOBS `DepartmentName` — "Department of
+  Veterans Affairs"). It is the org unit and nothing else now: Adzuna's job family goes
+  to `category`, Braintrust's `level` read is gone (the key left that API), and USAJOBS
+  reads `SubAgency`. **That last one is a value change under an unchanged key** — a
+  federal row's `department` was the employing department and is now a facility name
+  such as *"Central Virginia VA Health Care System, Richmond, Virginia"*. The employing
+  department is unmapped on that adapter; `parent_company`, the recovery this README
+  used to name, was removed earlier in this same release. `catalog/_SCHEMA.md` calls
+  writing `DepartmentName` into an org-unit field "the exact mistake this split exists
+  to prevent" — the shared word is now the bait for it, so
+  `test_usajobs_parser_maps_nested_federal_shape` asserts the string appears nowhere in
+  the record rather than leaving it to be discovered.
+
+  **`shortlist.csv` does not change at all.** `COLUMNS` is byte-identical to 0.8.x —
+  same 18 names, same order — and a test asserts that equality rather than describing
+  it. The earlier draft renamed this column to `team`, and that rename had a cost worth
+  recording even though it is no longer paid: `upsert` carries a stored row forward
+  untouched when a posting is absent, so an `applied` or `dismissed` role that had
+  **left the market** came back with the new column blank — `status` and `first_seen`
+  intact — and never self-healed, because a sticky row never passes through
+  `_build_row`. Keeping the vendors' word deletes that migration instead of documenting
+  it.
+
+  **`category` merged in, and the measurement is why that is safe.** It held the
+  catalog's `function` — the job family — where a vendor published one, and it was
+  never redundant with `team`: on 102,553 rows `[2026-08-24]`, `team` filled **100,463**
+  and `category` **1,759**, with **0 rows carrying both** and 331 carrying neither.
+  Three ATSs (Greenhouse, Ashby, Lever) fill one at 99.9–100%; five aggregators
+  (Himalayas, SmartRecruiters, Braintrust, Jobicy, Remotive) fill the other at 100%.
+  So the two were **complementary, not duplicated** — and each read ~98% empty on its
+  own, which made neither usable as a filter. Merged, `department` is **99.7% filled**
+  and **not one row loses a value, because no row ever had two.**
+
+  This is the merge `catalog/_SCHEMA.md` warns against for a PROFILE — it keeps
+  `function` / `org_unit` / `employer_org` separate precisely because five adapters
+  once poured all three into one field and produced 5,050 distinct values including
+  employer names. **The zero overlap is what makes it safe in the RECORD and nowhere
+  else**, and the profiles keep the three-key split unchanged. The employer is still
+  excluded: USAJOBS reads `SubAgency`, falling back to its OPM occupational series,
+  and never `DepartmentName`.
+
+  Three adapters ship both kinds of key and now coalesce, org unit first: Workable
+  (`department` → `function`), SmartRecruiters (`department.label` → `function.label`
+  — the former was empty on 510 of 510 rows locally, so in practice this yields the
+  function) and USAJOBS (`SubAgency` → `JobCategory[].Name`). **Lever also flipped**:
+  it read `categories.team` first, which disagreed with its own catalog profile
+  (`org_unit: categories.department`), and now reads `department` first.
+
+  **Recovery for a consumer reading either:** read `department`. `team or category`
+  reproduces the old pair exactly, since they never co-occurred.
+
+  **What the test suite loses, stated rather than left to be found.** The
+  `department` byte-identity gate loaded 0.6.0's `sources.py` out of git and ran it
+  against today's fixtures; with the field gone there is nothing to compare, so the
+  suite no longer has an **equivalence-against-history harness**. That is intrinsic to
+  the removal, not an oversight. Its anti-vacuity coverage survives in
+  `test_every_adapter_honours_the_posting_contract`. Two consequences ride along:
+  `ci.yml` no longer needs `fetch-depth: 0` (nothing in `tests/` or `job_radar/` shells
+  out to git — checked, not assumed), and `CONTRIBUTING.md`'s `cp -R .git` step is
+  retired, with the reason it existed kept because its failure mode was a **silent
+  skip**.
+
+  **A new guard replaces the old one**, because `engine._reorder` deliberately KEEPS a
+  key it does not name: removing `department` from `_NULLABLE_TEXT` and `_READING_ORDER`
+  does not stop an adapter putting it back — and since it is no longer in
+  `_NULLABLE_TEXT`, a re-added `"department": ""` would arrive as a literal empty
+  string, the exact absent-means-empty lie the contract exists to remove.
+  `test_no_adapter_still_emits_department` is parametrized over all nineteen adapters
+  and was mutation-tested by re-adding the line to SmartRecruiters.
+
+- **`industry`, `parent_company`, `salary_estimated_min` and `salary_estimated_max` are
+  gone.** The record is **49 fields → 45**. All four were empty on 102,799 of 102,799
+  rows of a harvest across 7,360 boards — but **that number is only evidence for two of
+  them**, and saying otherwise would be a population error a reader can falsify:
+
+  - `industry` and `parent_company`: genuinely empty, and the corpus is fair evidence.
+  - **`salary_estimated_min`/`_max` were empty because that harvest had no Adzuna keys**
+    — the one adapter that fills them could not run. In the live consumer's store they
+    hold **6,633 of 67,481 rows**, 92.8% of its Adzuna rows and 73% the size of the
+    entire commitment column. They are **discarded deliberately**, not swept up as dead
+    weight.
+
+  - **`industry` was fillable only by hand-annotating a watchlist**, never from a
+    posting — `engine` copied it off the caller's company entry. The shipped example
+    watchlist did exactly that on ten companies and its `_comment` advertised the flag,
+    so anyone who ran `init` and used that file **has a populated `industry` column**.
+    Those ten annotations are removed with the field, and **a pre-0.9.0 `shortlist.csv`
+    loses its `industry` values on the next scan** — silently, atomically. The merge
+    itself is safe (verified: sticky rows keep `status`, `first_seen` and `llm_score`,
+    ids unmoved) but that column's data is gone. It was
+    also the record's only field using `""` rather than `null` for absent (it sat in
+    `_REQUIRED_TEXT`, so it was str-coerced), which quietly broke the contract's own
+    rule that `None` means "the source did not say" on every row. And it appeared
+    nowhere in this README's field table. `funnel` and `seed` no longer stamp
+    `"(discovered)"` / `"(seeded)"` into watchlist entries, and `shortlist.csv` loses a
+    column.
+  - **`parent_company` and the estimate pair were fillable, by adapters that are simply
+    rare** — teamtailor and usajobs for the first, adzuna for the second. Cut on the
+    judgement that two live columns beat four columns where two are theoretical.
+
+  **The prediction protection survives the estimate columns.** `_adzuna_pay` used to
+  route a `salary_is_predicted` row into `salary_estimated_*`, and `derive_salary`
+  returned early when it saw one — that guard existed because the parser once wrote
+  `109106.0` into `salary_min` on a row whose `109106.69` was a model output. A
+  predicted row now emits **no salary at all**: `salary` stays `""`, so there is no
+  string to hand the parser.
+
+  **WAS: "so `derive_salary` returns at its display-string check and can never parse the
+  figure into a commitment column."** That credited a line that refused nothing, and four
+  other sites in the tree repeated it. Measured on `1a1414d`: deleting `if not display:
+  return p` in an isolated export left the whole suite green (`674 passed`), because
+  `vocab.salary_from_display("")` returns all-None and the next check returns on that —
+  and handing `derive_salary` a predicted row that still carried the en-dash fake range
+  `"$129,584–$129,584"` wrote `salary_min=129584.0, salary_basis='parsed'`. **The one
+  string that had actually reached a production store was the one string with no defence
+  inside the parser.** Stated precisely, because the harsher reading is also the wrong
+  one: **that string is not reachable from any shipped adapter at HEAD** —
+  `util.salary_range` renders a point estimate as `$129,584`, dashless, and
+  `salary_from_display` refuses it. `"$129,584–$129,584"` is the 0.8.2 rendering, alive
+  in the live consumer's store and in nothing this tree emits. The new guard is defence
+  in depth against re-introducing it, and against a library caller handing
+  `derive_salary` rows out of its own 0.8.2-era store — **not a patch for a live leak.** `derive_salary` now carries its own quarantine keyed on
+  `sources.PREDICTED_PAY_SOURCES`, independent of what the adapter emits, so the two
+  guards fail separately and are mutation-tested apart. **The prediction is discarded, not relocated** — if you
+  were reading Adzuna's estimates, they are gone — and a downstream store declaring its
+  own `salary_estimated_*` columns sees them go permanently NULL on upgrade rather than
+  error.
+
+  **Why they were removable, stated carefully — the obvious argument is wrong.** The
+  pair existed so a model's guess could never sit beside a commitment, and on the last
+  release that *shipped* them the separation leaked anyway: **all 6,633 rows carrying an
+  estimate also rendered it as `"$129,584–$129,584"`**, a point estimate shaped like a
+  posted range, with **0** carrying a commitment figure `[live prod, engine 0.8.2]`.
+  **But that leak was closed earlier in this same release** — by the display-string
+  quarantine and the point-value fix listed under Fixed — so by the commit that removed
+  the columns a predicted row already emitted no string and the separation was intact.
+  The leak is the *history* of why the pair existed. **The reason it went is that
+  nothing downstream ever read it:** the one known consumer writes both columns into its
+  own schema and reads them back nowhere.
+
+  **One migration path broke and it is called out above:** the `department`
+  deprecation note recommended `parent_company` as the recovery on USAJOBS, because that
+  adapter assigned `DepartmentName` to both. With `parent_company` removed, USAJOBS rows
+  carry the employing department **only** in `department` — so it disappears at 1.0 with
+  nothing to fall back to. Copy it first if you consume federal postings.
+
+- **The `remote` boolean is gone; use `remote_type`.** It was exactly
+  `None if remote_type is None else remote_type == "remote"` on **7,568 of 7,568 rows**
+  `[local 94-board harvest, 0.9.0]` — two homes for one fact, and the bool was the
+  weaker home. It cannot express `hybrid`, so **1,679 hybrid rows carried
+  `remote: false`**: true, and indistinguishable from on-site to anything that only
+  checked the flag. Nothing in the package ever read it — `scoring.is_remote` reads
+  `remote_type` and derives its own flag, and its comment says why. `emit._nested`'s
+  `remote.is_remote` key goes with it.
+
+  **Migrating:** derive it, and keep the tri-state —
+  `None if remote_type is None else remote_type == "remote"`. Collapsing `None` to
+  `False` asserts "not remote" on every row nobody classified, which is **3,399 of
+  7,568** in that harvest. (An earlier draft of this work proposed the two-term form
+  `remote_type == "remote"` as "100% equivalent"; measured literally it agrees on only
+  4,169 of 7,568 rows, because it turns every unknown into `False`.)
+
+- **`locations[]` entries no longer carry a `url`.** Each entry is now
+  `{raw, city, state, country}` — four keys, not five. The key held the posting's own
+  apply url on **9,585 of 9,585 entries** in a 7,568-row harvest, with **zero**
+  differing from the row's `url` `[local 94-board harvest, 0.9.0]`.
+
+  Redundancy is not the reason it went. **It advertised a per-place apply link that
+  not one of the nineteen sources publishes**, so a consumer could reasonably have
+  built a per-office apply flow on a value that never varied. Ashby's own adapter
+  docstring had said so for as long as the key existed: the vendor's
+  `secondaryLocations[]` entries carry an address and nothing else.
+
+  The one construction path that *could* produce a different value made it **worse**:
+  `fetch_workable` builds the record's url from three fallback terms and built the
+  entry's from two, so with both vendor keys absent the entry was `null` while the
+  record had a working constructed link. Recovery for a consumer is the record's own
+  `url`, which is what the entry always held.
+
+### Changed — BREAKING
+
+- **`remote_areas` is populated on far fewer rows, and that is the fix.** Three changes below
+  under **Fixed** stop the field asserting a boundary nobody stated — an office address the
+  location parser could not read, a search-mode token from google_jobs, and an English
+  pronoun mined out of an HN comment body. The first two move **665 rows** from a populated
+  `remote_areas` to `null` in a 7,545-row local harvest and **~2,502 rows** in a 67,481-row
+  production store — roughly a **30% drop in fill rate**. The third empties it on far fewer
+  rows and is **the only one of the three that changes what a consumer serves**.
+
+  It is filed here rather than only under Fixed because a consumer can **filter** on this
+  field, not merely display it, and a dashboard measuring "how many rows carry a boundary"
+  will read the correction as a regression. **The old values were not conservative, they
+  were wrong in the permissive direction:** through `scoring._region_allowed` an empty list
+  satisfies every policy unconditionally, so a posting reading "Candidates must live in the
+  United States" was admitted into a Germany-only filter.
+
+  **MEASURED AGAINST THE REAL CONSUMER, and the answer is zero.** `remote_areas` is
+  load-bearing in jobfitr's US-only intake — `store.py`'s own comment puts it at **18x the
+  reach of the currency test** — so the obvious fear is that emptying it lets foreign rows
+  through. Replaying jobfitr's actual `servable_in_us` over the **67,481-row production
+  store**, before and after:
+
+  ```
+  rows with a populated remote_areas                 10,723
+    ...this change empties (prose path only)          2,492
+      short-circuited before `areas` is read              0
+      actually reach the remote_areas branch          2,492
+        intake decision UNCHANGED                     2,492
+        kept today -> dropped after                       0
+        dropped today -> kept after (a leak)              0
+  ```
+
+  **Zero, for this change, and the reason is structural rather than lucky:** every value it
+  removes was _derived from the location text_, and jobfitr's fallback branch re-reads that
+  same text (`place_evidence(job["location"])`). The evidence is not lost — it stops being
+  laundered through a field whose contract says the posting **stated** it. The areas verdict
+  and the text verdict agree on all 2,492.
+
+  **But the HN location fix below is a different story, and 5 production rows do move.** It
+  shortens `location`, which removes a spurious `US` that the English pronoun had put into
+  `remote_areas` — and a `US` entry makes jobfitr's areas branch **short-circuit to KEEP**,
+  skipping the text fallback entirely. So removing it is not neutral there. Replaying the
+  same filter over the 172 production HN rows:
+
+  ```
+  rows whose remote_areas changes under the cap          21
+    KEPT today -> DROPPED after                           5
+    DROPPED today -> KEPT after (a leak)                  0
+  ```
+
+  All five leave correctly, and each is a job a US-based worker cannot take:
+  `REMOTE (EU, Switzerland, Norway)` · `Toronto, Canada REMOTE (Canada only)` ·
+  `HYBRID (Berlin) or REMOTE (CET ±2h)` · `Remote (Italy)` · `Madrid (ONSITE 60%)`. Every one
+  was reaching a US-only board on the strength of the word "us" appearing in prose like
+  "read more about us here".
+
+  **Two caveats on that 5.** Production stores the old joined location, so the cap is applied
+  to the joined string rather than per raw segment — this sizes the class rather than
+  counting it exactly. And it measures the cap alone; the block-tag split that follows it
+  removes further pronoun matches, so **5 is a floor**.
+
+  **Nothing reaches a downstream consumer without a deliberate act.** jobfitr pins
+  `job-radar>=0.8,<0.9`, so this cannot arrive through a `git pull` on its box — someone has
+  to edit the pin. That quarantine is why a contract change can ship at all.
+
+- **Deriving a country where the engine previously had none removes 2 rows from a US-only
+  consumer's store** — both foreign jobs that were passing as unknown-country. jobfitr's
+  intake lets a **blank** country through (`if country not in ("", "US")`), so a row that
+  gains a real foreign code newly fails it: a Databricks role in `Madrid; Milan, Italy;
+Paris, France` (now `IT`) and a MongoDB role in `Dublin; Ireland` (now `IE`).
+  `[local 94-board harvest]`, reproduced independently. The two changes are **independent** —
+  measured together against jobfitr's real filter, the country derivation neither cancels
+  nor creates any of the boundary change's decisions.
+
+### Added
+
+- **`sources.search_themuse(queries, strict=False)`.** A new keyword on a public
+  function, matching `search_himalayas` and `search_remotive`: `strict=True` re-raises
+  the first network error instead of failing soft, so the live canary can report the
+  HTTP status rather than "parsed 0 rows". The engine never passes it; a harvest is
+  unchanged.
+
+- **`salary_currency_basis` — the currency refusal is now labelled instead of silent.**
+  `_adjacent_evidence` sets a currency only when exactly one ISO code sits in its
+  ±90-character window, because `$` is shared by USD/CAD/AUD/SGD/HKD/MXN. **That rule is
+  unchanged and correct**; what was wrong is that refusing looked identical to never
+  having been asked. **15,098 of 41,944 amount-bearing rows (36.0%) carried a bare
+  number** `[harvest 2026-08-25, 103,489 rows]`, so `ORDER BY salary_min` sorted an
+  unlabelled `11` next to an unlabelled `60000000`. Four values, none near a monopoly:
+  `iso_adjacent` 14,547 (34.7%) · `absent` 15,009 (35.8%) · `vendor_field` 12,299
+  (29.3%) · `ambiguous` 89 (0.2%). Set **iff the row carries an amount** — 41,944 set,
+  61,545 `None` — which is deliberately not "iff a currency was found", since the rows
+  worth labelling are precisely the ones where it is missing.
+
+  **The fourth value is the finding, and the spec asked for three.** `vendor_field` rows
+  get their currency from the source's own structured field before any text pass runs,
+  and on 98.7% of them the display string is synthesized by the adapter so
+  `text.find(display)` fails and no window is ever read. Folding them into
+  `iso_adjacent` would assert the employer wrote a code beside a figure when they did
+  not — the same class of provenance lie the remote-basis vocabulary had to unpick when
+  six adapters labelled a board-wide fact `stated`.
+
+  **It is implemented as the mechanism (a currency already present) and not the
+  correlation (`salary_basis == "stated"`), because a wired adapter requires the
+  distinction rather than merely permitting it.** `vocab.google_salary` fills
+  `salary_min` at the adapter and sets `salary_currency = "USD"` while deliberately
+  reporting `salary_basis = "parsed"` — its own docstring: *"this is text Google
+  assembled, not a field an employer filled in."* On every salary-bearing google_jobs
+  row the two definitions disagree, and keying on `"stated"` would label it
+  `iso_adjacent`, asserting that an employer wrote an ISO code beside a figure Google
+  assembled. That is exactly the assumption this field exists to prevent. **The harvest
+  shows 0 divergent rows because google_jobs contributed 0 of 103,489 — it is keyed and
+  eight of nineteen adapters never ran** — so the zero is a source-mix artifact and is
+  quoted only with its cause. **No claim is made about how often that path fires:** no
+  google_jobs record has been read off the wire, the evidence is `vocab.google_salary`
+  executed directly plus its call site, and `catalog/` has no profile for that source.
+
+  `ambiguous` is a **deliberate** refusal, not a gap: hand-read, **86 of the 89** are
+  genuine dual-currency postings (`Canada Base Salary Band … / USA Base Salary Band …`,
+  one quoting three). Those employers declined to pick a currency and neither do we.
+  `absent` deliberately covers two states — a window read that held no code (15,004) and
+  a figure that could not be located in the body at all (5, 0.01%) — because a consumer
+  behaves identically on both, and a fifth member reading `5` in a census is how
+  `posted_basis` came to carry one value across an entire corpus.
+
+  **Accepted scope, stated rather than left to be found:** 396 rows carry a display
+  string but no parsable amount and get `None`, since there is no figure for a currency
+  to denominate; 5 rows carry an amount with no display string and land in
+  `vendor_field` via the fill-only return. **`_adjacent_evidence` now returns a third
+  element** (`n_codes`) so the caller can tell a two-code refusal from an empty window
+  without re-scanning the body — a caller that re-derived the count would be measuring
+  two implementations at once. `emit._nested` gains `salary.currency_basis`.
+
+- **`sponsorship` and `clearance` — whether a person can apply at all.** Neither existed in
+  the record and no source publishes either as a field, so both are read from the posting's
+  prose by `extract.enrich`. `None` runs 94.18% and 94.53%; that is the honest answer, not a
+  coverage gap.
+
+  **Both are THREE-state, and in both cases two states was a sign flip.** `sponsorship ∈
+  {offered, conditional, not_offered}`: on a hand-labelled sample the hedged employer
+  templates — *"considers sponsorship on a case-by-case basis"*, *"may be available for
+  select positions"* — **outnumbered clean offers**, and without a state of their own each
+  is forced into `offered`, which is where the cost lives. `clearance ∈ {required,
+  obtainable, mentioned}`: **30.4% of labelled clearance rows say a candidate must be ABLE TO OBTAIN
+  a clearance rather than already hold one**, and folding those into `required` tells an
+  eligible US citizen the job is closed to them.
+
+  **The acceptance gate found a 32% sign-flip rate before this shipped.** Censusing all 87
+  distinct sentences an earlier detector called `offered`, **469 of 1,464 occurrences were
+  refusals or hedges** — the positive pattern matched the bare verb while the negative one
+  could not see the negation attached to it. Contractions (*"we aren't able to sponsor"*)
+  cost 274 and a negation carried by a verb (*"prohibited from offering sponsorship"*) cost
+  185. After the fix, 318 of 318 correct.
+
+  **Then the opposite direction caught the fix overreaching.** Letting an adjacent sentence
+  decide destroyed a clean offer — *"DensityAI sponsors qualified candidates for H-1B, O-1,
+  TN, E-3"* read as a refusal because of a *"do not"* in a **different sentence**. That path
+  decided 229 rows, so `sponsorship_basis` is `{sentence}` alone.
+
+  **A second reader labelled 65 rows blind** (seed 1839095240, sample `c33012c0…`): 25 of 25
+  agreement on `not_offered` and **zero sign flips in either direction**. All 11
+  disagreements sit on one boundary — whether *"sponsorship where applicable"* is a clean
+  offer or a hedge — and neither side of it tells anyone they cannot apply.
+
+  Both are grouped in the NDJSON feed as `sponsorship.state` / `.basis` and
+  `clearance.state` / `.basis`, because a state read without its basis cannot be told from a
+  differently-scoped one. **Neither is a `shortlist.csv` column** — the CSV is a curated
+  human subset.
+
+- **`salary_kind` — what the figure measures, which nothing in the record recorded.**
+  `salary_basis` says only HOW a figure was extracted and never WHAT quantity it is.
+  That gap is why on-target-earnings bands and a **\$32,000–\$48,000 new-hire equity
+  grant** sat in columns the README defines as what an employer committed to as base pay.
+  Closed vocabulary in `vocab.SALARY_KINDS`: **`base` · `ote` · `equity` ·
+  `unspecified`**, and `None` when there is no figure at all.
+
+  **No new parsing** — it reads the ±90-character window `_adjacent_evidence` already
+  uses for currency and period, because the label sits with the number. **Two rules
+  decide among competing cues:** the nearest wins, with a longer *containing* match
+  preferred as one phrase read at two precisions; and a quantity being **excluded**
+  (`base salary (excluding equity and bonus)`) is discounted, because the excluded word
+  is nearest by construction. Only the sentence the figure lives in is read — see the
+  separate entry for why that rule was removed and restored.
+
+  **`bonus` AND `total_comp` WERE REMOVED, on measured precision rather than judgement.**
+  Rows the detector called each were drawn from the shipped classifier and labelled
+  blind: **`bonus` 0 of 25 and 0 of 25** (two readers — one anchored, and reported as
+  such), **`total_comp` 3 of 22 and 5 of 25.** Both far under the 40% line fixed in
+  writing before the draw.
+
+  **The cause is a class, not a threshold: `+ bonus` after a figure means the bonus is
+  NOT IN IT.** The cue is anti-correlated with the label, and proximity makes it worse —
+  the nearer the word, the more certain the exclusion. No threshold repairs a signal
+  pointing the wrong way. **Removal is mostly not a refusal:** of the 1,815 rows,
+  **1,171 land on `base`** — the right answer on 22 of 25 labelled rows — 600 on
+  `unspecified` and 41 on `ote`.
+
+  **`equity` was SCOPE-RESTRICTED, not removed, and the order mattered.** Unrestricted it
+  fires on 81 rows and is right on 15; an equity mention on the next line of a benefits
+  list (`"…base salary range is \$132,000–\$178,000, plus RSUs"`) reads as the figure
+  BEING equity.
+
+  **Two things count as a boundary, and the second is the one that finished it.** Clause
+  breaks alone retain 29 and are right on 15 — 52%. **Adding an additive connector
+  (`+`, `plus`, `and`) as a boundary retains 15 and is right on 15 — 100% on this
+  corpus.** A label *precedes* its value (`"New hire equity: \$32,000–\$48,000"`); a term
+  joined by `+` names a **separate item** — the identical construction that made `bonus`
+  right 0 times in 50. Third member, third appearance, one shape.
+
+  **Scoped to `equity` alone, and the asymmetry is semantic.** On-target earnings *are*
+  base plus commission, so `"\$231,000–\$275,000+ OTE, Base + Commissions"` uses `+` to
+  describe **the figure's own parts** — the same rule applied to `ote` destroys a true
+  positive. Verified: `ote` unchanged at 809 rows. **The restriction had to land BEFORE the
+  removal:** with `bonus` gone and `equity` unrestricted, **188 of its rows would have
+  moved from one wrong label to another**. In the shipped order, 3 do.
+
+  **A COLON IS NOT A CLAUSE BREAK, and that nearly cost the field its reason to exist.**
+  Every true positive is `"New hire equity: \$32,000–\$48,000"` — colon included — so a
+  boundary set of `.!?;:` keeps 11 rows and **zero** true positives. `.!?;` plus a
+  newline keeps 26 and all 15. A colon *introduces* the figure it labels.
+
+  **And the 100% figure was a human split, not a mechanical one.** A blind labelling put
+  15 of the 81 in the figure's own clause and scored those at 100%; no punctuation rule
+  reproduces it — the four tried give 11, 26, 26 and 61. **The code approximates the
+  judgement and is published at its own rate**, never the labelling's.
+
+  **All 15 true positives are one employer's template**, so the restriction is validated
+  on one board's phrasing. Shipped anyway on an asymmetry: **too narrow costs recall,
+  which is free; too loose costs precision, which is the defect this field exists to
+  prevent.** A grant written differently is missed and emits `unspecified` — a refusal.
+
+  **Measured rates** `[102,799-row harvest, 2026-08-20; 42,072 rows with a salary
+  display]`: `base` 54.7% · `unspecified` 43.3% · `ote` 1.9% · `equity` 0.1%. **`base`
+  may contain on-target-earnings rows** where the governing phrase sits in a prior
+  sentence or an unread parenthetical — nine of fourteen wrong assertions on a
+  hand-labelled sample. **Overall wrong-assertion rate 16 of 150 = 10.7%**, adjudicated
+  across two independent readers.
+
+  **A widened `ote` cue was measured and dropped.** Allowing a modifier between `+` and
+  the noun (`"base salary + Uncapped commission"`) would have gained 9 rows and **broken
+  5 that are currently right — including `"(Base + On-Target Commission)"`, the exact
+  shape it was meant to strengthen.** Recorded rather than shipped.
+
+  **It moves no number.** A SHA256 over all six salary fields across 102,799 rows is
+  `d5799a52…` before and after, unchanged across every commit in this sequence.
+
+- **`sections.section_text(record, kind)` — the reader for the spans the record already
+  carries.** Everything that parses a posting's prose for one fact (pay, requirements,
+  travel) should read the section that fact lives in rather than the whole body; this is
+  that surface. Returns **three states**, and the middle one is the point: `None` when
+  there is no section of that kind **or** its span could not be located, `""` when the
+  section is present and **genuinely empty**, and the text otherwise.
+
+  **`""` is not a near-miss for `None`.** `clean_with_sections` gives a header with
+  nothing under it a zero-length span deliberately — "an empty section, not a failed
+  lookup" — and that is **93,054 of 981,857 located spans** `[102,799-row harvest,
+  2026-08-20]`. Collapsing them into `None` would destroy the same two-state distinction
+  `sections: []` keeps against `sections: null`.
+
+  **The collapse it DOES make is stated in the docstring with its count:** "no such
+  section" and "the section exists but could not be located" both return `None` —
+  **4,667 spans across 3,098 rows** — because a caller wanting to read that section
+  behaves identically either way. A caller needing to tell them apart reads
+  `record["sections"]` directly.
+
+  **Bounds-checked, not just key-checked, and the silent failure is the reason.** The
+  obvious guard is the missing `start` key, which raises. The dangerous one does not:
+  `text[start:end]` with `end` past the end of `text` **returns a short slice, or `""`
+  when `start` is also past** — indistinguishable from an empty section. That is **0
+  spans against a body this engine produced and 36,270 against a downstream copy that
+  truncated `text` without the spans that index it**, so it arrives from a consumer's
+  data. A span that does not fit its text is a disagreement, and `None` is the honest
+  answer to a disagreement.
+
+  **KNOWN CEILING, inherited by every consumer:** `type` is `None` on **492,909 of
+  986,524 spans — almost exactly half.** Those are real headers the classifier could not
+  name, so a `kind` lookup reaches at most half the structure a posting has, and a `None`
+  often means "we found a header and could not classify it" rather than "the employer
+  wrote none". Published per-kind coverage (`requirements` 83.8%, `compensation` 22.5%)
+  is a share of ROWS, not a claim about the other half of the spans.
+
+- **Two output-shape levers: `output.include_text` and `output.omit_empty`** (CLI:
+  `--no-text`, `--drop-empty`). The record was unreadable by hand and there was no way
+  to ask for less of it. Measured per median record on a 7,568-row local harvest
+  `[local 94-board harvest, 0.9.0]`:
+
+  | | keys | bytes |
+  | --- | --- | --- |
+  | as emitted | 50 | 8,717 |
+  | `omit_empty` | 31 | 8,313 |
+  | both | 30 | 2,021 |
+
+  The body is **~72% of a record's bytes** and **19 of its 50 keys are null** on a
+  median row. Both levers **remove keys** rather than nulling them, because `null`
+  already means something specific here — the source did not say — and collapsing a
+  caller's display choice into that is the two-states-in-one-value lie the contract
+  exists to remove.
+
+  **They are `Config` fields, not CLI flags, and that placement is the feature.**
+  `harvest` installs the caller's config process-wide, so `engine.harvest(cfg)` returns
+  records already in that shape and a **library** consumer never touches argparse. The
+  first cut of this put the text lever on `emit.records` alone — and `emit` is the one
+  module the only known consumer imports nowhere, which would have made the largest
+  lever on the record reachable from the CLI and from nothing else.
+
+  **`omit_empty` defaults OFF** and is the one to think about before enabling: removing
+  a key changes `"x" in record` and `record.keys()`, so a consumer written against the
+  full key set can break on it — one record type becomes many shapes (1 distinct key-set
+  across a 102,799-row corpus as emitted, **1,883** under `omit_empty`), and `_shape`
+  runs inside `engine.harvest` rather than in `emit`, so this is a **library** contract a
+  caller receives and not an output format. It is *not* about SQL: measured both ways,
+  DuckDB reads a missing key as NULL, so `count(remote_type)` is identical whether the
+  key was omitted or explicitly null. An earlier draft of this entry claimed otherwise. **`[]` and `{}` always
+  survive** — `remote_areas: []` means the posting *stated* it is open anywhere and
+  `sections: []` means the body carried no headers. Those are facts, not absences.
+
+- **`text_basis`** — a new record field saying what KIND of body `text` is, when it is
+  not an ordinary one. `excerpt` where the SOURCE truncates it (Adzuna caps every
+  description at 500 characters and ends it with an ellipsis: 275 of 275 rows locally,
+  7,146 of 7,150 `[live prod, 2026-08-20]`, and a live probe confirms the API carries no
+  fuller field — it reproduces on a non-tech query too). `synthesized` where there was no
+  prose body at all and the adapter BUILT one from structured fields (Braintrust, 29 of
+  29 rows, ~157 characters). `None` everywhere else.
+
+  **There is deliberately no `full`.** Seventeen adapters would have to claim a
+  completeness nobody has measured, which is exactly the plausible-looking guess
+  `engine._coerce` exists to refuse; `None` — not characterized — is the truth. And
+  `text is None` already carries "the source sent no body" (SmartRecruiters, 250 of 250
+  rows), so that state needs no vocabulary entry. Closed vocabulary in `vocab.TEXT_BASES`
+  beside the other four, enforced by the same source-reading test, and **set in the
+  adapter rather than sniffed** — a `len == 500 and endswith("…")` detector would
+  mislabel the first Greenhouse posting that happened to be that shape. Additive and
+  `None`-defaulted. Without it a 500-character excerpt and a 6,870-character description
+  are indistinguishable in the record, and 10.6% of production rows are excerpts.
+
+- **Ashby postings now carry every office they name.** `secondaryLocations` is a
+  structured per-place array Ashby has always sent — populated on **422 of 1,730 live
+  postings (24.4%)**, each entry carrying its own `addressLocality` / `addressRegion` /
+  `addressCountry` — in a response the adapter already fetched. `fetch_ashby` never read
+  it (`grep` returned zero hits), so Ashby emitted no `locations` key and the engine fell
+  back to splitting the display string, which on this source names a single place: a
+  posting open in three offices reported one. Verified live after the change — **203 of
+  906 postings now emit a real multi-place list**, up to six entries. The nested `state`
+  is canonicalized in the adapter, because `_coerce` applies the US-state-is-a-code rule
+  to the scalar only and builds `locations[]` only when an adapter left it `None`.
+
+  Every other geography fix in this release parses a display string harder; this one
+  stops parsing and reads the array. **No per-place url** — the entries carry an address
+  and nothing else, which is the vendor's shape, not an omission here.
+
+- **`seniority_raw`** — a new record field holding the vendor's level string verbatim,
+  the partner `employment_type_raw` has had since 0.7.0. `None` on the `title` basis,
+  because nobody quoted anything there. Additive and `None`-defaulted.
+
+  It is emitted in NDJSON and **deliberately not** in `shortlist.csv`, whose 19
+  columns are a human shortlist rather than the record contract — `seniority` is not
+  there either, and a raw without its normalized partner would be incoherent. Stated
+  in `shortlist.py` so the divergence is a decision rather than a discovery.
+
+  Adding it to `_CONTRACT_FIELDS` without adding it to the emitter turned
+  `test_the_machine_feed_carries_the_whole_contract` red within seconds. That test
+  exists because 23 of 29 contract fields were once never emitted at all, and it is
+  the clearest example in this repo of a check that can actually see its own failure
+  — worth preserving exactly as it is.
+
+- **`sections` — the posting's own structure, read before the markup is stripped.**
+  A job body's headers exist only in the vendor's markup, and the `clean()` fix below finally
+  removes that markup correctly — which would have destroyed the only structural signal the
+  corpus has. So it is captured first: `[{type, header, start, end}]`, where the span indexes
+  the record's own `text`. Both halves ship together for that reason; the fix alone would have
+  been a net loss of information.
+  - **Ten types.** Measured across **478 distinct employers**: `requirements` on 93.5% of them,
+    `responsibilities` 92.3%, `about_company` 61.1%, `benefits` 42.5%, `compensation` 37.0%,
+    `location_travel` 31.2%, `eeo_legal` 23.6%, `metadata` 5.9%, `apply_cta` 5.4%,
+    `fraud_warning` 1.5%. Report coverage **per employer, not per posting** — a posting-weighted
+    percentage mostly measures how many roles one employer happens to have open.
+
+    **Those figures are not out-of-sample, and three things qualify them.** The classifier's
+    patterns were chosen by mining unclassified headers out of a 730-employer corpus, and **406
+    of these 478 employers — 2,312 of the 3,000 postings — are in that same corpus**, so this is
+    substantially a training-set score. On the **72 employers that are not**, `requirements` is
+    97.2% and `responsibilities` 94.4%, above the headline; the marginal types move more and on
+    n=72 (`about_company` 54.2%, `eeo_legal` 20.8%). Second, coverage rises with how deeply an
+    employer was sampled — `requirements` is 85.6% for the 125 employers contributing a single
+    posting against 98.1% for the 156 contributing five or more — so the denominator is partly
+    measuring sampling depth. Third, the same classifier on the larger corpus reads up to 16
+    points differently on the marginal types (`location_travel` 47.0% there against 31.2% here),
+    so the decimal place implies a stability the data does not have. The two smallest figures
+    rest on 7 and 26 employers.
+
+  - **`type` PRECISION is not measured — only coverage.** Nothing here reports how often a
+    classification is _wrong_, and two buckets are known to be loose: `eeo_legal` matches a bare
+    `commitment to` / `privacy` / `sponsorship` (36% of its entries match only those), and
+    `location_travel` matches a bare `remote` (23% of its entries), which files "Lead Remote
+    Teams:" as a location section. Treat `type` as a strong hint rather than an assertion, and
+    read the retained raw `header` when it matters.
+  - **`type: null` is a real answer, not a failure.** Roughly half of all headers are employer
+    prose ("Building something special") and forcing those into a bucket would assert something
+    the source never said. The employer's raw `header` is kept beside our guess so a
+    misclassification can be corrected in a later release without re-harvesting anything.
+  - **Spans, not copies.** Carrying each section's text would grow a record by 104%; spans cost
+    14.3% and lose nothing, since `text` is right there. A section that cannot be located emits
+    **no span at all** rather than a plausible-looking one.
+  - **`null` vs `[]`.** `null` means there was no body; `[]` means the body carried no headers.
+
+  **This is effectively a Greenhouse field.** Greenhouse sends HTML on 100% of postings and the
+  other eighteen sources send plain text, so they get `[]`. Anything built on `sections` is built
+  on about two thirds of the corpus and none of the local lane — adzuna and google_jobs return
+  nothing here. Two caveats worth stating rather than burying: `fraud_warning` appears for only
+  7 employers in this corpus (10 in the larger one) and **one of them is ~80% of the rows**, so
+  it is not a rate to plan on. And the 8,000-character cap bites harder than "undercounts" would
+  suggest: **the median body in this corpus IS 8,000 characters** — 1,765 of 3,000 are truncated
+  — and on an uncapped corpus the same cut costs `eeo_legal` 11 points (55.1% → 44.1%) and
+  `benefits` 3. `eeo_legal` and `benefits` are the late sections, and they are the ones hit.
+  That 11-point figure describes the corpora as they were captured, under the OLD `clean()`;
+  once a consumer re-harvests on 0.9.0 the bodies are 21.6% shorter, so the same cap bites
+  roughly 2.4 points instead.
+
+  Cost, measured against this implementation rather than the prototype it was designed from:
+  **412 µs added per HTML posting** (304 → 716), about **9.5 seconds** on a harvest with 23k
+  Greenhouse rows; an independent re-measurement on other hardware got 380 µs, so treat these as
+  the right order rather than the exact figure. A plain-text posting pays **~3 µs** (191 → 194) —
+  the guard skips the split, not the decode, so it is nearly free rather than exactly free.
+  Two costs that belong beside it: `sections` adds about **34% to the resident memory** of a held
+  row (roughly 4 KB against 12 KB of `text`), which matters because a depth harvest holds many
+  rows at once; and Python's `re` holds the GIL, so this CPU competes with the fetch threads
+  rather than hiding entirely behind them. No claim is made here about downstream retrieval quality; that has not been
+  measured on a second corpus or a second reader.
+
+### Changed
+
+- **A record's keys are now ordered for a person to read.** Key order previously
+  carried no decision at all — it was whatever each adapter's dict literal listed, then
+  whatever `_coerce` and `_consume` appended. Measured on the harvest output
+  `[local 94-board harvest, 0.9.0]`: `company` arrived 21 fields in, **below** the
+  6,870-character `text` body and its `sections` list; `title_root` sat 15 fields from
+  the `title` it decomposes; `city`/`state`/`country` came after the `locations` list
+  they summarize; the salary group was split in two.
+
+  The order is now role → employer → place → time → money → terms → apply → provenance
+  → **body last**, applied once at the end of `harvest`. **Ordering removes nothing** —
+  50 keys before and after — so it is half the answer: it makes the record scannable,
+  and `omit_empty` above is what removes the wall. Neither does the job alone. **No value, type, or key
+  changes** — JSON object order is not semantically meaningful and no consumer can
+  break on it. A key the order does not name is kept, sorted, at the end rather than
+  dropped, so adding a contract field can never silently delete it from every record.
+
+### Fixed
+
+- **A doubled pipe in a Hacker News header no longer empties the title.** HN rows are
+  read positionally (`Company | Title | Location | …`), so `Planlab.ai | | Product
+  Engineer (Design) & Platform Engineer | ONSITE in London, UK` shipped `title: ""` and
+  the real title as its `location`. The title is now the first non-empty segment after
+  the company; `location` still reads the raw slots it always did, minus the one that
+  became the title, so a blank elsewhere in the header shifts nothing. Measured on the
+  live threads `[2026-11-16, 446 rows]`: exactly 1 row changes — that one, whose title
+  is filled and whose location is now just `ONSITE in London, UK`.
+
+- **A section whose text could not be located shipped with its offset keys ABSENT, not
+  null.** `clean_with_sections` refuses to guess an offset when the splitter and `clean`
+  disagree about the same bytes — that refusal is the design's only self-check and is
+  unchanged. What was wrong is how the refusal was spelled: the entry was appended
+  untouched, so that span carried `{type, header}` while every other span carried four
+  keys. **`s["start"]` raised `KeyError` on 3,116 of 103,489 rows (3.01%), 4,692 of
+  993,070 spans, across 694 distinct companies** `[harvest 2026-08-25]` — broad, not one
+  employer's template. The 48-field top-level keyset is perfectly uniform across every
+  row, which is exactly what let a *nested* object carry two schemas without anything at
+  the row level hinting at it. It is `None` now, and still distinguishable from the
+  zero-length case, which writes an integer meaning "an empty section, located here".
+
+  The existing contract test asserted `"start" not in secs[0]` — so it **passed while
+  the defect shipped**. It now asserts the null, and a sibling test pins that a consumer
+  can index every key on every span.
+
+- **`clearance='obtainable'` inverted the requirement when a posting named TWO
+  credentials.** `_OBTAINABLE` is tested before `_REQUIRED` on purpose — the modal in
+  *"must be able to obtain"* belongs to the obtaining — but that ordering also swallowed
+  *"Active Top Secret clearance with ability to obtain SCI"*, where the obtain-verb
+  governs a **second, higher** credential and the first must already be held. The result
+  told a candidate holding no clearance that a job requiring an active TS on day one was
+  open to them: the exact harm the three-state design exists to prevent, pointed
+  backwards.
+
+  **63 rows flip to `required`** (0.061% of the corpus; `obtainable` 1,707 → 1,644). Of
+  the 14 distinct sentences among them, 13 are unambiguously *"hold X, be able to obtain
+  Y"*.
+
+  **Two signals protect the honest cases and neither is sufficient alone.** Of 146 rows
+  carrying an active-possession cue before an obtain cue, 80 offer **either path**
+  (*"Active clearance **or** ability to obtain one"*) and 33 have the obtain-verb take a
+  **pronoun** (*"willing to obtain **one**"*), which points back at the same clearance —
+  the second is what rescues *"If you do **not** have an active clearance, you must be
+  willing to obtain one"*, a negated cue the alternation test alone would flip. A first
+  draft of this rule used cue ORDER alone and would have broken 3 of the first 5 rows it
+  touched. **The connector carries the meaning, not the position.** A separate 451 rows
+  place `active` AFTER the obtain-verb (*"eligible to obtain and maintain an active TS
+  clearance"*), where it modifies what is being obtained; flipping on mere co-presence
+  would have broken every one.
+
+- **`util.salary_from_text` now takes the first money range that PASSES its guards, not the
+  first that matches.** It ran `_SAL_RE.search` — one match — and returned `""` when that
+  match failed `_SAL_MAGNITUDE` or the anchor/unit guard, without ever looking at the second.
+  So a body opening *"we raised $3–$200M in revenue"* and stating a real salary two
+  paragraphs later parsed as no salary at all.
+
+  **16 rows gain a `salary_min`** [102,553-row harvest, 2026-08-24, 11 of 19 sources] across
+  11 distinct employers, max 3 each — Algolia, Cloudflare, Anduril — so not one template.
+  **That is small, and it is not the reason the change is here.** The give-up is what made
+  the obvious fix dangerous: widening `_SAL_RE` to catch figures under \$10,000 (`$5,400 -
+  $5,800 per month`, invisible to a `\d{2,3}` pattern) changed **126 real display strings**
+  — 124 of them to empty — because a wider pattern makes a bad first match likelier, and a
+  bad first match was fatal. Flex's `$170,000–$230,000` became `""`. With the give-up gone
+  that widening rescues 121 of the 126, and it is still not shipping, because the 5
+  survivors change from *lost the display* to *wrong figure substituted*: `$110,000 -
+  $125,000` → `$2,500–$9,999` (a donation tier), `$120,000–$140,000` → `$500k to $1`. A null
+  is honest; a plausible wrong number is not.
+
+  **The change is provably fill-only**, which is why it could ship at all. `search` returns
+  the leftmost match, which is `finditer`'s first; the guards are unchanged pure functions of
+  `(matched, tail)` over that same match; so a row returning non-empty today stops on the
+  same match and returns the identical string, and **only rows currently returning `""` can
+  move.** Verified three ways against the shipped code: a corpus differential over 102,023
+  rows (**0 changed**), an in-process differential with both modules loaded via `sys.modules`
+  eviction (**0**), and adversarial differential fuzz — 589,000 cases, 258,740 with a
+  non-empty control (**0 divergences**). All 13 call sites use the return exactly once and
+  only to populate `salary`, so the proof extends from the function to the record.
+
+  **The proof is conditional on a strictly first-passing loop.** Ranking, `findall` +
+  `text.find()` to recover `tail`, or narrowing `tail` to the next match each break it on
+  contact — and `text.find()` in particular is wrong here because these bodies repeat their
+  pay strings. Five mutants are pinned, all killed with the full suite and no `-k` selector:
+  `finditer`→`search`, both guards' `continue`→`return ""`, `_SAL_MAGNITUDE` made inert, and
+  return-the-LAST-passing-match. That last one scored **692 passed** before its test existed,
+  because both fill-only fixtures contained only ONE passing match and could not tell first
+  from last; 3,179 corpus rows carry a display and more than one passing match, so it was
+  reachable.
+
+  **Cost, bounded analytically rather than by a timing run:** the worst case for any row is
+  one full regex scan of that body, which is exactly what a no-match row costs today, and
+  65.6% of rows already pay it. Only the 2.9% whose first match is rejected pay anything
+  extra. Measured on this corpus, +3.3% over 102,023 bodies (+0.11 µs/row).
+
+  **What this does NOT fix:** a posting stating several legitimate bands still has its first
+  one chosen silently — 108 rows across 46 employers, geographic tier tables, a product
+  question rather than a parse bug. Fixing it requires ranking matches, which is exactly what
+  the fill-only proof forbids.
+
+- **`company` was a URL board slug on two thirds of depth rows, and the employer's real
+  name was already in the response.** A user read
+  `langanengineeringandenvironmentalservicesllc` and `equipmentsharecom` instead of
+  Langan Engineering and EquipmentShare. **67,023 of 102,799 rows in the reference
+  harvest — 65.2% of the corpus, 66.1% of depth rows** [7,360-board universe,
+  2026-08-20, 11 of 19 sources].
+
+  **The cause is one assignment, and it is not the one it looks like.**
+  `engine.harvest` stamps `c.get("name", c.get("slug") or "?")`, which reads as "a
+  watchlist entry with no name falls back to its slug" — but **0 nameless entries exist
+  in any watchlist on disk.** `seed._seeded` writes `"name": entry["slug"]` onto every
+  mined board, so the slug arrives as a *present* name and the fallback never fires.
+  Both shapes are handled; only the second one was ever happening.
+
+  **`fetch_greenhouse` was discarding `company_name`, which rides on every row.**
+  Measured live 2026-08-24 across 104 boards: present and non-empty on 100% of rows, and
+  byte-identical to what `discover.board_owner`'s separate `/v1/boards/{slug}` request
+  returns on 103 of 103 boards with a row to compare. **It costs no extra request and
+  does not need `content=true`.**
+
+  **FILL-ONLY: the vendor's name is used only where the watchlist never had a real one.**
+  Preferring the vendor unconditionally was measured and rejected — across 40 curated
+  boards it disagreed on 6, in **both** directions (`DoorDash` → `DoorDash USA`, but also
+  `Canonical Ltd.` → `Canonical`), so no prefer-longer or prefer-shorter tie-break is
+  available either. `allwebleads` → `AWL` decided it: **a vendor's own name can be less
+  legible than the slug**, which no win rate offsets.
+
+  The population test is `name` byte-equal to `slug`, and it is deliberately loose — 3 of
+  94 curated boards are byte-equal too (`Cohere`, `Linear`, `Perplexity`). **That
+  contamination is harmless in this direction**: if the curated name is already right,
+  the vendor reports the same string, so the fill is a no-op on exactly its false
+  positives. A test too loose to *identify* a defect can still be safe to *act* on.
+
+  **Accepted, and named rather than buried: Ashby is not fixed and cannot be.** It has no
+  identity endpoint — `catalog/ashby.md` records `company: null`, "the board IS the
+  company". That is **19,814 rows, 29.6% of the defect by rows and 42.1% by distinct
+  boards.** Earlier work put Ashby at 14.4%; that figure came from a casing test whose
+  recall is 32.9% on Greenhouse but **13.2% on Ashby**, so it under-sampled the
+  unreachable half by 2.5×. Lever is a further 17 rows. **Roughly 70% of the defect is
+  reachable; the rest is a scope fact, not a shortfall.**
+
+  On upgrade, stored rows for a renamed board re-key. `shortlist.upsert` keeps a
+  secondary index by URL and migrates them, preserving `first_seen`, `status`,
+  `llm_score` and `llm_note` — 0 of 102,799 rows lack a URL, so the fallback covers the
+  whole corpus.
+
+- **`company` now has its edge whitespace stripped at the record boundary.** It was
+  deliberately excluded, on the reasoning that "on a DEPTH adapter it comes from the
+  watchlist rather than the vendor, so stripping it would be fixing the wrong layer."
+  **Filling from `company_name` falsifies that premise**, and Greenhouse ships edge
+  whitespace on roughly one board in ten — `' Higher Logic'`, `'Home Chef  '`, `' ALO'`,
+  `'Brandtech+ '`, `'Horace Mann '`, found across three live samples by two agents
+  against two endpoints. **`dedup_key` does not move**: `norm` and `company_block` both
+  collapse non-alphanumerics, so this reaches only the CSV, `emit` and the display.
+  `url` and `source` are still not stripped — measured at 0 rows each.
+
+- **A vendor-STATED salary figure now passes the same magnitude check a parsed one
+  does.** The implied-annual veto lived inside `salary_from_display`, so it guarded the
+  parsed lane and nothing else — a figure an adapter read out of a structured vendor
+  field reached the record having passed no sanity check at all. It now lives in
+  `vocab.salary()`, the chokepoint all nineteen adapters reach. **50 rows change in a
+  102,799-row harvest** — 3 where a monthly period sat on an annual magnitude
+  (`$115,900–$139,300 per month`), and 47 where an hourly or monthly band was filed as
+  `year` (`$19–$48`, `CA$20`, `SGD 1–SGD 2`). The figures are always kept; only the
+  period is refused, which is disbelieving a witness rather than inventing one.
+
+- **Both magnitude thresholds are scaled by currency, and the two obvious ways to do
+  that are wrong in opposite directions.** Left unscaled, the ceiling fired on 27 stated
+  rows of which **24 were correct monthly salaries in weak currencies** — `COP
+  17,500,000 per month`, `HUF 1.8M per month`, `PHP 90K per month`. *Gating* it to USD
+  instead was measured on a full shipped-pipeline run of 29,712 parsed rows and **broke
+  6 rows to fix 1**: five CAD annual salaries had taken `week` from a weekly lunch
+  stipend, an office-days policy and `40h/week`, which the ceiling correctly kills and a
+  gate would republish as `CAD 160,000 per week`. `vocab._USD_SCALE` is a **plausibility
+  ceiling, not an accounting conversion** — nothing is converted, displayed or summed,
+  and an unknown currency falls back to 1.0, the old USD-only behaviour.
+
+  **The slack is not the same on both thresholds.** The nearest spared row sits 12.8×
+  clear of the *ceiling*, but only **1.07× clear of the `year` floor** — a PHP posting
+  at a USD-equivalent of 5,357 against a floor of 5,000. **Scaling the floor also
+  creates a defect the unscaled version could not have:** a genuine low-wage *annual*
+  salary in a weak currency now falls under it. The Philippine statutory minimum is
+  about PHP 158,600 a year against a scaled floor of PHP 280,000. Zero such rows in this
+  corpus — and this corpus is 11 of 19 sources on one day, which is exactly the
+  population it under-samples.
+
+- **A salary is rendered in its own currency.** `util.salary_range` hard-coded a dollar
+  sign and took no currency, so a Toronto role read `$168,000–$231,000` for CAD and a
+  Warsaw one `$25,200` for PLN — about a quarter of a real salary. **46 rows**, not the
+  1,147 that show a non-USD figure behind a bare `$`: three of the four callers pass a
+  currency that is USD by construction, and only `_himalayas_rows` had a real vendor
+  currency it was giving to `vocab.salary` and not to this function. **The other ~1,101
+  are left alone on purpose** — those are Greenhouse and Lever strings where the
+  *employer* typed the dollar sign into their own pay text, several of which already
+  name their currency (`$115,000–$130,000 CAD`), and `salary_currency` is correct on all
+  of them. Formatting our own output is ours; rewriting a vendor's verbatim string is
+  not.
+
+- **`seniority` reads an accented rank word.** `vocab._SENIORITY` is ASCII-keyed, so the
+  Portuguese spelling of `senior` was not a member and `Sênior Software Engineer` got
+  `seniority: None` — **not** the same defect as 0.9.0's `_WORD_RE` fix, which stopped
+  the *root* being manufactured as `S nior`; repairing the token still leaves it outside
+  the table. The lookup is folded, the position is not moved. **3 rows** lead their
+  title this way; 24 contain such a token at all, and the other 17 sit mid-title and
+  stay unread, because moving *where* a rank may be read is a different change with its
+  own failure mode (`Member of the Technical Staff`, `Tech Lead` — a rank word that IS
+  the role). Zero reverse risk, measured: across 102,799 titles the only tokens that
+  fold into a `_SENIORITY` key without already being members are the accented spellings
+  of `senior` and `junior`.
+
+- **`util._INLINE_RUN`'s comment claimed a zero it never measured.** It read "4,580 → 62
+  space-before-punctuation with **zero words glued**", and that zero came from a
+  camel-case proxy which *cannot see* the failure — a glue between two capitalised words
+  is itself camel-case. Labelled against each posting's own vocabulary, the same 445
+  joins contain at least **4 confirmed glues** (`About you` → `Aboutyou`, `Apply button`
+  → `Applybutton`, `ICF cleared` → `ICFcleared`) against 166 header corruptions the
+  guard repairs. **The behaviour is unchanged** — 166-to-4 says the direction is right,
+  and the larger class is unmeasurable here because the same glue lands in `text` on
+  rows with no header at all. Comment corrected; redesign filed.
+
+
+- **A job SEEKER's post was ingested as a job, republishing a private individual's
+  contact details.** One row carried a personal email address **and** a GitHub profile
+  in `title`, with their location line in `company` and the same details again in the
+  1,126 characters of `text`. `search_hn_whoishiring` already filters *threads* to
+  "who is hiring", so this is a seeker using the seeker template **inside a hiring
+  thread** — no thread-level filter can reach it, and it needs a per-comment shape
+  test. `_hn_rows` now drops a comment carrying **three or more** of the seven seeker
+  labels (`Willing to relocate:`, `Résumé/CV:`, `Location:`, `Remote:`, `Email:`,
+  `Technologies:`, `Seeking:`).
+
+  **Three, not one, and the threshold is measured.** Scored over every hn row in a
+  102,799-row harvest — 219 comments, of which 1 is a seeker: the three-label rule and
+  `Willing to relocate:` alone each fire on exactly that row, while
+  `résumé/cv OR relocate` fires **twice** — the second a genuine listing that said
+  "Resume:" because it was *asking* for one. So no single label may decide, including
+  the most seeker-specific.
+
+  **What the zero does not mean.** 0 of 218 genuine hiring posts is an upper bound of
+  roughly **1.4% at 95% confidence**, not proof of zero — though no hiring post in that
+  corpus reached even two labels, so the margin is real. **Recall rests on n=1:** the
+  corpus contains exactly one seeker row, so the rule is measured against a single
+  example of what it exists to catch, and a seeker using a different template is not
+  covered. The whole comment is dropped rather than the fields scrubbed, because the
+  details appear in `text` as well.
+
+- **A Lever posting with no body at all claimed both "no body" and "a body with no
+  headers".** `sections: []` means "we read a body and it had no headers" — a claim
+  *about* a body. With every Lever field empty there is no body for it to be about:
+  `clean_with_sections("")` returns `("", [])`, `""` normalizes to `None` at the engine
+  boundary, and the row then asserted both states at once. **21 rows**
+  `[102,799-row harvest, 2026-08-20]`, all Lever, because it is the only adapter that
+  *builds* a body out of parts that can all be absent. Fixed in the adapter, not in
+  `clean_with_sections`, which must keep returning `[]` for the **1,137** rows that
+  genuinely carry a body with no headers — from inside that function the two cases are
+  indistinguishable, and only the caller knows whether a body existed.
+
+- **A section header was built by a second, disagreeing copy of the text pipeline.**
+  `sections._detag` replaced every tag with a space — including an inline tag sitting
+  **inside a word** — while `util._clean_decoded` deletes an inline run followed by
+  lower case. Two pipelines over the same bytes, and `clean_with_sections` locates a
+  section by searching for its header **in that text**, so the disagreement broke the
+  lookup: the record published `"About t he Role"` beside a body reading
+  `"About the Role"`, and `"Health can't wait ."` beside `"Health can't wait."`
+  Measured `[20 live boards, 6,267 postings, 67,678 sections, 2026-08-21]`: **3,962
+  headers were absent from their own text; 3,882 are repaired and 0 are lost.**
+
+  **The spans were the real cost.** A header that cannot be found leaves the search
+  position un-advanced, so the next section is searched for from too far back —
+  **2,372 spans move**, 2,248 of them zero-length, i.e. empty sections anchored to the
+  wrong place entirely. The guard that steps past a header was never broken; it was
+  being handed a key that did not fit the lock, and its fixture uses a findable header
+  so it could not reach this. Classification barely moves, which is the expected shape
+  rather than a weak result — `classify` lowercases and strips before matching, so
+  exactly **1 of 67,678** changes (`"A bout the Team:"` → `about_company`).
+
+  **Named residual: 80 headers are still unfindable, and 50 of those are deliberate.**
+  `_clean_decoded` turns a block end into a newline; adopting that here would find
+  those 50 and put a literal newline inside a published `header` string in the NDJSON
+  and the CSV. A header is one line by construction. The other 30 are a separate
+  defect in `_header_at`'s tail absorption, not fixed here and not folded into the
+  figures above.
+
+- **`title` and `location` shipped with the vendor's edge whitespace on them.**
+  `engine._coerce` forced every text field to `str` and never stripped one, so
+  **9,874 titles (9.6%) and 1,894 locations** carried leading or trailing whitespace
+  `[102,799-row harvest, 2026-08-20]` — and not only ordinary spaces: 9,791 space, but
+  **57 non-breaking spaces, 21 U+202F, 14 tabs and 2 newlines**, none of which a person
+  eyeballing the value would see.
+
+  **The asymmetry is the actual defect.** `shortlist._build_row` has stripped exactly
+  these two fields for releases, so `shortlist.csv` was clean the whole time while the
+  record and the NDJSON shipped the raw value — a library consumer got dirt the CLI
+  user never saw. Fixing only `title` would have left half of that in place with no
+  reason recorded for the half left behind.
+
+  **No user-facing job id moves.** `dedup_key` is the store's primary key and
+  `id = short_id(dedup_key)` is what a user holds, so a moved key renames a job.
+  `normalize_title` and `normalize_location` both collapse every non-alphanumeric run
+  before keying, which already absorbed all five whitespace classes — **verified over
+  all 9,874 rows, 0 keys change**, and pinned by a test rather than left as a claim.
+
+  Stripping runs **before** the nullable pass, so a whitespace-only `location` becomes
+  `None` instead of a string that looks present and holds nothing (0 such rows in that
+  corpus; the ordering is free). `company` (24 rows), `url` and `source` (0 each) are
+  deliberately untouched — on a depth adapter `company` comes from the watchlist rather
+  than the vendor, so this boundary is the wrong layer for it.
+
+  **There was no test for this either.** `test_coerce_strips_edge_whitespace_without_moving_the_dedup_key`
+  is the first coverage and was mutation-tested three ways — removing the strip,
+  narrowing it to `title` only, and widening it to `company`/`url` — each red on its
+  own, every one run from a tree verified green first.
+
+- **`title_root` emitted a string no employer wrote, on every title with an accented
+  letter.** `vocab._WORD_RE` was `[A-Za-z0-9+#/&]+` and `title_root` is REBUILT by
+  joining the tokens it finds — so a character outside the class is not ignored, it is
+  **deleted, and the word splits at the hole**. `Sênior Security Engineer` came out
+  `S nior Security Engineer`. This was the only field in the record manufacturing text
+  rather than dropping it. **155 rows / 115 distinct titles, 101 getting a corrected
+  root** `[102,799-row harvest, 2026-08-20]`.
+
+  **Latin only, and the obvious fix was the wrong one.** `[\w+#/&]+` is Unicode-wide
+  and also un-drops CJK, Hangul, Katakana and Cyrillic — which sounds strictly better
+  and is not, because on a bilingual title the ASCII-only class had been accidentally
+  acting as an English extractor and doing it well. Over all 450 distinct non-ASCII
+  titles: Latin-only changes 115, full `\w` changes 200, and **all 85 extra are
+  regressions** — `Cloud Infrastructure Engineer / クラウドインフラエンジニア` roots at
+  `Cloud Infrastructure Engineer` today and would have rooted at the whole bilingual
+  string. **The cost of scoping it this way is real:** 8 titles in that corpus have a
+  root that is the entire unparsed title, and full `\w` repairs 6 of them where this
+  repairs 0. Six forgone against eighty-five avoided.
+
+  `×` (U+00D7) and `÷` (U+00F7) are excluded by the range breaks — they sit inside the
+  Latin-1 letter block and are operators. `+#/&` still hold `C++`, `C#`, `and/or` and
+  `R&D` together, and `_` is still a separator. U+0300–036F is included for **NFD**
+  input, where `Sênior` is `S` + `e` + a combining circumflex and the class would
+  otherwise split at the mark: zero rows in this corpus are NFD, and it changes nothing
+  measurable here (115 either way, byte-identical output on all 450) — it is in because
+  a corpus reaching 11 of 19 sources cannot prove no vendor sends it.
+
+  **This does NOT fix `seniority`, and the earlier framing of this bug said it did.**
+  `vocab._SENIORITY` is keyed on ASCII, so `sênior` is still not a member and those
+  rows keep `seniority: None`. **Unchanged on every population, and the population is
+  named because the three counts look contradictory otherwise:** 7 → 7 across the 115
+  distinct titles this change touches, 61 → 61 across the 506 rows carrying a non-ASCII
+  *letter*, and 772 → 772 across the 2,628 rows carrying any non-ASCII *character*.
+  Accent-folding the lookup is a separate change with its own blast radius.
+
+  **There was no test for any of this.** The full suite was green on both sides of the
+  bug, so a fix could have arrived silently.
+  `test_title_root_never_manufactures_a_word_no_employer_wrote` is the first coverage,
+  and it was mutation-tested three ways — reverting to ASCII, dropping only the
+  combining range, and widening to full `\w` — each of which turns it red on its own.
+  (A substring check for fabricated root words reads 0 both before and after, so it
+  measures that the fix introduces no NEW fabrication; it does not detect the original
+  bug. The 101 corrected roots do.)
+
+- **`posted` was one day too new on every source that sends a UTC timestamp** (and
+  `expires` with it, though only braintrust's ten rows actually move).
+  `util.to_date`'s epoch branch converted to Eastern; the string branch three lines
+  below truncated to `str(val)[:10]`, keeping the **vendor's** calendar day. One column,
+  two conventions, against a project rule of Eastern Time everywhere. Measured against
+  live vendor APIs joined to a 102,799-row harvest: **ashby 16.3% of dates wrong**
+  (26,218 rows, 25.5% of that corpus), **hn 10.5%**, greenhouse **0.00%**, lever
+  **0.00%** — the correct two already sending an ET offset or an epoch. Estimated
+  3,100–4,300 rows, always one day too **new**, so the role also dodged the staleness
+  penalty; four rows were dated tomorrow. A date-only or zone-less string is *not* an
+  instant and deliberately does not shift. Catches `OverflowError` as well as
+  `ValueError` — `.astimezone()` raises it on `0001-01-01T00:00:00Z`, the .NET/Go zero
+  value, which is in this repo's own `catalog/_raw/`. On Python 3.10 the narrower
+  `fromisoformat` falls back to truncation for .NET 7-digit fractions and colon-less
+  offsets — today's behaviour, never a new wrong answer.
+
+- **An Ashby hybrid role no longer renders as `"(Remote)"`.** The location string
+  appended the suffix from `isRemote`, which is **true on every hybrid row** — the
+  measurement is recorded at the `remote_type` assignment, which was rewired to
+  `workplaceType` in 0.9.0 while the display string was not. **7,435 rows** read
+  `location: 'San Francisco (Remote)'` beside `remote_type: 'hybrid'`.
+  **Not display-only:** `remote_scope_raw` is a byte-copy of `location`, and **775 rows**
+  correctly go `remote_areas: ['US'] → None` because a hybrid role in Menlo Park never
+  stated a remote boundary; **6,225 rows** drop 1–5 score points because
+  `score_and_signals` scans `location` and "remote" is a scored keyword. **`dedup_key`
+  does not move** — `normalize_location` already discards the word, verified identical
+  on all 7,435. Anyone diffing two harvests will see these as regressions; they are the
+  correction.
+
+- **A named person's work email and staff number no longer reach `source_extra`.**
+  `_gh_metadata` copied every Greenhouse `metadata[]` entry with no filter on the value.
+  **1,280 rows** of a 102,799-row harvest carried `{name, email, user_id, employee_id}`
+  objects under 17 key names — Hiring Manager 365, Recruiter 280, Job Approver 156 — at
+  veeam.com, datavant.com, nice.com, celonis.com, x.ai and hasbro.com. The boards publish
+  it, so nothing was breached; republishing it under a consumer's name was a default
+  nobody chose. Two encodings are filtered: the person object, and **57 rows** carrying
+  the address as a plain string (59 values; 25 of them embedded in longer text, which
+  is why the test is a search rather than a whole-value match). Clustering every dict value in that harvest gives four
+  shapes — salary, referral, a bare pay range, and the person object — so the person-key
+  test drops **zero** legitimate values. **Scoped deliberately:** this removes emails and
+  staff numbers; bare personal *names* still pass through, because filtering those needs
+  a key list that would also drop legitimate values under the same keys.
+
+- **The cross-source merge record no longer disappears at the wire.** `sources` — the
+  set of adapters that saw one role, and the only place in the record that a dedup
+  merge is written down — reached the two NDJSON exits through two different readers,
+  and they disagreed. `emit._nested` accepted a `set` and nothing else, so the same
+  value after **any** JSON round trip is a `list` and emitted `null`. `emit.manifest`
+  accepted set and list, then fell back to `[r["source"]]` — and a store row folds its
+  merge into the singular `source` as `", ".join(sorted(tokens))`, because
+  `shortlist.COLUMNS` has no `sources` column at all. So `--format ndjson --all`
+  counted a row under a **fabricated source named `"adzuna, greenhouse"`**, a string
+  no adapter has ever been called, in the one output a consumer reads to tell "the
+  market was quiet" from "four adapters were down".
+
+  **A third exit had the same defect and was missed the first time:** `cli`'s
+  attribution credit line built its token set inline the same way, so a merged row
+  contributed a fabricated name that `attribution.credit_line` drops in silence — 12
+  of them in that harvest. No source was actually under-credited, and by luck rather
+  than design: every source in a merged row also appeared in a single-source row. A
+  low-volume source whose rows all merged would have gone uncredited with no error,
+  and attribution is a **condition of API access** on five of the wired sources.
+
+  **The root cause is upstream of all three and is now filed as a known limit** in
+  `shortlist._build_row` and the README: `shortlist.COLUMNS` has `source` and no
+  `sources`, so the store flattens a set into a comma-joined singular column and
+  every reader needs a decoder. A fourth reader of that CSV — a spreadsheet, a
+  `pandas.read_csv` — has no decoder at all. Adding the column would end the need
+  for any decoder, but it changes the CSV header, so it is filed rather than made.
+
+  All three exits now read one helper, `emit._sources`, which takes `sources` as a set,
+  list or tuple, and otherwise falls back to splitting the singular `source` — where a
+  store row's joined string always lives, since there is no `sources` column to hold it. Recovering the set from that string is lossless and
+  provably so rather than by inspection: **no registered source token contains a comma
+  or a space (19 of 19)**, so `", ".join` has exactly one inverse. The singular
+  `source` on such a row now emits a real adapter token instead of the joined string —
+  it resolved against no `attribution` entry and matched nothing a consumer could key
+  on. What the store never recorded is **which** source won the merge, so that key is
+  a **representative** — the first of the sorted tokens, chosen because it is
+  deterministic — not a winner. On a merged row both adapters really did produce it,
+  so one real token is lossy-but-true; `sources` beside it carries the whole set.
+
+  **35 rows in a 7,568-row local harvest** `[local 94-board harvest, 0.9.0]` carry more
+  than one source. Dedup is where a mistake deletes a job, so these are exactly the
+  rows that must not lose their provenance. Single-source rows are unaffected.
+
+- **An Adzuna model prediction no longer renders as a posted salary.** `_adzuna_pay`
+  routes a `salary_is_predicted` row into `salary_estimated_min`/`_max` and leaves the
+  commitment columns null, exactly as designed — but `salary`, the human-readable
+  display string and the only pay field most interfaces show, was built one line
+  earlier at the call site from the same raw figures and never entered that split. So
+  a row whose numbers were correctly quarantined still displayed `$109,106`,
+  indistinguishable from a figure an employer committed to.
+
+  **221 of 277 adzuna rows (79.8%)** in a 7,568-row local harvest
+  `[local 94-board harvest, 0.9.0]`. In the downstream consumer's production store,
+  **7,150 of 7,150 adzuna rows carried a salary string while only 369 carried a
+  `salary_min`** `[live prod, engine 0.8.2]` — roughly 6,781 rows showing an estimate
+  as an offer. Verified against the live API after the fix: 253 predicted rows, **0**
+  with a display string; 45 stated rows, **all 45** keeping theirs.
+
+  `util.salary_range` had already stopped rendering the fake range
+  `$109,106–$109,106`, and its comment names this exact failure — but removing the
+  _range_ appearance is not the same as removing the _commitment_ appearance, and the
+  bare figure kept it. `SALARY_BASES` deliberately has no `estimated` member so that a
+  figure in `salary_min` is always one an employer committed to; `salary` is the
+  display of those columns, so a row with no commitment now has no string. The figures
+  are not lost — a consumer wanting to show an estimate reads `salary_estimated_*` and
+  labels it deliberately. The construction moved **inside** `_adzuna_pay` so the
+  predicted-vs-stated split is decided in one place rather than two.
+
+- **Hacker News shipped the entire job posting in the `location` field.** An HN comment's
+  pipe segments are `Company | Title | Location | …`, the convention is loose, and a comment
+  that runs out of pipes put the whole body in the segment `_hn_rows` reads the location
+  from. hn `location` averaged 461 characters and **reached 2,158**, against a maximum of
+  331 for greenhouse, 121 for themuse and 34 for ashby — 82 of 196 rows over 100. Every
+  prose rule in `vocab.remote_scope` is written for a short location string, so this
+  produced wrong values rather than merely noisy ones:
+
+  | the posting's own words                                 | recorded boundary                      |
+  | ------------------------------------------------------- | -------------------------------------- |
+  | `REMOTE (EU, Switzerland, Norway) … A lot of us have …` | `["CH","NO","US"]`                     |
+  | `Toronto, Canada REMOTE (Canada only) …`                | `["CA","US"]`                          |
+  | `ONSITE, NYC … backends are global scale built on AWS`  | `[]` — stated worldwide                |
+  | `Remote LATAM $3.5k–$4.9k/mo …`                         | six countries invented from body prose |
+
+  `US_LOCATION_RE` carries a bare `us` deliberately — vocab says so in as many words,
+  because "Remote - US" is 227 rows — and against 2 KB of prose it matches the English
+  pronoun. **Three of the twelve affected rows matched inside a URL**
+  (`https://grnh.se/bhfswi9e5us`). Max location length is now **119**; 82 locations change
+  and **22 boundaries are corrected**, every one toward the posting's own words.
+
+  **Attribution, decomposed against the raw comments** so the two HN entries in this release
+  do not have to be summed by guesswork. Re-fetched 196/196 originals from HN's Firebase
+  endpoint, because `flat.ndjson`'s `text` is post-strip and structurally cannot show a
+  pre-strip change:
+
+  ```
+  cap alone (this entry)          22 boundaries corrected
+  block-tag split adds (below)     2
+  the release                     24
+  ```
+
+  Cleanly additive, no overlap. The split's two are both the pronoun again — `Join Us in
+  Building` and `to help us` — sitting past the block tag where the cap could not reach
+  them.
+
+  **Truncated, not dropped.** Filtering over-long segments out instead emptied the location
+  entirely on 9 rows whose header and body share one segment (`REMOTE (US) Origamics is
+building…`) — discarding a genuinely stated boundary to remove the noise attached to it.
+  **The cap is 64** because a mid-token cut invents places: at 48, `Remote (USA, most
+states) or Onsite (NYC, NC, MA)` truncates inside the list, `split_place` reads the
+  fragment as a city with state `NC`, and a correct `["US"]` is suppressed. 64 is the
+  shortest cap that keeps every measured multi-place header intact.
+
+  **Stated because a green suite would otherwise imply otherwise:** the word-boundary rewind
+  is **not exercised by any real row at this cap** — all 196 segments were truncated with
+  and without it and zero changed. It is kept because the mid-token failure is real at a
+  smaller cap, and the test pins it with a _constructed_ string. The first version of that
+  assertion passed with the rewind deleted, which is the same green-but-blind shape this
+  release keeps finding. This is a **mitigation, not a cure**: a body beginning inside the
+  first 64 characters still contaminates, on 2 measured rows.
+
+- **…and the cure it names: an HN header ends at a BLOCK TAG, so the boundary is read
+  before the strip.** The cap above bounds the damage without removing it. The real
+  separator between an HN comment's header and its body is a `<p>`, not a pipe and not a
+  newline — `Portless | AI Engineer | Remote (North America) | $180k-$230k<p>AI usage today
+is basic…` — and `util.clean` flattens that tag into the same text run. By the time
+  `_hn_rows` splits on pipes the boundary is gone, so trimming afterwards can only make the
+  value **shorter, never correct**: on that row the 64-char cap still leaves 83 characters,
+  49 of them pitch copy. `_hn_rows` now splits the **decoded markup** at the first block tag
+  and reads the location out of the header, which returns it outright:
+  `['Portless', 'AI Engineer (Founding seat)', 'Remote (North America)', '$180k-$230k']`.
+
+  This is the invariant 0.9.0 already ships for `sections` — _structure is read BEFORE the
+  strip, or not at all_ — applied to the one adapter that was still reading a structured
+  signal out of stripped prose.
+
+  **The split and the cap COMPOSE, and neither is redundant.** Measured over 196 live
+  comments, maximum `location` length:
+
+  |                           | max     | mean     | over 64 |
+  | ------------------------- | ------- | -------- | ------- |
+  | cap only (previous entry) | 119     | 49.6     | 68      |
+  | split only                | **548** | 40.2     | 19      |
+  | split then cap            | **97**  | **33.3** | **15**  |
+
+  Split-only reaches a _worse_ maximum than the cap alone, because some comments carry no
+  block tag before a long header — the cap is the backstop for exactly that tail. Removing
+  either regresses the other's weak side; do not simplify one away.
+
+  **Only `location` reads the split.** `parts[0]` and `parts[1]` reproduce company and
+  title on 196 of 196 measured comments and are untouched, as is the segment scan feeding
+  `remote_type`/`employment_type`. A comment whose block tag precedes its pipes falls back
+  to the old segments rather than emptying a populated location — 4 of 196 split short, 0
+  lose a location today, and the fallback keeps that true for a thread that formats
+  differently next month.
+
+  **`_reports/flat.ndjson` cannot verify this and its test fixture is inline for that
+  reason:** the stored `text` is post-strip and contains zero markup tags on all 196 rows,
+  so a pre-strip boundary is structurally invisible in it. The measurement was taken against
+  HN's Firebase item API. A corpus that cannot contain the defect cannot clear the fix.
+
+- **Hacker News shipped a URL that could not reach the posting on 127 of 196 rows, and 48
+  of those were a link the response was carrying correctly all along.** HN renders a long
+  link as `<a href="FULL">https://boards.greenhouse.io/acme/j...</a>`. `util.clean` strips
+  the tag, keeps the **display text**, and discards the href — so `_hn_rows` then regexed a
+  URL with a literal ellipsis out of the cleaned prose. Those 404. They skew to
+  `boards.greenhouse.io` and `jobs.lever.co`, so the bug destroyed the **highest-value**
+  links in the source. `_hn_rows` now reads the href out of the decoded markup first — the
+  same invariant 0.9.0 ships for `sections` and applied above to the location.
+
+  Measured over 196 live comments, before → after:
+
+  | url bucket                       | before | after   |
+  | -------------------------------- | ------ | ------- |
+  | deep link (reaches a posting)    | 69     | **107** |
+  | truncated — dead by construction | **48** | **0**   |
+  | bare company homepage            | 46     | 34      |
+  | HN comment thread                | 33     | 55      |
+
+  62 rows change. Link quality on the rows the fix touches goes from **21%** reaching a
+  real posting to **60%** (200 plus a path depth ≥ 2, on the 47 URLs the fix newly
+  introduces). It does not reach 100% and cannot: a month-old thread contains postings that
+  have since been taken down, and 9 of those 47 are already 404/410.
+
+  **Two gates, because a recovered link must EARN its place rather than inherit it.**
+  - **Tier 1 only.** Selection reuses `_is_direct_apply` — a known ATS host or the
+    employer's own domain — and deliberately **not** `_best_apply_link`'s full preference
+    order, whose middle tier is "anything not on the known-aggregator list". That list is
+    measurably under-populated (it is why google_jobs preferred `learn4good.com` over
+    LinkedIn), and applying it here would promote 15 unclassified hosts and, on one
+    measured row, trade an employer homepage for `linkedin.com/jobs/view/…`. Reuse the
+    tier, not the order.
+  - **Slug-versus-company.** A host check proves a board is real, never **whose** it is:
+    the Phaselaw comment carries `jobs.ashbyhq.com/Pear-VC/…`, an investor's board posting
+    for a portfolio company, and the ATS allowlist waves it through. Handing a user the
+    wrong employer's posting is worse than handing them a broken link — the broken one
+    fails visibly. Gated on **recovered** links only; a URL the poster typed is never
+    second-guessed.
+
+  **A truncated URL now falls back to the HN comment link.** It is a known 404, and the
+  thread reaches the comment holding the posting's own details. This is not a promotion:
+  `_is_direct_apply` reads `False` on `news.ycombinator.com`, so those rows stay honestly
+  not-direct and stay out of a direct-only consumer's intake.
+
+  **Tier 1 leaves 21 rows unrecovered and that is the accepted price**, not an oversight:
+  their comments carry no ATS or employer-domain href at all. Taking 15 unvetted hosts to
+  rescue 15 links that are mostly dead anyway is the worse trade.
+
+  **`first_seen` resets on 29 hn rows.** `shortlist._upsert_locked` recovers a moved
+  `dedup_key` by URL and a moved URL by key; this release moves both, so neither index
+  fires. Splitting the two across a harvest would have cut it to 16 — **the sequencing was
+  available and deliberately not taken**, because the only harvest that re-keys the store
+  writes the owner's live shortlist and polls hundreds of third-party endpoints, which is
+  not worth 13 rows. Measured against that store today: 1,650 rows, **every `status`
+  empty**, so nothing recoverable is lost _today_. That conditional stops being true the
+  day the owner applies to something.
+
+- **`direct_apply` was decided per SOURCE and never looked at the URL, so the same host
+  carried opposite verdicts.** `jobs.ashbyhq.com` is direct on 1,202 rows and not-direct on
+  10 — the only difference being that hn found the second set. 92 rows corpus-wide sit on a
+  known ATS or the employer's own domain while reported not-direct, and **every one is hn**,
+  because it is the only source carrying a link a human typed. Every other breadth
+  aggregator serves its own URL, so per-source and per-URL agree there. In production all
+  172 hn rows are frozen out of the consumer's intake, so this is a **resurrection** of 85
+  rows rather than a relabel.
+
+  `engine._coerce` now reads `source_rule OR _is_direct_apply(url, company)`.
+
+  **Monotone, never replacing — this is the design, not a style choice.** Swapping the
+  source rule for the URL rule **demotes 2,638 rows in a 67,481-row production store**
+  (eyecare-partners 286, esri 204, zipline 201, okta 80, buckner 34) to gain 85 — **31:1**,
+  every one a genuine employer careers page. And they do not drop cleanly, they **rot**:
+  intake rejects them on every harvest while the stale rows stay served.
+  `_is_direct_apply` is positive-evidence-only and structurally blind to a company name
+  under 5 characters, so it is a rescue, not an oracle. The downstream consumer reached the
+  same conclusion independently and recorded it in its own source as _"WHY
+  `_is_direct_apply` IS NOT THE ORACLE"_.
+
+  **A link the adapter RECOVERED does not earn the flag from host shape.** Of the 5 rows
+  the ATS-platform additions below newly reach, **4 are 404/410** — `applytojob.com`
+  postings expire fast. Promoting on the host would assert "you can apply here" about a
+  dead posting: the same lie this entry fixes, pointed the other way and manufactured by
+  the fix for it. Only a link the poster typed can promote.
+
+  **The test that guarded this could not see it.** Its docstring says the question is
+  _"can you complete an application from this URL"_ and _"not is it a depth adapter"_ — and
+  all six of its cases call `_coerce` **with no `url` key at all**, so it exercised only
+  the branch that was wrong. A new test passes URLs; all six original assertions still pass
+  untouched, because `_is_direct_apply("")` is `False` and the OR is a no-op without one.
+
+- **The company name can be the ATS's SUBDOMAIN, and a substring test cannot tell.**
+  `bitpay.applytojob.com` matched on `bitpay` and read as BitPay's own careers page. All 6
+  measured rows are real ATS platforms, so they were right **by accident** — the identical
+  rule promotes `nike.some-aggregator.com`. No such row exists in the corpus, so the hole
+  was **latent, not demonstrated**, and is closed before something lands in it.
+  `_is_direct_apply` now matches the **registrable domain**, not any substring of the host.
+
+  **`applytojob.com` (JazzHR), `welcomekit.co`, `careers-page.com` and `personio.com` are
+  added to `_ATS_HOSTS` as part of the same change, and the order is load-bearing.** Those
+  five rows keep their verdict through the _intentional_ branch. Tightening first and
+  adding second silently drops 6 measured rows with every gate green — they are one change,
+  not two cheap ones. `personio.de` was already listed and does not match
+  `friendlycaptcha.jobs.personio.com`: the same vendor under a second TLD, which is the gap
+  that survives an audit precisely because a reader scanning the tuple sees "Personio" and
+  ticks it off.
+
+  **One accepted regression, named so nobody "fixes" it.** Shared hosting where the
+  _subdomain_ is the owner — `github.io`, `netlify.app`, `vercel.app`, `pages.dev` — is
+  structurally invisible to a registrable-domain match. `joulent.github.io` is **1 row in
+  7,545** and stays unrecognised. Allowlisting `github.io` would certify every project page
+  on GitHub as a direct apply, which is a far worse trade than one missed employer. The
+  test asserts the failure on purpose.
+
+- **google_jobs asserted a stated-worldwide eligibility boundary on 43 rows, off a token
+  that describes the query rather than the posting.** Google's `location` is `Anywhere` on
+  every work-from-home result under `&ltype=1` — 43 of 43 locally, and a real city
+  (`Vancouver, BC`, `Surrey, BC`) on the 9 that are not. It varies with the **search mode**,
+  not with the row, so it is not evidence about any posting. `derive_remote` parsed it into
+  `remote_areas = []`, and through `scoring._region_allowed` an empty list is **the one
+  unconditional bypass in the scoring layer** — so each of those rows satisfied every
+  `allowed_scopes` policy a user can set. **11 of the 43 state a US-only bound in their own
+  title, body or URL**, including one titled `Open-Source Machine Learning Engineer - US
+Remote` recorded as open to the world, and another whose body reads "Candidates must live
+  in the United States."
+
+  The mechanism underneath: **`None` meant both "unstated" and "derive me"**, so an adapter
+  had no way to say _there is no boundary here, do not invent one_. It now can —
+  `remote_scope_raw is None` is the adapter declaring it recorded no boundary evidence, and
+  that is the only state in which the location string is the engine's to read. **Whoever
+  supplied the raw owns the parse.** google_jobs records Google's own word as evidence and
+  leaves the boundary unstated; its `remote_type` still comes from `work_from_home`, a real
+  vendor boolean, and is untouched. Measured: 43 rows lose the `[]`, **348 adapter-supplied
+  boundaries are kept, and zero rows lose a boundary the location legitimately stated.**
+
+- **A full week in the office was labelled `hybrid`, and a qualified telework was labelled
+  `remote`.** Three defects in `remote_signal`'s body lane, 100 rows, every change from a
+  wrong value to a right one:
+  - `_HYBRID_RE`'s day-count alternatives never looked at the number, so `in office 5 days
+a week` read as a split week. **38 rows** — and **35 are one employer** (Postman, "we
+    are in office 5 days a week for all roles"), 2 Anthropic, 1 OpenAI. A new `_ONSITE_RE`
+    runs **before** the hybrid branch, which is the whole fix: the same string also matches
+    `_HYBRID_RE` via "days in the office", so behind it the branch is unreachable. **Blind
+    spot, stated:** the numeral branch cannot see a spelled-out count above five. 31 corpus
+    bodies write "four days a week in the office", all genuinely hybrid today, so the gap
+    costs nothing measurable — but no metric built on this check can detect that; only
+    reading bodies can.
+  - This is also the **first body path to `onsite`**. The negation branch returns
+    `(None, None)` rather than a verdict, so `onsite` was previously reachable only from a
+    location or title — which is why greenhouse produced 0 of 4,852 and themuse 0 of 216.
+    It recognises one narrow shape and does **not** make onsite generally reachable:
+    flipping the 2,872 greenhouse rows that say nothing would default an unknown to a
+    plausible value.
+  - `_ROLE_REMOTE_RE`'s bare `\btelecommut\w*|\btelework\w*` had no assertion structure,
+    unlike every sibling branch, and nothing claimed the **qualified** phrasings first. All
+    35 telework occurrences across 26 distinct contexts were read: `50% Telecommuting
+Permitted` (9), `Part-time telecommuting is an option` (2), `Telework Type: Part-Time
+Telework` (2), `part-time telework per our global telework policy` (2) all came out
+    `remote`. They are now claimed by `_HYBRID_RE`, which runs first — the documented
+    precedence ("the specific schedule beats the general claim") already resolves them once
+    they are recognised at all. `Telework Type: Full-Time Office/Project` (4 rows) goes to
+    `onsite`, because it says office in its own words. **The bare stems stay:**
+    "Telecommuting is available for this position" is a genuine assertion and a test pins
+    it; the defect was the missing hybrid claim, not the stem.
+  - **A location that IS an arrangement word is now read as one.** `vocab.remote_type` is
+    the exact whole-string normalizer every adapter already uses for `workplaceType`, and
+    `remote_signal` never asked it about the location. **+22 `In-Office` → onsite, +19
+    `Distributed` → remote, 0 flips** — and **all 41 rows are one employer on one source**
+    (Cloudflare). Placed **last**, so it can only fill a `None` and never overturn a
+    verdict; first instead, it breaks the documented "City (Remote)" demotion on 2 rows.
+    Exact-match is the safety property: adding `distributed` to `_REMOTE_RE`, which is
+    applied to the **title**, would stamp remote on 22 unclassified distributed-systems
+    titles to fix 19 location rows.
+
+  `_HYBRID_LITERALS` gains `telecommut` and `telework` — load-bearing exactly as `anywhere`
+  once was, since "Part-time telecommuting is an option" contains neither `hybrid` nor
+  `office` and the cheap gate would short-circuit before the pattern ran. All three fixes
+  ship corpus-verbatim regression tests, and four mutants (each fix disabled in turn, plus
+  the shrunk literal set) were confirmed to fail them.
+
+- **An office address was published as a remote-eligibility boundary on 622 rows.**
+  `remote_scope`'s documented rule is stated-only — "a boundary inferred from an office
+  city is not a boundary" — and the only thing enforcing it was `has_city`, a PROXY that
+  reads `split_place(...)["city"]`. A string the address parser merely could not read came
+  back `city=None`, which the gate could not tell from "parsed, and there is no city", so
+  the office country was emitted as an eligibility claim: `US` (109 rows), `United States`
+  (89), `London, UK` (50), `San Mateo, CA United States` (48, no comma before the country),
+  `Singapore` (34), `San Francisco, CA • New York, NY • United States` (23),
+  `Mexico City` (7). 622 rows across 120 distinct locations in a 7,545-row harvest;
+  **4,038 of 10,723 boundary-carrying rows in a 67,481-row production store.**
+
+  A location that names no arrangement now states no AREA — this docstring's own rule,
+  applied one level earlier than the proxy, and a strictly stronger test since a string
+  with no arrangement word cannot be stating a remote bound whatever the address parser
+  makes of it. **Areas only:** a region name is never an office address, and of the
+  no-arrangement locations that yielded a boundary, 622 were areas and **zero** were
+  regions — so gating regions bought nothing and cost `Bengaluru, Karnataka, India, APAC`,
+  which states APAC and says nothing about remoteness. Every change is to `(None, None)`;
+  no value is partially rewritten.
+
+  **This LOWERS the fill rate of `remote_areas` by roughly 30%, and that is the fix, not a
+  regression** — filed under **Changed — BREAKING** above, where it is measured against
+  jobfitr's real intake filter at production scale: 2,492 rows lose the field and **zero**
+  change what a user sees.
+
+  The narrow predicate that WAS safe on `split_place` itself — a parsed city that is a
+  country name is not a city — shipped separately as `_country_is_not_a_city`. Nulling any
+  comma-bearing city instead was measured at 2,037 rows newly asserting an office address
+  as a boundary, including the `Costa Mesa, California, United States` this module's own
+  test pins, and was not taken.
+
+  **The test that should have caught this was green.**
+  `test_remote_scope_takes_only_STATED_boundaries` exists to enforce exactly this
+  invariant; four of its five strings passed because `has_city` is TRUE on them — the one
+  shape where the proxy works — and the fifth passed through the state-name guard, a
+  different branch. The failure path was never exercised. Its inputs were hand-written and
+  the corpus's are not, and that difference was the bug. It now carries ten real corpus
+  locations with their row counts, and the gate was mutated to confirm they fail without
+  it.
+
+- **Adzuna: the city was taken from the wrong tier of the vendor's hierarchy — or
+  thrown away.** `_adzuna_place`'s docstring said "depth 5 shifts city one slot, so
+  branch on length rather than indexing blindly"; the code read
+  `city = area[-1] if len(area) >= 4 else None`, which does not branch. At depth 5 that
+  is a neighbourhood (`Grand Central`, `Hayes Valley`, `SoMa`), and at depth 3 the `>= 4`
+  test **discarded the city entirely** — `'San Francisco, California'` (15 rows) and
+  `'New York City, New York'` (8) returned no city while the vendor had supplied a clean
+  one. The city is now pinned to its slot: `area[3]`, falling back to `area[2]` at depth 3. **Not a `County`/`Parish`/`Borough` suffix rule** — that is a US-English word list
+  and Adzuna's UK, Australian and German hierarchies put a district, an LGA and a Kreis
+  in that tier. The test that covered this asserted the unshifted value while its own
+  docstring described the shift, so it was green and the documented behaviour had never
+  existed.
+
+  **This reads the hierarchy correctly; it does not make Adzuna's geography correct.**
+  `'Times Square, King County'` resolves to `state='WA'` on 3 rows, and Times Square is
+  not in King County, Washington. _Inferred from source and harvest output — there are no
+  Adzuna API keys in this environment, so unlike the Ashby and Greenhouse findings this
+  one was never confirmed against a live response._
+
+- **Ashby: a `state` that was just the country repeated, and the vendor's own trailing
+  whitespace.** 36 of 1,730 live postings put the country in `addressRegion`
+  (`("UK","UK")` 16, `("Australia","Australia")` 7, `("Singapore","Singapore")` 5), and
+  11 send it with trailing whitespace (`"California "`) straight into a column that gets
+  grouped on. `_ashby_place` now compares the two fields as **raw strings** and trims at
+  the boundary. The obvious rule — drop a region that _resolves_ to the row's own country
+  — was measured and rejected: `England` resolves to GB but is a genuine ISO 3166-2:GB
+  subdivision, and **27 of the 34 values that rule deleted were correct (39% collateral)**.
+  `vocab._COUNTRY_CODES` carries that alias for prose matching; borrowing it to validate a
+  data column is what makes it wrong. String equality catches 36 of 43 with zero collateral.
+
+- **Geography: the subdivision was being left inside `city`.** `vocab.split_place` splits
+  on the LAST comma, so `"Costa Mesa, California, United States"` matched the
+  country-name branch, wrote `"Costa Mesa, California"` into `city` and left `state`
+  null. **11,447 of 67,481 rows `[live prod, 2026-08-20]` — one in six — carry a comma
+  inside `city`**, and 53.7% have no `state` at all. The three-part branch already
+  re-split the head; it was gated on a two-letter tail, so a spelled-out country never
+  reached it. `split_place` now re-splits a comma-bearing head there too, and reads a
+  spelled-out US state as a tail (`"Mountain View, California"`, 449 corpus parts, which
+  previously returned nothing at all).
+
+- **Geography was skipped entirely whenever an adapter set any ONE field.** The fallback
+  in `engine._coerce` was gated on city AND state AND country all being `None`, which is
+  not what the paragraph above it claims ("ONLY fills what the adapter left None … can
+  add, never overwrite"). Lever sets `country` from a real vendor field on 135 of 135
+  rows, so the gate never opened and its own `"New York, NY"` was never read: **0 of 135
+  Lever rows had a city.** Now per-field — and **gated on country agreement**, which is
+  required rather than defensive: SmartRecruiters sends `"bengaluru, in"` with country
+  `IN`, and `split_place` reads that `in` tail as INDIANA. Ungated, the fix wrote a US
+  state onto 60 Indian rows.
+
+- **A work arrangement was being turned into a city.** `_REMOTE_STRIP`'s `(?![a-z])`
+  boundary is satisfied by a hyphen, so `"Remote-Friendly"` became the city `"Friendly"`
+  — a real town in West Virginia, so not even self-evidently wrong downstream. 14 rows
+  `[live prod]`. A hyphen-compound is now one token **unless its fragment resolves as a
+  place**, which is what keeps `"Remote-USA" -> US` working; a blanket hyphen guard was
+  tried first and silently lost it.
+
+- **A subdivision or a region sitting in `city` now goes to the field that fits it.**
+  `"Remote - Illinois, USA"` yielded `city="Illinois"`; it now yields `state="IL"`, and
+  `"LATAM, Brazil"` yields no city rather than the city of LATAM. This one is why the
+  release is worth shipping as a whole: **the other geography fixes alone move the
+  invention class from 51 distinct bad parts to 52**, because re-splitting
+  `"Americas, Europe, Israel"` turns `city="Americas, Europe"` into `city="Americas"` —
+  visible junk into plausible junk, which is strictly worse. With this rule the same
+  count goes **51 -> 22**.
+
+- **`locations[]` and the scalar fields no longer disagree.** The nested branch parsed
+  raw while the scalar stripped arrangement words first, so one row carried
+  `city="Illinois"` beside `locations[0].city="Remote - Illinois"`. Both read through one
+  helper now: **125 nested entries carrying a separator or the word "remote" in `city` -> 0.** Multi-location strings also split on `|` and `•`, not just `;`.
+
+- **Multi-location splitting no longer manufactures places.** `|` does not mean the same
+  thing on every board: Greenhouse uses it for separate offices, **Ashby uses it as a
+  hierarchy** (`"US | Illinois | Chicago"` is one office), and some Greenhouse boards
+  append coordinates. A blanket split emits 4,789 `locations[]` entries `[live prod]` of
+  which **2,562, across 1,332 rows, are not a place under any reading** — a latitude
+  receiving a city, a state, a country and an apply url. Parts that cannot be established
+  as places are dropped, and the whole string is kept when none survive (146 rows). The
+  test is structural — a bare number, an unbalanced parenthesis, nothing left after the
+  arrangement words — never a place list, which would be an artifact of a US-heavy tech
+  corpus.
+
+  **`dedup.normalize_location` deliberately keeps `;` only**, and now says so: adopting
+  the wider set changes 1,488 keys — and so 1,488 user-facing job ids — to buy 2 merges.
+
+- **`state` no longer reads a bare `"…, Georgia"` as the US state.** Exactly four US
+  state/territory names are also ISO 3166-1 country names, and three of them
+  (`American Samoa`, `Guam`, `Puerto Rico`) resolve to the same code under both
+  registers. Only `Georgia` conflicts. Scoped to the two-part bare tail: the 283 prod
+  rows reading `"…, Georgia, United States"` are decided by the country branch and keep
+  their state; of the 118 ambiguous ones, **11 are the Republic of Georgia** (Tbilisi 10,
+  Adjara 1). 107 rows forgo a gain — returning to the all-None they already have — so
+  that 11 do not invent `country="US"` for a Georgian job.
+
+- **A `city` that is a country name is now `None`.** `"Canada, United States (Remote)"`
+  yielded `city="Canada"`. Nine rows also gain a correct stated remote boundary as a
+  result, because the category error was suppressing it.
+
+- **An inline tag no longer leaves a space where it stood — 4,580 → 62 spaces sitting
+  before a punctuation mark.** `clean` replaced EVERY tag with a space, which is right
+  for a block tag and wrong for a bold or a link: `At <a>Smartsheet</a>, your ideas`
+  became `At Smartsheet , your ideas`, on 67.7% of rows with a body, and a tag boundary
+  landing mid-word split "the" into "t he". Measured on 2,712 raw bodies `[live fetch, 9
+boards, 2026-08-20]`; also 5 → on himalayas and 7 on a non-tech Muse sample.
+
+  **The uppercase guard is the whole rule**, and it is why this is not simply "delete
+  inline tags": a word split by a tag always CONTINUES in lower case and two distinct
+  words do not, so an uppercase letter after the run means the space stays. Without it
+  `<strong>Requirements</strong>Must have` collapses to `RequirementsMust`. Zero words
+  were glued — a camel-case proxy held at exactly 3,099 before and after. The
+  case-insensitive flag is **scoped to the tag half on purpose**: a module-level `re.I`
+  case-folds the `(?![A-Z])` lookahead too and silently turns the guard off, with every
+  test still green. Two people hit that independently while building this.
+
+  **Composition, reported rather than explained:** this change and the header rule each
+  produce **0** sections whose span cannot be located. Applied together they produce
+  **10** of 22,202, which fail safely — the section keeps its `type` and `header` and
+  carries no offsets, which is what `clean_with_sections` documents for a disagreement
+  it cannot resolve. The cause is not understood and could not be reproduced on a
+  separate 910-body corpus at any combination, so it is recorded as corpus-specific and
+  nothing further is claimed about it. The two changes ship as separate commits for that
+  reason.
+
+- **A Braintrust row reports `sections: []`, not `null`, because it has a body.** `null`
+  means "there was no body to read" and `[]` means "a body with no headers"; this adapter
+  emitted `null` while shipping a built body on 29 of 29 rows, which is a false statement
+  about the posting and collapses the exact two-state distinction the field exists to
+  carry. Its synthesized text now goes through the same `clean_with_sections` path as
+  every other body, which yields `[]` because a built sentence has no markup.
+
+- **Lever reads the markup body and promotes its own list headings — `sections` on 488
+  of 489 postings, up from 13 of 135.** This adapter read `descriptionPlain` and
+  `additionalPlain`, so it could never produce a section: a header exists only in
+  markup. It is the same defect Ashby had, one adapter over, missed when Ashby's was
+  fixed in 0.9.0. Lever also labels every `lists[]` entry with its own heading —
+  `{text: "What We Require", content: "<li>…"}` — and the adapter appended that label as
+  bare prose, discarding structure the vendor states outright and then failing to find
+  it again. Wrapping it in a heading tag transcribes the source rather than guessing at
+  it. Measured `[live api.lever.co, 4 boards, 489 postings, 2026-08-20]`: rows with no
+  sections 471 → 1, typed sections 1 → 1,336, 0 unresolved spans.
+
+  **`text` changes on every Lever row**, which is the real cost: median 7,286 → 7,304
+  chars on palantir, because the HTML body drops inline URLs and bullet markers the
+  plain field spells out — the same trade Ashby took. **Fit scores are unchanged on 482
+  of 489 postings**; the 7 that move span −2 to +3, mean −0.29. The `or` fallbacks are
+  load-bearing: an employer who fills only the plain field would otherwise ship with an
+  empty body, silently, because `""` is a legal value and nothing raises.
+
+- **Only a HEADING starts a section — inline emphasis inside a sentence no longer does.**
+  0.9.0 promoted every `<strong>`/`<b>` it found, anywhere. So
+  `...leverages state-of-the-art <strong>computer vision, deep learning, and generative
+AI</strong> to automatically analyze...` produced a section headed by that noun phrase
+  whose span opened on the word "to": **5,753 sections across 2,056 rows** `[local
+94-board harvest, 0.9.0]`. Measured on 2,712 raw bodies `[live fetch, 9 boards,
+2026-08-20]`: headers that do not start a line **1,701 → 94**, spans opening
+  mid-clause **1,334 → 158**, headers with no letter or digit **13 → 0**, `type: null`
+  46.9% → ~34%, and **0 sections whose span could not be located**, unchanged. This also
+  closes the mid-sentence half of the "span ends mid-sentence" and "span starts on
+  punctuation" reports — they were one bug, not three.
+
+  A heading is **block-initial**: nothing but whitespace and punctuation between it and
+  the start of its block. What FOLLOWS it is deliberately not tested. Requiring the bold
+  to be the whole line scores better on every span-quality metric and is wrong — it
+  deletes the label-value paragraph (`<p><strong>Visa sponsorship:</strong> We do
+sponsor visas!`, 487 of 487 postings at one employer) and took `eeo_legal` coverage
+  from 100% to 0% on three boards. **The metric could not see its own cost, because a
+  deleted section has no span left to judge.** Inside a list item the rule is stricter
+  and the discriminator is morphology rather than the container — a heading terminates
+  its label with a colon, inside the tag or just outside it — because excluding list
+  items outright destroys 130 typed headers, 34 of them at a non-tech employer.
+
+  **Known residual, named rather than left to be re-found:** two adjacent bold runs are
+  two headings (160 occurrences across 52 of 2,752 bodies, 9 of 11 vendors), which is
+  correct for `<h2><strong>Key responsibilities</strong><strong><br></strong></h2>` and
+  wrong for a bolded label followed by a bolded value — `Equity grade:` → `2`,
+  `Recruiter:` → a recruiter's personal name. That second case is now handled by the
+  colon rule applied at the SECOND boundary: a bold is a heading only if the bold before
+  it did not terminate a label. Not a third clause — one idea in two places. **68
+  sections still read a value as a heading**, down from 94, with the typed-section count
+  unchanged at 13,925 and every other defect metric flat on two corpora that share no
+  board.
+
+- **`employment_type` is read from vendor metadata by VALUE, not by key name — 1,558
+  rows `[local 94-board harvest, 0.9.0]`, and 8,239 rows across 264 employers `[live
+  prod, 2026-08-20]`.** Both numbers are real and the second is the blast radius: the
+  local corpus is one 94-board slice, so quoting only 1,558 understates what ships by
+  5.3×. **A title that contradicts the metadata vetoes the fill** — a hand-read of 150
+  sampled rows found the metadata asserting a type the posting denies (`Store Lead -
+  Part Time` carrying `Full Time`; `Clinical Lab Scientist (Contract)` carrying
+  `Full-time`), 163 rows / 1.91% of the live fill, landing in `shortlist.csv` where a
+  CLI user reads them. The title is a **veto, never a rival answer**: reading it as a
+  competing answer was measured and abandoned after three attempts surfaced three
+  false-positive classes, each a NON-TECH role invisible on the 94 tech boards this
+  corpus is built from — `b2b` ("B2B Performance Marketing", a market), `trainee`
+  ("Manager Trainee", a permanent trades role), `contract` ("Contract Management
+  Lead", a domain noun). Under a veto each costs one unfilled row rather than a wrong
+  assertion — and the veto carries **two measured guards**: it does not fire on domain
+  usage (without that, 54 of 163 vetoes, **33.1%**, were correct fills discarded), and
+  it compares by **overlap rather than difference**, so a title naming a second axis
+  (`Customer Operations Intern - Part-time` against `Intern` metadata) corroborates
+  instead of contradicting. Net: **8,526 → 8,432 filled `[live prod]`**, 94 withdrawn
+  (1.10%). An independent hand-classification of all 163 pre-guard vetoes put the
+  false-positive rate at **34.4%**; the guards release 54 of those, and every released
+  row is domain usage — no genuine contradiction is given up. **One known residual
+  remains and is deliberately unfixed:** `Production Director – Seasonal Content` is a
+  domain noun the guard does not catch. It costs one unfilled row rather than a wrong
+  assertion, and a single-row entry is exactly the exception-table growth this lens
+  refused everywhere else. The rest of the 94 are `Per Diem` vs `Part-time` (31),
+  a `(Contract)` term against `Full-time` metadata (23), and explicit `Part Time` /
+  `Temp` titles (34). `Contract to Perm` (2) is genuinely ambiguous and vetoing it is
+  the safe reading, not a clean win.
+
+  **Two names for one arrangement do not contradict.** `{PER_DIEM, PART_TIME}` and
+  `{CONTRACTOR, TEMPORARY}` are compatible: an employer's form offers
+  Full-time/Part-time with no per-diem option, so a nursing manager picks Part-time
+  and writes `Per Diem` in the title. That is a vocabulary GRANULARITY mismatch — the
+  title is more specific than the form allowed — not a disagreement, and vetoing on it
+  discarded 40 rows the metadata had right. Final: **94 → 54 vetoes, 0.63%**, and the
+  repo's own rule is restored — a structured signal stands when nothing actually
+  contradicts it.
+
+  **The pattern this lens should be remembered for.** That class is 100% NON-TECH
+  (nursing, creative contract work) and measures **zero** on the 94 tech boards the
+  rule was built against — the third such class here, after the title-contradiction
+  defect itself and the `b2b`/`trainee`/`contract` false positives. A defect can
+  measure zero on the corpus you designed against and be real in production.
+
+  **NOT covered by any of this:** the Braintrust numeric-tag filter and the
+  parenthetical strip were never exercised by the hand read. That is untested, not
+  cleared — three green passes on a different rule imply nothing about them.
+
+  **How this was found is the more useful half.** The n=150 hand read found the defect
+  KIND — 2 rows — and could never have found its RATE: at 0.46% prevalence the sample
+  was underpowered by construction, with an expected count of ~1. A mechanical scan of
+  all 8,555 rows found 62 in seconds. **A hand read finds defect kinds; only a full
+  scan finds their rate.** Both were necessary and neither would have sufficed. It was `None` on 100% of Greenhouse rows while a third of them carried an
+  unambiguous type string in `source_extra`. The fix ignores key
+  names entirely and tests every metadata _value_ against `vocab._EMPLOYMENT_MAP`,
+  accepting only a real map hit. Key names could never have worked: measured `[live
+prod, 2026-08-20]`, **61 distinct keys** carry a resolvable value — including
+  `Employment Classification (UKG)`, `TH: Employment Type` and
+  `Full-Time/Part-Time Status` — while two of the four most obvious names (`Job Type`,
+  `Worker Type`) resolve to nothing at all, because their values are `Standard` and
+  `Employee`. Fill-only; `Regular` (151 rows) and `Standard` (124) are correctly left
+  alone. `permanent` is skipped under a key naming a _term_ (`Contract Type`,
+  `Duration`) — `vocab` already flags that entry as its shakiest, and such a key makes
+  the flagged failure more likely, not less.
+
+- **Two disagreeing metadata fields now yield `None`, not an arbitrary pick.** 11 rows
+  state two different types at once (`Employment Type=Contractor` with
+  `Time Type=Part Time`). A source that said two things has not said one; both raws are
+  kept, joined and sorted, so the disagreement stays auditable.
+- **A qualified contract string normalizes again — 29 of 29 Braintrust rows.** The
+  adapter builds `f"contract ({contract_type})"`, which flattened to `contract long`,
+  missed the map and became `OTHER`, while bare `contract` maps to `CONTRACTOR`. The
+  adapter was defeating its own normalizer. A trailing parenthetical is now stripped
+  **only after a direct lookup misses**, so no already-resolved value can change.
+- **The Muse no longer reports an employment type it never had — 216 of 216 rows.** The
+  adapter read `type`, which is that API's posting-_provenance_ flag: the literal
+  string `"external"` on 20/20 rows probed live 2026-08-20. Every Muse row became
+  `OTHER`, the single largest contributor to that bucket. `catalog/themuse.md` has
+  recorded `employment_type: null` since it was written — the code was reading a field
+  the profile says does not exist, the second time in this repo the catalog was right
+  and an adapter was not. **The captured fixture said `"Full Time"`, a value the API
+  has never sent, which is why the parser test agreed with the bug; it is now a real
+  capture.** Together with the two fixes above, `employment_type='OTHER'` drops from
+  247 rows to 2.
+- **The Muse's canonical level token is no longer discarded.** It ships
+  `{"name": "Mid Level", "short_name": "mid"}` in one object and the adapter kept only
+  the display string. `short_name` now becomes `seniority` and `name` the raw — worth
+  87 rows on a `seniority='senior'` filter.
+- **A stated `seniority` is case-folded — 788 rows.** One column held five vendor
+  dialects at once, so `seniority='senior'` returned 2,229 rows and silently missed 319
+  more spelled `Senior`, `Senior Level` or `Mid-Senior Level`; 179 of those differed by
+  letter case alone. **Rungs are deliberately NOT mapped.** Every other vocabulary here
+  normalizes onto one someone else published, and none exists for seniority — so
+  ordering would be this library's opinion, which `catalog/_SCHEMA.md` ("Fidelity, not
+  opinion") leaves to the consumer. Probed live: SmartRecruiters ships LinkedIn's
+  published enumeration verbatim, in which `Associate` ranks **above** `Entry level`,
+  so the one ladder available to copy would have contradicted a vendor's own published
+  ordering on the source where it fires on 60% of rows. `Mid-Senior Level` therefore
+  stays `mid-senior level`. `"Not Applicable"` and `"Any"` become `None` with the raw
+  preserved — the vendor answered and declined to classify, and that is not a level.
+- **Braintrust's opaque numeric ids are out of `tags` _and_ the scored body** — 164 of
+  its 227 tag tokens corpus-wide, and every purely-numeric tag in the corpus is this
+  source. They reached two fields: `tags`, whose contract says "skills the source
+  itself extracted", and `text`, where they were interpolated under the label
+  `Skills:` and then read by `relevant()` and `score_and_signals()` on 42 live rows.
+  Filtered once upstream of both — cleaning `tags` alone would have fixed half the
+  defect while reporting it done.
+
+- **A pay range in `salary` now becomes numbers — 3,489 rows that had a fully formed
+  range and five null columns.** Eleven of twelve adapters call `salary_from_text`,
+  which returns a DISPLAY STRING and nothing else, and the only text→number parser in
+  the codebase (`vocab.google_salary`) was wired to one adapter and could not read a
+  period-less range: its pattern ends in a mandatory `an?|per <unit>`, which
+  `$200,000 – $250,000` does not have. Measured `[local 94-board harvest, 0.9.0,
+2026-08-20]`: `salary_basis` was `stated` on 981 rows, **`parsed` on 12**, null on
+  6,567 — while **3,500 rows carried a range in `salary` with every structured column
+  null**, 74.3% of every row with a salary at all. `README.md:41` promised `parsed`
+  meant "read out of free text"; the promise was kept on twelve rows.
+
+  New `vocab.salary_from_display` + `engine.derive_salary`. **One parser at the
+  boundary, not twelve in the adapters** — per-adapter parsing is how three geography
+  vocabularies reached one column. Recovers **3,489 of 3,720** target rows (93.8%);
+  the 231 refusals are deliberate.
+  - **The multiplier distributes leftward.** `$200-260K` means 200,000–260,000, but
+    `_G_NUM` binds the multiplier per-number, so the obvious generalization reads
+    lo=**200**. A `salary_min` of 200 on a $200K job — wrong by 1,300×, in the column
+    this README calls what an employer COMMITTED to, carrying `basis="parsed"`. **26
+    rows.** Latent in `google_salary` today and harmless only because its mandatory
+    period phrase gates these strings out; making the period optional is exactly what
+    arms it.
+  - **Refusals, all measured:** a range wider than 5× (catches `$150,000 - 250,000k`
+    → \$250 MILLION, and `$306 - $390,000`); a figure under 1,000 with no recoverable
+    period (`$30-120` is an hourly rate or a thousands-shorthand and the string cannot
+    say which); a lone figure, because `up to $200,000` has no floor to read.
+  - **Currency and period are READ, not inferred** — from a sole code or unit within
+    90 characters of where the display string sits in `text`. Coverage: currency
+    **82.1%**, period **24.5%**; two candidates in the window is a refusal, not a coin
+    flip. `country` was rejected as evidence on measurement: `country='CA'` rows whose
+    body names one code say **CAD on 107 and USD on 18**, so a country rule is wrong in
+    both directions, and 823 rows have no country at all.
+  - **A stated period is vetoed on magnitude.** A real Greenhouse posting labels a
+    \$140,000–\$220,000 band an "Estimated Hourly Pay Range". Refusing a stated period
+    is disbelieving a witness; inventing one from magnitude stays forbidden
+    (`vocab.salary()`: _"A period is never guessed"_).
+  - **A model prediction never reaches the commitment columns.** Caught by measuring
+    the fix, not by reviewing it: a predicted row has NULL `salary_min` by design, so
+    a fill-only test waves it through — and `derive_salary` wrote `109106.0` into
+    `salary_min` with `basis="parsed"` on a row whose `109106.69` was Adzuna's model
+    output. Guarded explicitly on `salary_estimated_*`.
+
+- **A point value is no longer rendered as a range.** `util.salary_range` printed
+  `$188,569–$188,569` for every one of Adzuna's **220** point-estimate rows; a reader
+  sees a range and reads a precise employer offer, and the only tell was the cents in
+  the underlying value, which the formatting rounds away. `_adzuna_pay` kept the
+  prediction out of the commitment columns and the display string handed back the
+  appearance of one.
+
+- **`engine.py`'s `salary_basis` comment named a token that never existed** (`text`);
+  `vocab.SALARY_BASES` is `frozenset({"stated", "parsed"})`.
+
+- **Ashby reads `descriptionHtml`, not `descriptionPlain` — `sections` was empty on every
+  Ashby row.** Headers live in markup and nowhere else, so an adapter reading a plain-text
+  body cannot produce one. Ashby serves BOTH fields; this one read the plain half, which
+  made the feature above dead on the second-largest source: `[]` on **1,198 of 1,198 rows**,
+  15.8% of a harvest, 12,661 rows in the downstream consumer's production store. Measured
+  `[live probe api.ashbyhq.com, 5 boards, 457 postings, 2026-08-20]`: both fields present on
+  457/457, `descriptionHtml` yields **3,981** sections and `descriptionPlain` yields **0**.
+
+  Caught by reading harvest OUTPUT, not code — the adapter, `clean_with_sections`, and the
+  `sections` coverage figure were each correct in isolation, and the defect existed only at
+  the intersection of one source and one field.
+
+  **`text` changes on Ashby rows as a result, and it is a small loss.** Ashby renders a link
+  as `text https://url` in the plain field and as an `<a href>` in the HTML one; `clean`
+  drops attributes, so the body loses its inline URLs and bullet markers — mean 4,822 → 4,663
+  characters (−3.3%) over 75 postings. Every other HTML source already behaves this way
+  (Greenhouse loses its hrefs identically), so this makes Ashby consistent rather than
+  uniquely lossy, but a consumer reading URLs out of `text` will no longer find them there.
+
+- **`clean()` stripped HTML tags before decoding HTML entities, which is backwards for any
+  source that sends HTML-ESCAPED HTML.** The strip found no `<...>` to remove and the decode
+  then turned `&lt;div&gt;` into `<div>` — the function whose job is to remove markup was the
+  one creating it. Greenhouse escapes **every** body (2,697 of 2,697 measured across nine
+  employers; 116,214 live tags left behind on one board alone) and is roughly 65% of a typical
+  harvest, so `text` changes on about two thirds of harvested rows. The Muse, Arbeitnow, HN,
+  Workday and Remotive each do it on a minority of postings, which is why this is fixed in the
+  one shared helper rather than in the Greenhouse adapter.
+
+  Two consequences worth planning around:
+  - **Greenhouse salaries parse for the first time.** `salary_from_text` matched **0 of 809**
+    postings on one board before and **424 of 809** after — the pay figures sat inside tags.
+    Expect `salary` and `salary_basis: "parsed"` fill to jump on Greenhouse rows.
+  - **Fit scores rise on Greenhouse specifically.** 655 of 809 postings moved, every delta
+    positive (median +1, max +9), from a 21.6% shorter body and keywords that tags had split.
+    That is a systematic uplift of one source relative to the other eighteen, so it shifts the
+    cross-source mix of a shortlist and where `min_score` cuts, not just individual numbers.
+
+  Three smaller decisions came with it. The tag pattern is now `</?[A-Za-z][^>]*>` rather than
+  `<[^>]+>` — **insurance, not a live fix**: the two produce byte-identical output on all 2,697
+  bodies today. What earns the change is that 12 of them carry an inner literal `<` once entities
+  are decoded (`travel as needed (<25%) ... to hit the goals`) and none happens to carry a `>`
+  after it; the day one does, the loose pattern deletes the clause between them. A block-level
+  closer (`</li>`, `</p>`, `</h*>`, `<br>`) now becomes a line break rather than a space —
+  verified neutral for score, salary and remote verdict either way. And whitespace collapse uses
+  `[^\S\n]+`, so a non-breaking space still collapses as it did before this release; an earlier
+  draft of the fix left a literal U+00A0 on two thirds of bodies.
+
+  `clean()` had no test at all, which is how this shipped; it has six now.
+
+  **Not verified:** Adzuna, Google-for-Jobs and USAJOBS need credentials and were not probed,
+  so their bodies are unmeasured either way.
+
+### Documentation
+
+- `category` and `team` now carry the `catalog/_SCHEMA.md` vocabulary in the contract
+  itself: `category` is the catalog's **`function`** (job family), `team` and its
+  deprecated alias `department` are **`org_unit`** (the employer's own group). A source
+  that publishes only an org unit therefore leaves `category` `None` **correctly** —
+  this has been filed as a bug more than once, and deriving one from the other was
+  tried downstream and reverted after it filed 895 backend engineers under Science and
+  Engineering. **Superseded within this release:** `team` and `category` were then
+  merged into `department` — see **Removed — BREAKING**. The `function` / `org_unit`
+  split still holds in `catalog/_SCHEMA.md` for a profile, not in the record.
+- Corrected three claims that had gone stale: `CLAUDE.md` and
+  `tests/test_sources.py` both stated that the downstream consumer reads `department`
+  (it does not — the column is absent from its production schema and its code reads it
+  zero times), and `catalog/_SCHEMA.md` described a Braintrust `level` mapping that was
+  already removed. The `department` byte-identity gate was unchanged and green at the
+  time; it was deleted later in this release, with `team` (see **Removed — BREAKING**).
+- **The README's NDJSON key-count table was measured on a harvest that no longer
+  exists, and it was four fields stale.** It published 50 / 31 / 30 keys against a
+  7,568-row local harvest, and stayed at those figures when `industry`,
+  `parent_company`, `salary_estimated_min` and `salary_estimated_max` were removed from
+  the record — a docs-and-code-in-one-commit miss. Re-measured on a corpus that is
+  named in the caption: **102,799 rows across 7,360 boards, 46 / 29 / 28 keys and
+  7,694 / 7,295 / 1,691 bytes** per median record, counting leaves. `text` is 78% of a
+  record's bytes rather than 72%. The caption now also states the corpus's coverage —
+  **11 of 19 sources, 68% Greenhouse**, with usajobs, adzuna, google_jobs, workday,
+  workable, teamtailor, rippling and themuse absent — and which way that biases it, so
+  **19 null keys reads as an upper bound** rather than a measurement of the market. A
+  number whose provenance is gone cannot be re-checked; naming a skewed corpus beats
+  citing an unreproducible one.
+
 ## [0.8.2] - 2026-08-15
 
 ### Changed
@@ -20,7 +1899,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A vendor's own ISO code now resolves.** `"United States"` worked while the literal
   `"US"` — the string this package itself stores — did not, because the lookup only knew
-  country *names*. `"US-TX"`-style subdivisions resolve too, matching what the location
+  country _names_. `"US-TX"`-style subdivisions resolve too, matching what the location
   parser already emits.
 
   **Seven codes deliberately still do not resolve:** `AR CA CO DE ID IL IN` are each both a

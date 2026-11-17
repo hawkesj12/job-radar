@@ -14,6 +14,7 @@ opt-in extra, off by default; see the README.)
 from __future__ import annotations
 
 import atexit
+import html
 import re
 import threading
 import time
@@ -26,12 +27,19 @@ from zoneinfo import ZoneInfo
 from . import config
 from . import iso3166
 from . import vocab
-from .vocab import country_code, remote_type, salary, salary_period, split_place
+from .vocab import (
+    country_code,
+    remote_type,
+    salary,
+    salary_period,
+    split_place,
+    us_state_code,
+)
 from .util import (
     NET_ERRORS,
     age_int,
     posted_from,
-    clean,
+    clean_with_sections,
     get_json,
     post_json,
     q,
@@ -45,6 +53,13 @@ from .util import (
 # One definition, two users: the full fetch below (with bodies) and live_greenhouse
 # (without them). Greenhouse also backs the board-ownership check in discover.
 GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
+
+
+# An address inside a metadata VALUE, not a whole-value match: of 59 such values,
+# 25 are embedded in a longer string. Deliberately narrow -- the dot-TLD requirement
+# is what leaves 'Back@Work Physical Therapy' and '43000 Production@Pure' alone,
+# verified against every string value in a 102,799-row harvest: 0 false positives.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")
 
 
 def _gh_metadata(md) -> dict:
@@ -64,7 +79,37 @@ def _gh_metadata(md) -> dict:
     out = {}
     for m in md or []:
         if isinstance(m, dict) and m.get("name") and m.get("value") not in (None, ""):
-            out[str(m["name"])] = m["value"]
+            v = m["value"]
+            # A PERSON IS NOT A JOB ATTRIBUTE. Greenhouse's user-type metadata carries
+            # a named employee's work email and internal staff number: 1,280 rows of a
+            # 102,799-row harvest, under 17 key names (Hiring Manager 365, Recruiter
+            # 280, Job Approver 156), at veeam.com, datavant.com, nice.com, celonis.com,
+            # x.ai, hasbro.com. The board publishes it, so nothing is breached -- but
+            # re-publishing a third party's contact details under a consumer's name is
+            # a decision, not a default. The name-vocabulary reasoning above is about
+            # KEYS; this is about VALUES, which it never asked.
+            #
+            # TWO ENCODINGS, and the dict test alone misses the second. Clustering
+            # every dict value in that harvest by key signature gives exactly four
+            # shapes: salary {max_value,min_value,unit} 5,112 rows, referral
+            # {amount,unit} 2,017, PEOPLE {email,employee_id,name,user_id} 1,739, and
+            # a bare pay range {max_value,min_value} 36. So the person-key test drops
+            # zero legitimate dicts -- but 57 MORE rows carry the email as a plain
+            # STRING ('Hiring Manager' -> 'vinit.jadhav@careem.com'), same harm,
+            # invisible to an isinstance check. 59 such values over those rows: 34 are
+            # the whole value, 25 are embedded in a longer one -- so `search`, never
+            # `fullmatch`. The embedded form is 42% of the string cases, not a corner.
+            #
+            # SCOPED CLAIM, deliberately: this removes work emails and internal staff
+            # numbers. Bare personal NAMES still pass through ('Hiring Manager':
+            # 'Pete Kern'). Filtering those needs a key list that does not also drop
+            # 'Not Applicable' and other legitimate values under the same keys, and
+            # a name with no contact detail is a different risk tier.
+            if isinstance(v, dict) and {"email", "employee_id", "user_id"} & set(v):
+                continue
+            if isinstance(v, str) and _EMAIL_RE.search(v):
+                continue
+            out[str(m["name"])] = v
     return out
 
 
@@ -72,11 +117,23 @@ def fetch_greenhouse(slug: str):
     data = get_json(f"{GREENHOUSE_API}/{slug}/jobs?content=true")
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("content", ""))
+        text, secs = clean_with_sections(j.get("content", ""))
         depts = j.get("departments") or []
         out.append(
             {
                 "title": j.get("title", ""),
+                # The board owner, as Greenhouse itself reports it, on a field that
+                # was already in the response and was being thrown away. Measured
+                # live 2026-08-24 over 104 boards: present and non-empty on 100% of
+                # rows, and byte-identical to what `discover.board_owner`'s separate
+                # `/v1/boards/{slug}` request returns on 103 of 103 boards that had a
+                # row to compare -- so reading it here costs no extra request, and it
+                # does not need `content=true` either.
+                #
+                # `or None` because "" must stay distinct from a real name: the
+                # engine falls back to the watchlist entry on None, and this is a
+                # nullable field precisely so an absent one is not a plausible guess.
+                "company": j.get("company_name") or None,
                 "location": (j.get("location") or {}).get("name", ""),
                 "url": j.get("absolute_url", ""),
                 # `first_published`, NOT `updated_at`. This is a correctness fix
@@ -105,11 +162,11 @@ def fetch_greenhouse(slug: str):
                 # not. Mapped anyway: it costs nothing, other boards may fill it, and
                 # to_date returns "" for a null so an absent deadline stays absent.
                 "expires": to_date(j.get("application_deadline")),
-                "department": depts[0].get("name", "") if depts else "",
-                "team": (depts[0].get("name") if depts else None) or None,
+                "department": (depts[0].get("name") if depts else None) or None,
                 "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -140,22 +197,56 @@ def _lever_remote(workplace_type) -> dict:
     return {"remote_type": rt, "remote_basis": "stated" if rt else None}
 
 
-def _lever_text(j: dict) -> str:
-    """The WHOLE posting body, which Lever splits across three fields.
+def _lever_text(j: dict) -> tuple[str, list[dict] | None]:
+    """The WHOLE posting body, which Lever splits across three fields, plus its sections.
 
     `descriptionPlain` is only the intro -- 1,118 chars on average (binance, n=295).
     The requirements and responsibilities live in `lists[]`, each a heading plus HTML
     (2,279 chars), and the closing sits in `additionalPlain` (712). Reading only the
     first field fed the scorer a third of each posting, so a role whose skills were
     all in the Requirements list scored as though it had none.
+
+    HTML FIRST, PLAIN AS THE FALLBACK -- the same correction Ashby got in 0.9.0, one
+    adapter over, and missed here. A header exists only in markup, so reading the
+    `*Plain` variants meant this adapter could never produce a section: `sections: []`
+    on 122 of 135 rows `[local 94-board harvest, 0.9.0]`. Worse, `lists[].text` IS the
+    vendor's own section heading -- Lever hands us the structure in a labelled field --
+    and appending it as bare prose threw that structure away and then failed to find it
+    again. Wrapping it in a heading tag is not a heuristic; it is transcribing what the
+    source said. Measured `[live api.lever.co, 4 boards, 489 postings, 2026-08-20]`:
+    rows with no sections 471 -> 1, typed sections 1 -> 1,336, 0 unresolved spans.
+
+    THE COST, because it is real: `text` changes on every Lever row. Median length
+    7,286 -> 7,304 on palantir (HTML drops inline URLs and bullet markers the plain
+    field spells out, the same trade Ashby took). Fit scores move on 7 of 489 postings,
+    range -2..+3, mean -0.29 -- so 98.6% are byte-identical in score.
+
+    `or`, not a bare swap: a body of "" is a legal value and nothing raises on it, so
+    an employer who fills only the plain field would silently lose its whole posting.
     """
-    parts = [j.get("descriptionPlain") or j.get("description", "")]
+    parts = [j.get("description") or j.get("descriptionPlain") or ""]
     for sec in j.get("lists") or []:
         if isinstance(sec, dict):
-            parts.append(sec.get("text") or "")
+            head = str(sec.get("text") or "").strip()
+            if head:
+                parts.append(f"<h3>{head}</h3>")
             parts.append(sec.get("content") or "")
-    parts.append(j.get("additionalPlain") or "")
-    return clean("\n".join(str(x) for x in parts if x))
+    parts.append(j.get("additional") or j.get("additionalPlain") or "")
+    body = "\n".join(str(x) for x in parts if x)
+    # `sections: []` MEANS "we read a body and it had no headers", and that is a claim
+    # about a body. With every Lever field empty there is no body to make it about:
+    # `clean_with_sections("")` returns `("", [])`, `""` normalizes to `None` at the
+    # engine boundary, and the row then asserted BOTH "no body" and "a body with no
+    # headers" at once. 21 rows [102,799-row harvest, 2026-08-20], all Lever, because
+    # it is the only adapter that BUILDS a body out of parts that can all be absent.
+    #
+    # Fixed here rather than in `clean_with_sections`, which must keep returning `[]`
+    # for the 1,137 rows that genuinely have a body carrying no headers -- the two
+    # cases are indistinguishable from inside that function, and only the caller knows
+    # whether a body existed.
+    if not body:
+        return "", None
+    return clean_with_sections(body)
 
 
 def fetch_lever(slug: str):
@@ -163,7 +254,7 @@ def fetch_lever(slug: str):
     out = []
     for j in data:
         cats = j.get("categories") or {}
-        text = _lever_text(j)
+        text, secs = _lever_text(j)
         sr = j.get("salaryRange") or {}
         # PROBED 2026-08-05 on leverdemo: {min, max, currency, interval} where
         # interval is a vendor-specific string ("per-year-salary", "per-hour-wage")
@@ -189,8 +280,11 @@ def fetch_lever(slug: str):
                 "country": country_code(j.get("country")),
                 "url": j.get("hostedUrl", ""),
                 **posted_from(j.get("createdAt")),
-                "department": cats.get("team") or cats.get("department", ""),
-                "team": cats.get("team") or cats.get("department") or None,
+                # `categories.department` FIRST, matching catalog/lever.md, which
+                # records `org_unit: categories.department` ("Customer Success"). This
+                # read was `team`-first and disagreed with its own profile; Lever is
+                # the one vendor shipping both keys as separate fields.
+                "department": cats.get("department") or cats.get("team") or None,
                 # `workplaceType` is a real Lever field ("remote"/"hybrid"/"onsite")
                 # that this adapter never read -- remoteness was being re-derived from
                 # the description while the source stated it outright.
@@ -199,6 +293,7 @@ def fetch_lever(slug: str):
                 **pay,
                 "salary": salary,
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -210,12 +305,36 @@ def _ashby_place(address) -> dict:
     pa = (address or {}).get("postalAddress") if isinstance(address, dict) else None
     if not isinstance(pa, dict):
         return {"city": None, "state": None, "country": None}
+    # TRIM AT THE BOUNDARY. The whitespace is the VENDOR's -- `addressRegion` arrives as
+    # "California " on 11 of 1,730 live postings, from one board -- and it goes straight
+    # into a column that gets GROUPED on, where " California" never meets "California".
+    # US rows survive by luck because `us_state_code` strips internally; non-US rows
+    # carry it all the way through.
+    region = (pa.get("addressRegion") or "").strip() or None
+    country_raw = (pa.get("addressCountry") or "").strip() or None
+
+    # A REGION THAT IS THE COUNTRY REPEATED IS NOT A SUBDIVISION. Ashby lets a board
+    # put anything in `addressRegion`, and 36 of 1,730 live postings put the country
+    # there: ("UK","UK") 16, ("Australia","Australia") 7, ("Singapore","Singapore") 5.
+    #
+    # COMPARED AS RAW STRINGS, DELIBERATELY, and this is the whole design. The obvious
+    # rule -- "drop a region that RESOLVES to the row's own country" -- destroys real
+    # data: `England` resolves to GB through `_COUNTRY_CODES`, but England is a genuine
+    # ISO 3166-2:GB subdivision (GB-ENG), and 27 of the 34 values that rule would have
+    # deleted were exactly that. 39% collateral, measured. The alias exists in that map
+    # for PROSE MATCHING ("we hire in England"), and borrowing it for data validation is
+    # what makes the rule wrong. String equality catches 36 of the 43 bogus values and
+    # touches none of the good ones; the 7 it misses are ("UK","United Kingdom"), the
+    # same country spelled two ways, and they are left rather than reached for with a
+    # normalizer that would re-catch England.
+    if region is not None and country_raw is not None and region == country_raw:
+        region = None
     return {
-        "city": pa.get("addressLocality") or None,
-        "state": pa.get("addressRegion") or None,
+        "city": (pa.get("addressLocality") or "").strip() or None,
+        "state": region,
         # Ashby sends a display name ("Singapore"); Lever sends alpha-2. One
         # normalizer so the column holds one vocabulary.
-        "country": country_code(pa.get("addressCountry")),
+        "country": country_code(country_raw),
     }
 
 
@@ -252,6 +371,60 @@ def _ashby_salary(comp: dict) -> dict:
     return salary()
 
 
+def _ashby_locations(j: dict) -> list[dict] | None:
+    """Ashby `secondaryLocations[]` + the primary address -> the `locations` list.
+
+    ASHBY SHIPS A STRUCTURED PER-PLACE ARRAY AND THIS ADAPTER NEVER READ IT. Measured
+    on a live probe of 8 boards (1,730 postings): 422 -- 24.4% -- carry a populated
+    `secondaryLocations`, each entry an `{location, address.postalAddress}` pair with
+    its own addressLocality / addressRegion / addressCountry. It arrives in a response
+    already fetched, so reading it costs nothing.
+
+    Without this, Ashby emitted no `locations` key at all and `engine._coerce` fell
+    back to splitting the DISPLAY string -- which on this source is a single place, so
+    a posting open in three offices reported one. Every other fix in this series parses
+    a display string harder; this one stops parsing and reads the array.
+
+    The primary address leads, because `location` is the posting's own headline place
+    and the secondaries are explicitly secondary.
+
+    NO PER-PLACE URL, and that is the vendor's doing rather than an omission here:
+    the entries carry an address and nothing else. Entries used to carry the posting's
+    own url on every one of them, which asserted a per-place apply link that no source
+    publishes; the key was removed in 0.9.0 and the parameter with it.
+    """
+
+    def entry(raw: str, address) -> dict:
+        place = _ashby_place(address)
+        # CANONICALIZE HERE, because nothing downstream will. `engine._coerce` applies
+        # the US-state-is-a-code rule to the SCALAR `state` only, and it builds
+        # `locations[]` only when an adapter left it None -- so a list this adapter
+        # supplies is never normalized. Without this, one row would carry state="CA" at
+        # the top and state="California" in its own locations[0]: the same field, two
+        # vocabularies, which is the exact defect this series just removed elsewhere.
+        if place["country"] == "US" and place["state"]:
+            place["state"] = us_state_code(place["state"]) or place["state"]
+        return {"raw": raw, **place}
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+    primary = (j.get("location") or "").strip()
+    if primary:
+        entries.append(entry(primary, j.get("address")))
+        seen.add(primary.lower())
+    for sec in j.get("secondaryLocations") or []:
+        if not isinstance(sec, dict):
+            continue
+        raw = (sec.get("location") or "").strip()
+        if not raw or raw.lower() in seen:
+            continue
+        seen.add(raw.lower())
+        entries.append(entry(raw, sec.get("address")))
+    # ONE entry is not a list worth emitting -- `_coerce` builds the single-place shape
+    # itself from the scalars, and returning None here keeps that one path.
+    return entries if len(entries) > 1 else None
+
+
 def fetch_ashby(slug: str):
     data = get_json(
         f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
@@ -259,9 +432,48 @@ def fetch_ashby(slug: str):
     out = []
     for j in data.get("jobs", []):
         loc = j.get("location", "")
-        if j.get("isRemote"):
+        # `workplaceType`, NOT `isRemote` -- the same reason `remote_type` reads it,
+        # recorded in full at that assignment below: isRemote is TRUE ON EVERY HYBRID
+        # ROW (measured on openai, n=733: isRemote=True with workplaceType='Hybrid'
+        # on 442). So appending "(Remote)" from it labelled 7,435 hybrid postings as
+        # remote in the one field a listing page renders -- `location: 'San Francisco
+        # (Remote)'` beside `remote_type: 'hybrid'`. The classifier was corrected in
+        # 0.9.0 and this string was not, which is two zones each individually right
+        # and never checked against each other.
+        #
+        # This is NOT display-only. `remote_scope_raw` is a byte-copy of `location`,
+        # and 775 of the affected rows currently parse a US boundary out of the
+        # suffix, so `remote_areas` goes ['US'] -> None on them -- correctly: a hybrid
+        # role in Menlo Park never stated a remote boundary. 6,225 rows also drop
+        # 1-5 score points because `score_and_signals` scans `location` and "remote"
+        # is a scored keyword. `dedup_key` does NOT move: `normalize_location` already
+        # eats the word, verified identical on all 7,435.
+        #
+        # Nothing unique is discarded: across 7 live Ashby boards (1,392 postings),
+        # isRemote=True with workplaceType ABSENT occurs 0 times.
+        if str(j.get("workplaceType", "")).strip().lower() == "remote":
             loc = (loc + " (Remote)").strip()
-        text = clean(j.get("descriptionPlain", ""))
+        # HTML FIRST, and the fallback is the safety net -- not the other way round.
+        # This read `descriptionPlain` until 0.9.0 and that produced `sections: []` on
+        # 1,198 of 1,198 Ashby rows, the second-largest source, 15.8% of a harvest.
+        # Headers live in markup and nowhere else, so plain text cannot yield one: the
+        # feature was dead on this adapter the day it shipped. Measured [live probe
+        # api.ashbyhq.com, 5 boards, 457 postings, 2026-08-20]: BOTH fields present on
+        # 457/457, `descriptionHtml` -> 3,981 sections, `descriptionPlain` -> 0.
+        #
+        # README called this "a property of those employers, not of those adapters."
+        # That was exactly backwards and is corrected there too.
+        #
+        # THE COST, because it is real and it is not free: Ashby renders a link as
+        # `text https://url` in the plain field and as an `<a href>` in the HTML one,
+        # and `clean` drops attributes -- so the body loses its inline URLs and its
+        # bullet markers, 4,822 -> 4,663 mean characters (-3.3%) on the same 75
+        # postings. That is the same body every other HTML source already produces
+        # (Greenhouse loses its hrefs identically), so this makes Ashby consistent
+        # rather than uniquely lossy -- but a consumer reading URLs out of `text`
+        # loses them here.
+        raw_desc = j.get("descriptionHtml") or j.get("descriptionPlain") or ""
+        text, secs = clean_with_sections(raw_desc)
         comp = j.get("compensation") or {}
         salary = (comp.get("compensationTierSummary") or "").split("•")[0].strip()
         if not salary:
@@ -276,8 +488,7 @@ def fetch_ashby(slug: str):
                 **posted_from(
                     j.get("publishedAt") or j.get("updatedAt") or j.get("publishedDate")
                 ),
-                "department": j.get("department", "") or j.get("team", ""),
-                "team": j.get("department") or j.get("team") or None,
+                "department": j.get("department") or j.get("team") or None,
                 # `workplaceType`, NOT `isRemote`. Measured on openai (n=733):
                 #
                 #   isRemote=True,  workplaceType='Hybrid'   442
@@ -298,10 +509,12 @@ def fetch_ashby(slug: str):
                 "remote_type": remote_type(j.get("workplaceType")),
                 "remote_basis": "stated" if j.get("workplaceType") else None,
                 **_ashby_place(j.get("address")),
+                "locations": _ashby_locations(j),
                 "employment_type": j.get("employmentType", ""),
                 "salary": salary or salary_from_text(text),
                 **_ashby_salary(comp),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -369,14 +582,19 @@ def _smartrecruiters_rows(slug: str, content, out) -> None:
                 "location": loctext,
                 "url": f"https://jobs.smartrecruiters.com/{slug}/{j.get('id', '')}",
                 **posted_from(j.get("releasedDate") or j.get("createdOn")),
-                "department": (j.get("department") or {}).get("label", ""),
                 # The most structured source in the set, and the adapter used almost
                 # none of it: a real job family, a real org unit, a real seniority
                 # string, fully structured geography, and an actual remote BOOLEAN --
                 # all present on every posting, all previously collapsed into one
                 # location string and one `department`.
-                "category": (j.get("function") or {}).get("label") or None,
-                "team": (j.get("department") or {}).get("label") or None,
+
+                # ORG UNIT first, the vendor's job family as the fallback. This
+                # adapter ships both; `department.label` was empty on 510 of 510 rows
+                # in a local harvest while `function.label` filled every one, so in
+                # practice this yields the function here.
+                "department": (j.get("department") or {}).get("label")
+                or (j.get("function") or {}).get("label")
+                or None,
                 "seniority": (j.get("experienceLevel") or {}).get("label") or None,
                 "city": loc.get("city") or None,
                 "state": loc.get("region") or None,
@@ -433,7 +651,7 @@ def fetch_workable(slug: str):
         loctext = ", ".join(p for p in (city, state, country) if p)
         if j.get("telecommuting"):
             loctext = (loctext + " (Remote)").strip()
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("title", "") or j.get("full_title", ""),
@@ -442,8 +660,7 @@ def fetch_workable(slug: str):
                 or j.get("url")
                 or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}/",
                 **posted_from(j.get("created_at") or j.get("published_on")),
-                "department": j.get("department", ""),
-                "team": j.get("department") or None,
+                "department": j.get("department") or j.get("function") or None,
                 "city": city,
                 "state": state,
                 "country": country,
@@ -457,7 +674,6 @@ def fetch_workable(slug: str):
                         "city": x.get("city"),
                         "state": x.get("region"),
                         "country": x.get("countryCode") or x.get("country"),
-                        "url": j.get("application_url") or j.get("url"),
                     }
                     for x in places
                 ]
@@ -471,7 +687,7 @@ def fetch_workable(slug: str):
                 else None,
                 "remote_basis": "stated" if "telecommuting" in j else None,
                 "seniority": j.get("experience") or None,
-                "category": j.get("function") or None,
+
                 "source_extra": {
                     k: v
                     for k, v in (
@@ -485,6 +701,7 @@ def fetch_workable(slug: str):
                 "employment_type": j.get("employment_type", ""),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -849,6 +1066,19 @@ _ATS_HOSTS = (
     "ultipro.com",
     "adp.com",
     "oraclecloud.com",
+    # ADD THESE BEFORE TIGHTENING THE EMPLOYER-DOMAIN BRANCH BELOW, NOT AFTER. All five
+    # rows they cover were already being reported direct -- by ACCIDENT, through the old
+    # substring test matching the company name in an ATS SUBDOMAIN
+    # (`elucid.applytojob.com` contains `elucid`). Naming the platforms moves them onto
+    # the intentional branch. Reversed, the tightening lands first, silently drops
+    # 6 measured rows, and every gate stays green while it happens.
+    "applytojob.com",  # JazzHR
+    "welcomekit.co",
+    "careers-page.com",
+    # `personio.de` is listed above and does NOT match `friendlycaptcha.jobs.personio.com`.
+    # The same vendor under a second TLD -- the gap that survives an audit precisely
+    # because a reader scanning this tuple sees "Personio" and ticks it off.
+    "personio.com",
 )
 
 
@@ -894,9 +1124,27 @@ def _is_direct_apply(url: str, company: str = "") -> bool:
     from .discover import _norm_name
 
     token = _norm_name(company).replace(" ", "")
+    # THE REGISTRABLE DOMAIN, not any substring of the host. `bitpay.applytojob.com`
+    # matched on `bitpay` and read as BitPay's own careers page -- the company name was
+    # the ATS's SUBDOMAIN, and a substring test cannot tell those apart. 6 rows measured;
+    # every one is a real ATS platform, so they were right BY ACCIDENT rather than by
+    # principle: the identical rule promotes `nike.some-aggregator.com`. No such row
+    # exists in the corpus, so the hole was latent, not demonstrated -- and it is closed
+    # here rather than after something lands in it.
+    #
+    # The four platforms are on _ATS_HOSTS above BECAUSE of this line. Adding them there
+    # is not a separate improvement; it is the half of this change that keeps it free.
+    #
+    # KNOWN RESIDUAL, and do not "fix" it by allowlisting: shared hosting where the
+    # SUBDOMAIN is the owner -- github.io, netlify.app, vercel.app, pages.dev -- is
+    # invisible to this. `joulent.github.io` is one row in 7,545 and stays unrecognised.
+    # Allowlisting github.io would certify every project page on GitHub as a direct
+    # apply, which is a far worse trade than one missed employer.
+    labels = host.split(".")
+    registrable = ".".join(labels[-2:]) if len(labels) >= 2 else host
     # 5 chars, because short tokens produce nonsense matches -- a company called
     # "Ace" would claim every host containing "ace", which is most of them.
-    return len(token) >= 5 and token in re.sub(r"[^a-z0-9]", "", host)
+    return len(token) >= 5 and token in re.sub(r"[^a-z0-9]", "", registrable)
 
 
 def _is_aggregator(url: str) -> bool:
@@ -1036,12 +1284,25 @@ def search_google_jobs(queries):
                 break
             for j in data.get("jobs_results", []) or []:
                 ext = j.get("detected_extensions") or {}
-                text = clean(j.get("description", ""))
+                text, secs = clean_with_sections(j.get("description", ""))
                 out.append(
                     {
                         "title": j.get("title", ""),
                         "company": j.get("company_name", ""),
                         "location": j.get("location", ""),
+                        # GOOGLE'S WORD, KEPT AS EVIDENCE AND NOT AS A BOUNDARY. Setting
+                        # this is what tells `engine.derive_remote` the raw is already
+                        # accounted for, so it does not parse the string into
+                        # `remote_areas` -- see the "whoever supplied the raw owns the
+                        # parse" comment there. Under `&ltype=1` this field is the SEARCH
+                        # MODE, not the posting's scope: it is the constant `Anywhere` on
+                        # every work-from-home result (43 of 43 locally) and a real city on
+                        # the rest, so it varies with the QUERY and not with the row. 11 of
+                        # those 43 state a US-only bound in their own title, body or URL,
+                        # and `[]` satisfies every `allowed_scopes` policy unconditionally.
+                        # Google exposes no eligibility field, so the honest boundary is
+                        # unstated.
+                        "remote_scope_raw": j.get("location") or None,
                         "url": (
                             _url := _best_apply_link(
                                 j.get("apply_options"),
@@ -1074,7 +1335,6 @@ def search_google_jobs(queries):
                         # and says so.
                         "posted": (_gp := _google_posted(ext.get("posted_at", ""))),
                         "posted_basis": "relative" if _gp else None,
-                        "department": "",
                         # `work_from_home` is a real boolean on the extension, and it
                         # is the ONLY structured remote signal Google gives. Verified
                         # 2026-08-05: with &ltype=1 it is true on 10 of 10 results,
@@ -1091,6 +1351,7 @@ def search_google_jobs(queries):
                         "salary": ext.get("salary") or salary_from_text(text),
                         **vocab.google_salary(ext.get("salary")),
                         "text": text,
+                        "sections": secs,
                         "source": "google_jobs",
                     }
                 )
@@ -1219,7 +1480,6 @@ def fetch_workday(slug: str, host: str = "wd1", site: str = "", keep=None):
                     "url": f"https://{slug}.{host}.myworkdayjobs.com/en-US/{site}{path}",
                     "posted": posted,
                     "posted_basis": posted_basis,
-                    "department": "",
                     "employment_type": "",
                     "salary": "",
                     "text": "",
@@ -1358,9 +1618,10 @@ def _workday_add_details(base: str, rows: list[dict]) -> None:
         except Exception:  # noqa: BLE001
             return
         info = data.get("jobPostingInfo") or {}
-        text = clean(info.get("jobDescription", "") or "")
+        text, secs = clean_with_sections(info.get("jobDescription", "") or "")
         if text:
             r["text"] = text
+            r["sections"] = secs
             r["salary"] = r["salary"] or salary_from_text(text)
         # startDate is a real ISO date; prefer it over anything derived from a
         # relative string when the detail call gives us one. THROUGH THE HELPER, so
@@ -1404,11 +1665,14 @@ def _rippling_detail(slug: str, row: dict) -> None:
         # Two HTML blocks: `company` is boilerplate repeated across every role,
         # `role` is the actual posting. Order matters -- role first, so a truncated
         # body keeps the part that describes the job.
-        row["text"] = clean(
+        row["text"], row["sections"] = clean_with_sections(
             " ".join(x for x in (desc.get("role"), desc.get("company")) if x)
         )
     elif isinstance(desc, str):
-        row["text"] = clean(desc)
+        # BOTH branches. An earlier draft wired only the dict-shaped one above, which
+        # would have left every string-shaped Rippling response with a body and no
+        # sections -- a per-source hole nothing at the adapter level would surface.
+        row["text"], row["sections"] = clean_with_sections(desc)
     # Through the helper, so the basis travels with the date. The list endpoint sends
     # no date at all, so this detail call is where a Rippling row gets one -- and
     # setting `posted` directly here left every Rippling row with a date and no
@@ -1467,7 +1731,20 @@ def fetch_rippling(slug: str, keep=None):
                 "location": loc.get("label", "") if isinstance(loc, dict) else "",
                 "url": j.get("url", ""),
                 "posted": "",
-                "department": dept.get("label", "") if isinstance(dept, dict) else "",
+                # THE PRECONDITION FOR THE 0.9.0 REMOVAL, and it had to land first.
+                # This was the ONLY adapter of nineteen that set no `team` and no
+                # `category`: every other one assigned its org unit to `team`
+                # (greenhouse, lever, ashby, smartrecruiters, workable) or its job
+                # family to `category` on the line beside the `department` it also
+                # filled, so cutting that field cost them nothing -- while here it
+                # would have silently dropped Rippling's org unit from every row.
+                # Invisible to any corpus measurement: rippling is keyless but was not
+                # among the sources in the harvest the cut was measured on. Found by
+                # reading all nineteen adapters, which is the only method that covers a
+                # source that did not run. `department.label` is an org unit
+                # ({"id": "Eng", "label": "Engineering"}) -- the same vendor shape the
+                # other four map to `team`.
+                "department": dept.get("label") if isinstance(dept, dict) else None,
                 "employment_type": "",
                 "salary": "",
                 "text": "",
@@ -1518,7 +1795,7 @@ def fetch_teamtailor(slug: str):
         loc = _fmt(first)
         if jp.get("jobLocationType") == "TELECOMMUTE":
             loc = (loc + " (Remote)").strip()
-        text = clean(
+        text, secs = clean_with_sections(
             j.get("content_html", "")
             or (jp.get("description", "") if isinstance(jp, dict) else "")
         )
@@ -1528,7 +1805,6 @@ def fetch_teamtailor(slug: str):
                 "location": loc,
                 "url": j.get("url", ""),
                 **posted_from(j.get("date_published")),
-                "department": "",
                 "city": first.get("addressLocality") or None,
                 "state": first.get("addressRegion") or None,
                 "country": first.get("addressCountry") or None,
@@ -1538,18 +1814,16 @@ def fetch_teamtailor(slug: str):
                         "city": a.get("addressLocality"),
                         "state": a.get("addressRegion"),
                         "country": a.get("addressCountry"),
-                        "url": j.get("url", ""),
                     }
                     for a in places
                 ]
                 or None,
                 # The only WORKING expires on the depth lane -- 8 of 53 measured.
                 "expires": to_date((jp.get("validThrough") or "")[:10]),
-                "parent_company": (jp.get("hiringOrganization") or {}).get("name")
-                or None,
                 "employment_type": jp.get("employmentType") or "",
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
             }
         )
     return out
@@ -1594,6 +1868,76 @@ DEPTH_ACCEPTS_KEEP = frozenset({"workday", "rippling"})
 # Everything else serves a redirect: adzuna's field is literally `redirect_url`.
 # google_jobs is decided PER ROW by _best_apply_link and never falls through to this.
 DIRECT_APPLY_SOURCES = frozenset({"usajobs", "braintrust"})
+
+
+# ── SOURCES THAT PUBLISH MODEL-PREDICTED PAY ────────────────────────────────
+#
+# `engine.derive_salary` refuses to parse anything for a row from one of these when
+# the vendor sent no numeric figures of its own. A model's guess must never reach
+# `salary_min`, which README.md defines as pay an employer committed to.
+#
+# THE SOURCE NAME IS THE ONLY KEY THE RECORD CARRIES, and that is forced rather than
+# preferred -- do not go looking for a cleaner one. A PREDICTED adzuna row and a
+# genuine NO-FIGURE adzuna row are byte-identical in the record: `_adzuna_pay` returns
+# `{"salary": ""}` for the prediction, and a row with no figures renders
+# `util.salary_range(None, None) == ""` alongside `vocab.salary(None, None, ...)`
+# all-None. `salary_is_predicted` is a vendor field and never enters the record.
+#
+# WHY THE GUARD IS NOT ONLY IN `_adzuna_pay`. Until this set existed the quarantine was
+# entirely upstream and `derive_salary` had none of its own -- measured on 1a1414d,
+# `{"source": "adzuna", "salary": "$129,584–$129,584"}` parsed straight through to
+# `salary_min=129584.0, salary_basis='parsed', salary_kind='base'`. That EN-DASH
+# (U+2013) fake range is the exact shape 6,633 rows carried [live prod, engine 0.8.2],
+# so the one string that had actually reached a production store was the one string
+# with no defence inside the parser. Two independent guards now, mutation-tested apart.
+#
+# THAT STRING IS NOT REACHABLE FROM THIS ADAPTER AT HEAD, and saying so is the
+# difference between a claim that survives re-derivation and one that does not.
+# `util.salary_range` renders a point estimate as `$129,584` -- no dash -- so
+# `salary_from_display` refuses it even if the discard branch below regressed, and that
+# regression would write `salary_min` DIRECTLY via `vocab.salary(...)` rather than
+# through any parse. `$129,584–$129,584` is the 0.8.2 rendering, alive in the live
+# consumer's store and in nothing this tree emits. The guard is defence in depth against
+# re-introducing it, and against a library caller feeding `derive_salary` rows from its
+# own 0.8.2-era store. Not a live pipeline leak.
+#
+# ADZUNA IS THE ONLY MEMBER, and that was established by sweeping the `salary:` field
+# notes of all 22 `catalog/` profiles: `salary_is_predicted` is the only estimate flag
+# in the set, and every other structured salary is a vendor-stated figure. (Two profiles
+# match `predict` as the English word "predicts" in prose -- a grep count is not a
+# membership test.) That sweep is the instrument; no live probe was needed or run.
+#
+# google_jobs was the one worth checking twice, being the least documented adapter, and
+# it is ABSENT for a structural reason rather than a judgement about Google.
+# `vocab.google_salary` fills `salary_min` AT THE ADAPTER whenever
+# `detected_extensions.salary` parses, so `derive_salary` returns at its fill-only guard
+# and never reaches this set: adding google_jobs would be a no-op on precisely the rows
+# it would be added for -- verified by running the shipped functions, not by reading
+# them. If Google is ever found to emit an ESTIMATE there, the defect is `google_salary`
+# writing basis="parsed" onto it at the adapter, and this set is the wrong instrument.
+#
+# WHAT IT COSTS IS ZERO TODAY AND NON-ZERO THE MOMENT A BODY SCAN EXISTS, and that is
+# worth a sentence here rather than an argument later. `derive_salary` returns on this
+# set BEFORE it reads any body, so a scan would be skipped on EVERY Adzuna row --
+# including one whose employer stated pay in the description and whose vendor simply
+# sent no structured numbers. That row is a true positive being refused, and it is
+# already pinned by `test_a_non_predicted_adzuna_row_keeps_its_kind_but_not_its_figure`,
+# so revisiting the decision means CHANGING a test rather than adding one. It is
+# deliberate: that row is byte-identical in the record to a prediction, so admitting it
+# admits predictions too. The recall lost is probably small -- Adzuna ships
+# `text_basis: "excerpt"`, a 500-character truncation on 275 of 275 rows locally and
+# 7,146 of 7,150 [live prod, 2026-08-20], so there is little prose there to read -- but
+# "probably small" is an estimate and nobody has measured it on a real Adzuna body.
+#
+# WHAT THIS SET DOES NOT COVER, said plainly because a register reads as broader than it
+# is: it keys on WHO PUBLISHED the row, so it cannot see a third-party estimate quoted
+# inside an ordinary source's prose, and it would not catch a second predicting source
+# until someone adds it here. A guard on the SHAPE of the figure -- refusing lo == hi on
+# a body-derived number -- covers both and is the right instrument for the body-scan lane
+# when that lane exists. It must NOT be applied to display strings globally: 212 of
+# 39,849 rows with a display string are genuine employer point values [102,799-row
+# harvest, 2026-08-20], greenhouse 195 and lever 17, and a blanket refusal deletes them.
+PREDICTED_PAY_SOURCES = frozenset({"adzuna"})
 
 
 # ── LIVENESS: does this board exist? -- live_<ats>(slug, **extra) -> int ─────
@@ -1729,7 +2073,7 @@ def search_remotive(queries, strict: bool = False):
         return []
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("title", ""),
@@ -1745,8 +2089,7 @@ def search_remotive(queries, strict: bool = False):
                 **stated_scope(j.get("candidate_required_location")),
                 "url": j.get("url", ""),
                 **posted_from(j.get("publication_date")),
-                "department": j.get("category", ""),
-                "category": j.get("category") or None,
+                "department": j.get("category") or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
                 # here is remote because that is what this board is. Collapsing the two
@@ -1756,6 +2099,7 @@ def search_remotive(queries, strict: bool = False):
                 "employment_type": j.get("job_type", ""),
                 "salary": j.get("salary", "") or salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "remotive",
             }
         )
@@ -1776,7 +2120,9 @@ def search_jobicy(queries):
     data = get_json("https://jobicy.com/api/v2/remote-jobs?count=100")
     out = []
     for j in data.get("jobs", []):
-        text = clean(j.get("jobDescription") or j.get("jobExcerpt", ""))
+        text, secs = clean_with_sections(
+            j.get("jobDescription") or j.get("jobExcerpt", "")
+        )
         out.append(
             {
                 "title": j.get("jobTitle", ""),
@@ -1784,8 +2130,7 @@ def search_jobicy(queries):
                 "location": (j.get("jobGeo") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 **posted_from(j.get("pubDate")),
-                "department": _joined(j.get("jobIndustry")),
-                "category": _joined(j.get("jobIndustry")) or None,
+                "department": _joined(j.get("jobIndustry")) or None,
                 "seniority": _joined(j.get("jobLevel")) or None,
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -1808,6 +2153,7 @@ def search_jobicy(queries):
                 # 100/100 -- a region, never a city.
                 **stated_scope(j.get("jobGeo")),
                 "text": text,
+                "sections": secs,
                 "source": "jobicy",
             }
         )
@@ -1820,7 +2166,7 @@ def search_arbeitnow(queries):
     for j in data.get("data", []):
         if not j.get("remote"):
             continue
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         jt = j.get("job_types")
         out.append(
             {
@@ -1829,7 +2175,6 @@ def search_arbeitnow(queries):
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url", ""),
                 **posted_from(j.get("created_at")),
-                "department": "",
                 "remote_type": "remote",  # the adapter already filtered on j["remote"] above
                 "remote_basis": "stated",
                 "tags": [t for t in (j.get("tags") or []) if t] or None,
@@ -1838,6 +2183,7 @@ def search_arbeitnow(queries):
                 else (jt or ""),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "arbeitnow",
             }
         )
@@ -1850,7 +2196,7 @@ def search_remoteok(queries):
     for j in data:
         if not isinstance(j, dict) or not j.get("position"):
             continue  # first element is legal/attribution metadata
-        text = clean(j.get("description", ""))
+        text, secs = clean_with_sections(j.get("description", ""))
         out.append(
             {
                 "title": j.get("position", ""),
@@ -1858,7 +2204,6 @@ def search_remoteok(queries):
                 "location": (j.get("location") or "") + " (Remote)",
                 "url": j.get("url") or j.get("apply_url", ""),
                 **posted_from(j.get("date") or j.get("epoch")),
-                "department": "",
                 "employment_type": "",
                 "remote_type": "remote",  # a remote-only board by definition
                 # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
@@ -1875,6 +2220,7 @@ def search_remoteok(queries):
                     j.get("salary_min"), j.get("salary_max"), currency="USD"
                 ),
                 "text": text,
+                "sections": secs,
                 "source": "remoteok",
             }
         )
@@ -1998,7 +2344,7 @@ def _himalayas_rows(jobs, out, seen=None):
             if url in seen:
                 continue
             seen.add(url)
-        text = clean(j.get("description") or j.get("excerpt", ""))
+        text, secs = clean_with_sections(j.get("description") or j.get("excerpt", ""))
         regions = j.get("locationRestrictions") or []
         loc = (", ".join(regions) if regions else "") + " (Remote)"
         # The browse lane returns the literal string "name" as companyName on the
@@ -2016,8 +2362,7 @@ def _himalayas_rows(jobs, out, seen=None):
                 "location": loc.strip(),
                 "url": url,
                 **posted_from(j.get("pubDate")),
-                "department": "",
-                "category": ", ".join(
+                "department": ", ".join(
                     x
                     for x in (j.get("parentCategories") or j.get("categories") or [])
                     if isinstance(x, str)
@@ -2053,7 +2398,17 @@ def _himalayas_rows(jobs, out, seen=None):
                 "tags": [x for x in (j.get("categories") or []) if isinstance(x, str)]
                 or None,
                 "employment_type": j.get("employmentType", ""),
-                "salary": salary_range(j.get("minSalary"), j.get("maxSalary")),
+                # THE CURRENCY REACHES THE RECORD AND NOT THE DISPLAY, which is the
+                # half of that discard the 0.8.x fix below did not close: `vocab.salary`
+                # gets `currency` on the very next line while the string a listing page
+                # RENDERS was still built without it, so a Toronto band showed as
+                # `$168,000-$231,000` and a Polish one as `$25,200` for PLN -- about
+                # $6,300. 46 rows [full harvest, 0.9.0]. himalayas is the only one of
+                # `salary_range`'s four call sites this reaches: remoteok and adzuna
+                # hard-code USD and usajobs is US-federal, so a bare `$` is right there.
+                "salary": salary_range(
+                    j.get("minSalary"), j.get("maxSalary"), j.get("currency")
+                ),
                 # `salaryPeriod` ("annual") and `currency` ("USD") are real fields,
                 # confirmed live 2026-08-05 -- 7 of 20 rows carry them. Both were
                 # being discarded while the two numbers beside them were kept.
@@ -2064,24 +2419,73 @@ def _himalayas_rows(jobs, out, seen=None):
                     j.get("salaryPeriod"),
                 ),
                 "text": text,
+                "sections": secs,
                 "source": "himalayas",
             }
         )
 
 
 def _adzuna_pay(j: dict) -> dict:
-    """Adzuna salary -> the commitment columns OR the estimate columns, never both."""
+    """Adzuna salary -> the commitment columns, or nothing at all.
+
+    OWNS THE DISPLAY STRING TOO, and that is the point of the function. The split was
+    enforced on the numeric columns and the caller built `salary` one line earlier from
+    the same raw figures, so a model's point estimate rendered as `$109,106` -- a
+    string a human reads as an employer's offer. 221 of 277 adzuna rows carried one
+    [local 94-board harvest, 0.9.0, 2026-08-20]; 7,150 of 7,150 adzuna rows in the
+    live consumer's store had a salary string while only 369 had a salary_min
+    [live prod, engine 0.8.2].
+
+    `util.salary_range` already stopped rendering the fake range `$109,106-$109,106`,
+    and its comment names this exact failure -- but removing the RANGE appearance is
+    not the same as removing the COMMITMENT appearance, and the bare figure kept it.
+
+    NOTHING IS EMITTED FOR A PREDICTED ROW AS OF 0.9.0, and the figures ARE lost. The
+    salary_estimated_* pair that used to carry them was removed.
+
+    WHY THEY WERE REMOVABLE, stated carefully because the obvious argument is wrong.
+    The columns existed so a model's guess could never sit beside a commitment, and on
+    the last release that shipped them the separation leaked anyway: all 6,633 rows
+    holding an estimate also rendered it as `$129,584–$129,584` -- the separator is an
+    EN-DASH (U+2013), which is what the store holds and what a re-verification has to
+    match; an ASCII hyphen returns 0 of 6,633. A point estimate shaped
+    like a posted range, with 0 of them carrying a commitment figure
+    `[live prod, engine 0.8.2]`. But `fa0cee3` and `9907e55` closed that leak EARLIER IN
+    0.9.0 -- by the commit that removed the columns, a predicted row already emitted no
+    display string and the quarantine was intact. So the leak is the HISTORY of why the
+    pair existed, not the reason it went. The reason it went is that nothing downstream
+    ever read it: the one known consumer writes both columns into its own schema and
+    reads them back nowhere.
+
+    `salary` STAYING EMPTY IS NOT THE PROTECTION, although an earlier version of this
+    paragraph said it was -- and so did engine.py, vocab.py and two tests. Measured on
+    1a1414d, `derive_salary` carried no guard of its own: handed a predicted row that
+    still had the en-dash fake range `$129,584–$129,584`, it wrote
+    `salary_min=129584.0, salary_basis='parsed'`. Emitting "" only avoids handing it
+    one, which is a different thing from refusing it.
+
+    THE PROTECTION IS `engine.derive_salary`'s PREDICTED_PAY_SOURCES guard, which
+    refuses by SOURCE and does not read what this function emits. Said precisely: at
+    HEAD that en-dash range is unreachable from here -- `salary_range` renders a point
+    estimate dashless -- so the guard is defence in depth against re-introducing the
+    0.8.2 rendering and against a caller passing us rows from a 0.8.2-era store, not a
+    patch for a live leak. The two are
+    independent on purpose, so a regression here no longer reaches the commitment
+    columns by itself. (Belt and braces, and worth knowing: `vocab.salary_from_display`
+    also returns all-None for both "" and None -- but it ACCEPTS `$129,584–$129,584`,
+    so that refusal never covered the shape that actually leaked.)
+    """
     lo, hi = j.get("salary_min"), j.get("salary_max")
     if str(j.get("salary_is_predicted")) == "1":
 
-        def _n(v):
-            try:
-                return float(v) or None
-            except (TypeError, ValueError):
-                return None
-
-        return {"salary_estimated_min": _n(lo), "salary_estimated_max": _n(hi)}
-    return vocab.salary(lo, hi, currency="USD", period=None, basis="stated")
+        # The prediction is DISCARDED. See the docstring for why the estimate columns
+        # went; the short version is that nothing read them, not that nothing filled
+        # them -- Adzuna fills them on 92.8% of its rows in the live consumer's store.
+        return {"salary": ""}
+    return {
+        "salary": salary_range(lo, hi),
+        **vocab.salary(lo, hi, currency="USD", period=None, basis="stated"),
+    }
 
 
 def _adzuna_place(area):
@@ -2101,6 +2505,30 @@ def _adzuna_place(area):
     no text rule can read as remote -- so the signal existed and was invisible.
 
     Depth 5 shifts city one slot, so branch on length rather than indexing blindly.
+    THIS SAID SO AND THEN DID NOT DO IT: the line read
+    `city = area[-1] if len(area) >= 4 else None`, which takes whatever is last. Two
+    defects fell out of that, and the docstring above was already right about both.
+
+    At DEPTH 5 the last slot is a neighbourhood, not the city -- 'Prince',
+    'Grand Central', 'Hayes Valley', 'SoMa'. At DEPTH 3 the city is sitting in
+    `area[2]` and the `>= 4` test threw it away entirely: 'San Francisco, California'
+    (15 rows) and 'New York City, New York' (8) returned `city=None` while the vendor
+    had supplied a clean name. That second one is 23 of 276 rows -- larger than the
+    neighbourhood problem it was filed alongside.
+
+    PIN THE CITY TO ITS SLOT rather than reading a suffix list. The alternative
+    considered was 'take the second display_name token unless it ends in County /
+    Parish / Borough', which is a US-ENGLISH word list: Adzuna's UK, Australian and
+    German hierarchies put a district, an LGA and a Kreis in that tier and it would
+    read every one of them as a city. Position is a property of the vendor's data
+    structure; 'ends in County' is a property of American English.
+
+    WHAT THIS DOES NOT FIX, so nobody claims it does: Adzuna's hierarchy is itself
+    unreliable. 'Times Square, King County' resolves to state='WA' on 3 rows, and
+    Times Square is not in King County, Washington. Reading the hierarchy correctly is
+    the most this can promise; producing correct geography is not available from this
+    source, and a spot-check of a small sample will not surface it.
+
     Returns None (not "") for anything the array does not contain: unknown is not
     empty.
     """
@@ -2110,7 +2538,15 @@ def _adzuna_place(area):
     if len(area) == 1:
         return None, None, country, True  # nationwide == remote
     state = area[1] or None
-    city = area[-1] if len(area) >= 4 else None
+    # The BRANCH the docstring has always described. depth>=4: the city tier is
+    # area[3] (identical to area[-1] at depth 4, and the neighbourhood is what
+    # area[-1] returns at depth 5). depth==3: the city is the last slot.
+    if len(area) >= 4:
+        city = area[3] or None
+    elif len(area) == 3:
+        city = area[2] or None
+    else:
+        city = None
     return city, state, country, None
 
 
@@ -2162,7 +2598,7 @@ def search_adzuna(queries):
                 break  # a dead page ends this query; other queries still run
             results = data.get("results", [])
             for j in results:
-                text = clean(j.get("description", ""))
+                text, secs = clean_with_sections(j.get("description", ""))
                 loc = j.get("location") or {}
                 city, state, country, is_remote = _adzuna_place(loc.get("area"))
                 out.append(
@@ -2174,12 +2610,19 @@ def search_adzuna(queries):
                         # array beside it has the state; see _adzuna_place.
                         "location": loc.get("display_name", ""),
                         "url": j.get("redirect_url", ""),
+                        # SET HERE, not sniffed downstream: this adapter knows it is
+                        # Adzuna. The API truncates every description at 500 chars and
+                        # ends it with an ellipsis -- 275 of 275 rows locally, 7,146 of
+                        # 7,150 [live prod, 2026-08-20], and a live probe confirms no
+                        # fuller field exists on the result object. Without this the
+                        # record cannot distinguish a 500-char excerpt from a real body
+                        # averaging 6,870.
+                        "text_basis": "excerpt",
                         **posted_from(j.get("created")),
                         "expires": to_date(j.get("deadline")),  # 1 of 20 populated
-                        "department": (j.get("category") or {}).get("label", ""),
                         # `category.label` is a JOB FAMILY ("IT Jobs"), not an org unit
                         # -- one of the four different things `department` carried.
-                        "category": (j.get("category") or {}).get("label") or None,
+                        "department": (j.get("category") or {}).get("label") or None,
                         "city": city,
                         "state": state,
                         "country": country,
@@ -2190,9 +2633,10 @@ def search_adzuna(queries):
                         # signal, flattened to a boolean. area[0] is the country.
                         "remote_areas": [country] if (is_remote and country) else None,
                         "employment_type": j.get("contract_time", ""),
-                        "salary": salary_range(
-                            j.get("salary_min"), j.get("salary_max")
-                        ),
+                        # `salary` is built inside _adzuna_pay, not here. It used to
+                        # be set on this line from the raw figures, which meant the
+                        # predicted/stated split was decided in two places and the
+                        # display string was outside the half that enforced it.
                         # PREDICTED salaries never touch the commitment columns.
                         # Measured 2026-08-05 across three queries: 140 of 150 rows
                         # with a salary were `salary_is_predicted: "1"` -- 93%, and
@@ -2206,6 +2650,7 @@ def search_adzuna(queries):
                         # than being assumed annual, however annual they look.
                         **_adzuna_pay(j),
                         "text": text,
+                        "sections": secs,
                         "source": "adzuna",
                     }
                 )
@@ -2251,13 +2696,244 @@ def search_hn_whoishiring(queries):
     return out
 
 
+# An HN comment's pipe segments are `Company | Title | Location | ...`, but the convention
+# is loose and a comment that runs out of pipes puts the ENTIRE BODY in the segment the
+# location is read from. Measured: hn `location` averaged 461 characters and reached 2,158,
+# against a maximum of 331 for greenhouse, 121 for themuse and 34 for ashby -- 82 of 196
+# rows over 100 characters. Every prose rule in `vocab.remote_scope` is written for a short
+# location string, so feeding it a job description is a category error, and it produced
+# wrong values rather than merely noisy ones:
+#   'REMOTE (EU, Switzerland, Norway) ... A lot of us have ...' -> ['CH','NO','US']
+#   'Toronto, Canada REMOTE (Canada only) ...'                  -> ['CA','US']
+#   'ONSITE, NYC ... backends are global scale built on AWS'    -> []  (stated worldwide)
+# `US_LOCATION_RE` carries a bare `us` on purpose -- vocab says so in as many words, because
+# "Remote - US" is 227 rows -- and against 2 KB of prose that matches the English pronoun.
+# Three of the 12 affected rows matched inside a URL: `https://grnh.se/bhfswi9e5us`.
+#
+# TRUNCATED, NOT DROPPED, and that distinction is the fix. Filtering out over-long segments
+# instead emptied the location entirely on 9 rows whose header and body share one segment
+# ("REMOTE (US) Origamics is building...") -- discarding a genuinely stated boundary to
+# remove noise attached to it.
+#
+# 64 IS NOT ARBITRARY. A mid-token cut invents places: at 48, "Remote (USA, most states) or
+# Onsite (NYC, NC, MA)" truncates inside the list and `split_place` reads the fragment as a
+# city with state NC, which flips `has_city` and suppresses a correct ['US']. 64 is the
+# shortest cap tested that keeps every measured multi-place header intact -- "London / NYC /
+# SF / Seattle / Remote (US + Europe)" needs it, and resolves to (['US'], ['EUROPE']) only
+# there.
+#
+# THE WORD-BOUNDARY REWIND IS UNEXERCISED BY REAL DATA AT THIS CAP, and that is worth
+# writing down rather than letting a green suite imply otherwise. All 196 hn segments were
+# truncated with and without it: ZERO changed `remote_scope`. It is kept because the
+# mid-token failure is real and demonstrated at 48, so the rewind is what makes the cap safe
+# to lower later. The test pins it with a CONSTRUCTED string, not an observed one -- the
+# first version of that assertion passed with the rewind deleted, which is the same
+# green-but-blind shape this file keeps finding.
+#
+# A MITIGATION, NOT A CURE. A body that begins inside the first 64 characters still
+# contaminates: "Utrecht, The Netherlands HYBRID We are a non-profit..." keeps ['NL'] from
+# an office address. 2 rows, unchanged by this and not made worse.
+# THE CAP IS PER SEGMENT, SO THE FIELD'S REAL BOUND IS TWICE IT. `location` joins
+# `parts[2]` and `parts[3]`, each truncated independently, so a two-segment header can reach
+# 129 characters and the measured maximum is 119 -- not 64. Spelled out because the constant
+# name reads like a bound on the field and is not one.
+#
+# IT ALSO CANNOT SEE A BLOCK-TAG BOUNDARY, which is the residual `id-pro` measured: on the
+# Portless row the header ends at a `<p>`, not a newline, so this leaves 83 characters with
+# 49 of them body prose. That is fixed upstream, by splitting the DECODED markup before the
+# strip -- and NOT by lowering this cap, because split-only reaches a WORSE maximum (548) on
+# comments carrying no block tag before a long header. Split first, this second.
+_HN_LOCATION_CAP = 64
+
+# The header/body boundary in an HN comment is a BLOCK TAG -- not a pipe, and not a
+# newline. `clean` flattens the tag into the same text run, so the segment that should
+# hold a location swallows the whole posting body instead. Splitting the DECODED markup
+# here, BEFORE the strip, is the cure the cap above calls itself a mitigation for.
+_HN_BLOCK = re.compile(r"<(?:p|br|div|ul|ol|li|blockquote)\b[^>]*>", re.I)
+
+
+_HN_HREF = re.compile(r'<a\s+href="([^"]+)"', re.I)
+
+
+def _slug_owns_company(url: str, company: str) -> bool:
+    """Does this board actually belong to `company`?
+
+    A host check proves a board is REAL, never WHOSE it is. Measured: the HN comment
+    for Phaselaw carries `jobs.ashbyhq.com/Pear-VC/...` -- an investor's board, posting
+    for a portfolio company. `_is_direct_apply` passes it because `ashbyhq.com` is on the
+    ATS allowlist, and handing a user the wrong employer's posting is worse than handing
+    them a broken one: the broken link fails visibly, this one looks right.
+
+    Gates only links this module RECOVERS, never a URL the poster typed -- the point is
+    to avoid ASSERTING an owner we invented, not to second-guess the source.
+
+    True when there is nothing to check. A board with no slug, or a name too short to
+    compare, is not evidence of a mismatch, and `_ATS_HOSTS` already carries the
+    positive evidence. CLAUDE.md records the same limit from the other side: identity
+    verification covers Greenhouse only, because it is the one ATS that reports an owner.
+    """
+    from .dedup import ats_from_url
+    from .discover import _norm_name
+
+    got = ats_from_url(url)
+    if not got or not got[1]:
+        return True
+    slug = re.sub(r"[^a-z0-9]", "", got[1].lower())
+    token = re.sub(r"[^a-z0-9]", "", _norm_name(company).lower())
+    # 4, and prefix-compared, because a board slug abbreviates: "Eleos Technologies"
+    # ships as `eleostech`, so equality fails and containment must run BOTH ways.
+    if len(token) < 4 or len(slug) < 4:
+        return True
+    return token[:6] in slug or slug[:6] in token
+
+
+def _hn_url(raw: str, company: str, text: str, item_id) -> tuple[str, bool]:
+    """The apply link in an HN comment, read from the MARKUP rather than the prose.
+
+    Returns `(url, recovered)`. `recovered` is True only when the link came out of an
+    href this function went looking for -- the caller uses it to withhold a
+    `direct_apply` promotion, because a link WE dug up must earn that flag rather than
+    inherit it from host shape. See the note in `_hn_rows` where it is stashed.
+
+    HN renders a long link as `<a href="FULL">https://boards.greenhouse.io/acme/j...</a>`.
+    `clean` strips the tag, keeps the DISPLAY text and throws the href away -- so the
+    regex below recovers a URL with a literal ellipsis in it, which 404s. 48 of 196 rows
+    carry one, and they skew to `boards.greenhouse.io` and `jobs.lever.co`: the bug
+    destroys the highest-value links. The full target was in the response the whole time.
+
+    Same invariant as `sections` and as the location split above: STRUCTURE IS READ
+    BEFORE THE STRIP, OR NOT AT ALL. An href is structure.
+
+    TIER 1 ONLY, and deliberately not `_best_apply_link`'s full preference order. Its
+    middle tier is "anything not on the known-aggregator list", running on a list
+    measured as under-populated -- applying it here promotes 15 unclassified hosts
+    (`notion.site`, `careers-page.com`) and, on one measured row, trades an employer
+    homepage for `linkedin.com/jobs/view/...` on a product whose whole claim is
+    direct-to-employer. Reuse the TIER, not the ORDER.
+    """
+    prose = m.group(0) if (m := re.search(r"https?://[^\s)\]]+", text)) else ""
+    thread = f"https://news.ycombinator.com/item?id={item_id}"
+    for href in (html.unescape(h) for h in _HN_HREF.findall(raw)):
+        parsed = urlparse(href)
+        if not (parsed.path.strip("/") or parsed.query):
+            continue  # a bare homepage is not a posting, and we already have one
+        if _is_direct_apply(href, company) and _slug_owns_company(href, company):
+            return href, True
+    # A truncated URL is a KNOWN 404, so the thread link -- which reaches the comment
+    # holding the posting -- beats it. Not a promotion: `_is_direct_apply` reads False
+    # on news.ycombinator.com, so these rows stay honestly not-direct and stay out of a
+    # direct-only consumer's intake. 15 of the 26 unrecovered rows are provably dead.
+    if prose and ("..." in prose or "…" in prose):
+        return thread, False
+    return (prose or thread), False
+
+
+def _hn_location(segment: str) -> str:
+    """One pipe segment -> at most a location-shaped head of it."""
+    head = segment.split("\n", 1)[0].strip()  # a newline ends the header line outright
+    if len(head) <= _HN_LOCATION_CAP:
+        return head
+    cut = head[:_HN_LOCATION_CAP]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > 0 else cut).strip()
+
+
+# The "Seeking Freelancer / Wanted" template, as labelled fields. A JOB SEEKER posting
+# inside a hiring thread -- `search_hn_whoishiring` already filters threads to "who is
+# hiring", so no thread-level filter can reach this, and it needs a per-comment shape
+# test instead.
+#
+# NOT ANCHORED TO A LINE START, and that is the whole reason the first version of this
+# fired on nothing: `clean` flattens the seeker block onto one line, so `^` never
+# matches. The first detector scored 0 of 219 INCLUDING the row it was written for.
+_HN_SEEKER_LABELS = tuple(
+    re.compile(rf"(?<![a-z]){p}\s*:", re.I)
+    for p in (
+        r"willing to relocate",
+        r"r[\u00e9e]sum[\u00e9e](?:\s*/\s*cv)?",
+        r"location",
+        r"remote",
+        r"e-?mail",
+        r"technologies",
+        r"seeking",
+    )
+)
+
+
+def _is_hn_seeker_post(text: str) -> bool:
+    """Does this comment use the job-SEEKER template rather than a hiring one?
+
+    THREE OR MORE labels, and the threshold is measured rather than chosen. Scored
+    against every hn row in a 102,799-row harvest [2026-08-20] -- 219 comments, of
+    which 1 is a seeker:
+
+        >= 3 of the seven labels      fires on 1 of 219   0 false positives
+        'willing to relocate:' alone  fires on 1 of 219   0 false positives
+        resume/cv OR relocate         fires on 2 of 219   1 FALSE POSITIVE
+
+    THE FALSE POSITIVE IS WHY `r\u00e9sum\u00e9` CANNOT DECIDE ALONE: a genuine listing
+    said "Resume:" because it was ASKING for one. So no single label is sufficient,
+    including the most seeker-specific one -- a seeker who omits it would still be
+    caught by the other six, and a hiring post has to use three before it is dropped.
+
+    WHAT THE ZERO DOES AND DOES NOT MEAN. 0 of 218 genuine hiring posts is an upper
+    bound of roughly 1.4% at 95% confidence, not proof of zero, and no hiring post in
+    that corpus reached even two labels -- so the margin is real but it is one thread
+    on one day. RECALL RESTS ON n=1: exactly one seeker row exists in the corpus, so
+    this is measured against a single example of what it is built to catch, and a
+    seeker using a different template is not covered by any of it.
+
+    Dropping the whole comment is the point rather than scrubbing the fields. The row
+    that motivated this carries a private individual's email and GitHub profile in
+    `title`, their location line in `company`, and the same details again in the 1,126
+    characters of `text` -- so a field-level fix leaves the body republishing them.
+    Re-publishing a third party's contact details is a decision, not a default.
+    """
+    return sum(bool(rx.search(text)) for rx in _HN_SEEKER_LABELS) >= 3
+
+
 def _hn_rows(tree, out: list) -> None:
     for c in tree.get("children", []):
-        text = clean(c.get("text"))
+        text, secs = clean_with_sections(c.get("text"))
         parts = [p.strip() for p in text.split("|")]
         if len(parts) < 2 or not parts[0]:
             continue
-        m = re.search(r"https?://[^\s)\]]+", text)
+        # AN EMPTY SEGMENT IS A TYPO, NOT A FIELD -- but only the TITLE moves past it.
+        # "Planlab.ai | | Product Engineer (Design) & Platform Engineer | ONSITE in
+        # London, UK" (live, 2026-11-16) has a doubled pipe, and positional reading made
+        # the title "" and the location the title -- 1 of 446 rows, and the reason the
+        # canary failed hn. The title is now the first NON-EMPTY segment after the
+        # company, and the location keeps reading its raw slots 2-3 minus whichever one
+        # became the title. An earlier version COMPACTED the list instead, which shifted
+        # every later slot: Tivly's "Title | | [REMOTE (US) ...] | Full-time" then
+        # pulled "Full-time" into its location. Indices stay raw, so nothing slides.
+        title_at = next((i for i in range(1, len(parts)) if parts[i]), None)
+        if _is_hn_seeker_post(text):
+            continue
+        # STRUCTURE BEFORE THE STRIP, or not at all -- the same invariant `sections`
+        # ships for headers. An HN comment ends its header at a BLOCK TAG, not a pipe
+        # and not a newline ("$180k-$230k<p>AI usage today is basic..."), and `clean`
+        # flattens that tag into the same text run. So `parts[3]` above holds the whole
+        # posting body, and no amount of trimming it afterwards recovers the boundary.
+        # Splitting the DECODED markup here returns the header outright:
+        # ['Portless', 'AI Engineer (Founding seat)', 'Remote (North America)', '$180k-$230k'].
+        #
+        # ONLY `location` reads this. `parts[0]`/`parts[1]` reproduce company and title
+        # on 196 of 196 measured comments and are deliberately left alone, as is the
+        # segment SCAN below -- narrowing the input to remote_type/employment_type is a
+        # different change with a different blast radius.
+        head_parts = [
+            p.strip()
+            for p in clean_with_sections(_HN_BLOCK.split(c.get("text") or "", 1)[0])[
+                0
+            ].split("|")
+        ]
+        # Fall back when the split leaves no location segment: a comment whose block tag
+        # precedes its pipes would otherwise EMPTY a location that is currently
+        # populated. 4 of 196 comments split short; 0 lose a location today, and this
+        # keeps that true for a thread that formats differently next month.
+        loc_parts = head_parts if len(head_parts) > 2 else parts
+        hn_url, hn_recovered = _hn_url(c.get("text") or "", parts[0], text, c.get("id"))
         # SCAN the segments, do not index them. The convention is loose: measured
         # across 174 comments in one thread, the remote token lands in slot 2 (62x),
         # slot 3 (34x), slot 1 (18x) and slot 4 (7x) -- "PostHog | Full-Time |
@@ -2278,14 +2954,27 @@ def _hn_rows(tree, out: list) -> None:
                     etype = norm
         out.append(
             {
-                "title": parts[1][:120],
+                "title": parts[title_at][:120] if title_at else "",
                 "company": parts[0][:80],
-                "location": " ".join(parts[2:4]),
-                "url": m.group(0)
-                if m
-                else f"https://news.ycombinator.com/item?id={c.get('id')}",
+                "location": " ".join(
+                    t
+                    for t in (
+                        _hn_location(p)
+                        for i, p in enumerate(loc_parts[2:4], start=2)
+                        if i != title_at
+                    )
+                    if t
+                ),
+                "url": hn_url,
+                # A link this adapter RECOVERED does not earn `direct_apply` from host
+                # shape. Measured: of 5 rows the ATS-platform additions newly reach, 4
+                # are 404/410 -- `applytojob.com` postings expire fast -- so promoting on
+                # the host would assert "you can apply here" about a dead posting. That is
+                # the same lie as the `direct_apply=False` this release fixes, pointed the
+                # other way, and manufactured by the fix for it. Transient key, popped in
+                # engine._consume alongside _blk/_nt.
+                "_url_recovered": hn_recovered,
                 **posted_from(c.get("created_at")),
-                "department": "",
                 "remote_type": rtype,
                 "remote_basis": rbasis,
                 "source_extra": {"hn_author": c.get("author"), "hn_id": c.get("id")}
@@ -2301,6 +2990,7 @@ def _hn_rows(tree, out: list) -> None:
                 ),
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "hn",
             }
         )
@@ -2355,14 +3045,35 @@ def search_braintrust(queries):
             t = j.get("title") or ""
             if _BT_LABEL.search(t):
                 continue
-            skills = " ".join(
-                _names(j.get("main_skills")) + _names(j.get("job_skills"))
-            )
+            # A five-digit integer is not a skill. Braintrust mixes opaque numeric
+            # ids into both skill arrays -- 164 of its 227 tag tokens corpus-wide,
+            # and every purely-numeric tag in the whole corpus is this source. They
+            # were reaching TWO fields: `tags`, whose contract says "skills the
+            # source itself extracted", and `text`, where they were interpolated
+            # under the label "Skills:" and then read by relevant() and
+            # score_and_signals(). Filtering here, ONCE and upstream of both, is why
+            # this is a local rather than two separate guards -- cleaning `tags`
+            # alone would have left the ids in the scored, searchable body on 42
+            # live rows while reporting the defect fixed.
+            skill_names = [
+                s
+                for s in _names(j.get("main_skills")) + _names(j.get("job_skills"))
+                if not s.isdigit()
+            ]
+            skills = " ".join(skill_names)
             hrs = j.get("expected_hours_per_week")
             emp = j.get("employer") or {}
             text = f"{t}. Skills: {skills}. {j.get('contract_type', '')} contract" + (
                 f", ~{hrs}h/wk." if hrs else "."
             )
+            # ROUTED THROUGH THE SAME PATH AS EVERY OTHER BODY, which yields `[]` here
+            # -- a built sentence has no markup and therefore no headers. It used to
+            # skip this and emit `sections: null`, and the contract says `null` means
+            # "there was no body to read" while `[]` means "a body with no headers".
+            # There IS a body on 29 of 29 rows, so `null` was a false statement about
+            # the posting, and the two states exist precisely so a consumer can tell
+            # a missing body from an unstructured one.
+            text, bt_secs = clean_with_sections(text)
             out.append(
                 {
                     "title": t,
@@ -2371,25 +3082,29 @@ def search_braintrust(queries):
                         " ".join(_names(j.get("locations"))) + " (Remote)"
                     ).strip(),
                     "url": f"https://app.usebraintrust.com/jobs/{j.get('id')}/",
+                    # There is no prose body in this payload; `text` above is BUILT from
+                    # the title and skills, ~157 chars on 29 of 29 rows. A consumer that
+                    # reads it as a description is reading our sentence, not the
+                    # employer's, and nothing else in the record says so.
+                    "sections": bt_secs,
+                    "text_basis": "synthesized",
                     **posted_from(j.get("created")),
                     # `level` was going into `department` -- a seniority filed as a
                     # category, one of the four meanings that made that column
                     # unusable downstream. It now says what it is.
-                    "department": "",
                     # `level` DOES NOT EXIST in this payload -- 0 of 20 rows carry
                     # the key, so this mapping has been dead since it was written and
                     # the 20% seniority fill came from the title decomposition, not
                     # from Braintrust. `role.name` is a clean job FAMILY on 20/20 and
                     # `category` was empty.
-                    "category": (j.get("role") or {}).get("name") or None,
+                    "department": (j.get("role") or {}).get("name") or None,
                     "expires": to_date(j.get("deadline")),
                     "remote_type": "remote",  # a remote freelance network by definition
                     # `board`, NOT `stated`: nothing on the ROW says remote -- every posting
                     # here is remote because that is what this board is. Collapsing the two
                     # into one label is what the basis field exists to prevent.
                     "remote_basis": "board",
-                    "tags": _names(j.get("main_skills")) + _names(j.get("job_skills"))
-                    or None,
+                    "tags": skill_names or None,  # numerics already dropped, above
                     "employment_type": f"contract ({j.get('contract_type', '')})".strip(),
                     "salary": _bt_rate(j),
                     # `payment_type` is annual|hourly|per_task (probed), and the
@@ -2454,8 +3169,8 @@ def _usajobs_grade(d: dict) -> str | None:
     return f"{plan}-{band}" if plan else band
 
 
-def _usajobs_text(d: dict) -> str:
-    """The whole federal posting, not just its summary.
+def _usajobs_text(d: dict) -> tuple[str, list[dict]]:
+    """The whole federal posting plus its sections, not just its summary.
 
     `JobSummary` averages 305 characters (probed 2026-08-05, n=25) while the content
     a scorer needs sits in sibling fields: MajorDuties 1,692, Evaluations 1,487,
@@ -2472,7 +3187,7 @@ def _usajobs_text(d: dict) -> str:
             v = " ".join(str(x) for x in v if x)
         if v:
             parts.append(str(v))
-    return clean("\n".join(parts))
+    return clean_with_sections("\n".join(parts))
 
 
 def _usajobs_remote(d: dict) -> dict:
@@ -2597,6 +3312,11 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
     for it in result.get("SearchResultItems", []):
         d = it.get("MatchedObjectDescriptor") or {}
         pay = (d.get("PositionRemuneration") or [{}])[0]
+        # HOISTED out of the dict literal below, which is the whole reason this line
+        # exists: `_usajobs_text` returns a pair now, and writing `_usajobs_text(d)[0]`
+        # inline would compile, pass every existing test, and silently discard the
+        # sections for this source alone.
+        _text, _secs = _usajobs_text(d)
         out.append(
             {
                 "title": d.get("PositionTitle", ""),
@@ -2612,16 +3332,24 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                 # that shut yesterday is worse than no job: it wastes the one thing
                 # the user actually spends, which is the time to read and apply.
                 "expires": to_date(d.get("ApplicationCloseDate")),
-                # PRESERVED byte-identical (deprecated, removed at 1.0) -- but it
-                # was never a department. "Department of Veterans Affairs" is the
-                # EMPLOYER, and pouring it into a category column is how a
-                # downstream store ended up with employer names among its most
-                # common "categories". The three keys below say what each thing is.
-                "department": d.get("DepartmentName", ""),
-                "parent_company": d.get("DepartmentName") or None,
-                "team": d.get("SubAgency") or None,
-                # OPM occupational series -- a real, coded job family.
-                "category": ", ".join(
+                # THE ONE PLACE THE 0.9.0 REMOVAL COST INFORMATION. `DepartmentName`
+                # ("Department of Veterans Affairs") is the EMPLOYING DEPARTMENT, and
+                # it rode in the deprecated `department` until that field was cut. Of
+                # nineteen adapters this is the only one whose value is not recoverable
+                # from the two keys below: `team` is `SubAgency`, a FACILITY (77 of 82
+                # live federal rows carry one, e.g. "Central Virginia VA Health Care
+                # System"), and `category` is the OPM series. `parent_company` was the
+                # documented recovery and went earlier in the same release. So the
+                # employing department is now simply unmapped here -- accepted, not
+                # overlooked, and asserted in the parser test so it stays visible.
+                # Pouring it into a category column is how a downstream store ended up
+                # with employer names among its most common "categories"; the two keys
+                # below say what each thing actually is.
+                # `SubAgency` first; the OPM occupational series -- a real, coded
+                # job family -- as the fallback. `DepartmentName` is the EMPLOYER and
+                # is deliberately read by neither.
+                "department": d.get("SubAgency")
+                or ", ".join(
                     c.get("Name", "")
                     for c in (d.get("JobCategory") or [])
                     if c.get("Name")
@@ -2695,7 +3423,8 @@ def _usajobs_rows(result: dict, remote: str, out: list) -> None:
                     currency="USD",
                     period=pay.get("RateIntervalCode") or pay.get("Description"),
                 ),
-                "text": _usajobs_text(d),
+                "text": _text,
+                "sections": _secs,
                 "source": "usajobs",
             }
         )
@@ -2753,7 +3482,7 @@ THEMUSE_CATEGORIES = (
 )
 
 
-def search_themuse(queries):
+def search_themuse(queries, strict: bool = False):
     """The Muse -- keyless, and the least tech-skewed source here (11% tech titles
     when measured), which is the reason to carry it at all.
 
@@ -2776,6 +3505,18 @@ def search_themuse(queries):
     Cost is themuse_max_pages x 20 categories requests per run (default 5 -> 100
     requests, ~2,000 rows). `seen` dedups across slices because a job can carry two
     categories.
+
+    `strict` is for the live canary only, as on `search_himalayas`. Failing soft
+    turns a dead endpoint into twenty dead slices and an empty list, so the canary
+    could only say "parsed 0 rows from a reachable endpoint" -- which is all it has
+    said since its first failure on 2026-11-09 (it passed on 2026-11-02), while the
+    real answer was an HTTP status it never saw.
+    Probed 2026-11-16 with this package's own client: `/api/public/jobs` and
+    `/api/public/companies` return 404 with the site's HTML page, and
+    `/developers/api/v2` redirects to `/about`. (curl, over HTTP/2, gets a 403
+    Cloudflare challenge on the same URL instead; the client fingerprint decides
+    which wall you hit.) `strict=True` re-raises the first network error so the
+    canary reports the status. The engine never passes it.
     """
     out: list[dict] = []
     seen: set = set()
@@ -2788,6 +3529,8 @@ def search_themuse(queries):
                     f"?page={page}&category={q(category)}"
                 )
             except NET_ERRORS:
+                if strict:
+                    raise
                 break  # a dead slice ends this category; the others still run
             except Exception:  # noqa: BLE001
                 break
@@ -2821,10 +3564,18 @@ def _themuse_rows(results, seen: set, out: list) -> None:
             for x in (j.get("categories") or [])
             if isinstance(x, dict)
         ]
-        levels = [
-            x.get("name", "") for x in (j.get("levels") or []) if isinstance(x, dict)
-        ]
-        text = clean(j.get("contents", ""))
+        # The Muse ships BOTH forms of the level in the same object --
+        # {'name': 'Mid Level', 'short_name': 'mid'} -- and this read only `name`,
+        # the display string, throwing the vendor's own canonical token away. That
+        # is the same class of defect as reading a description's plain-text field
+        # when the structured one is right beside it. `short_name` is what goes in
+        # `seniority` (it needs no interpretation from us and is already the form a
+        # consumer can filter on); `name` is what the vendor displays, so it is the
+        # raw. Falls back to `name` if a row ever omits the token.
+        levels = [x for x in (j.get("levels") or []) if isinstance(x, dict)]
+        level_tokens = [x.get("short_name") or x.get("name") or "" for x in levels]
+        level_names = [x.get("name") or "" for x in levels]
+        text, secs = clean_with_sections(j.get("contents", ""))
         out.append(
             {
                 "title": j.get("name", ""),
@@ -2839,15 +3590,29 @@ def _themuse_rows(results, seen: set, out: list) -> None:
                 **posted_from(j.get("publication_date")),
                 # A job FAMILY ("Data Science"), not an org unit -- see
                 # catalog/_SCHEMA.md on why that distinction is load-bearing.
-                "department": "; ".join(x for x in cats if x),
-                "category": "; ".join(x for x in cats if x) or None,
+                "department": "; ".join(x for x in cats if x) or None,
                 # `levels` is a real seniority string ("Senior Level"). It was held
                 # back while `seniority` was a strand-B key not yet on any adapter;
                 # the contract exists now, so it ships.
-                "seniority": "; ".join(x for x in levels if x) or None,
-                "employment_type": j.get("type", ""),
+                "seniority": "; ".join(x for x in level_tokens if x) or None,
+                "seniority_raw": "; ".join(x for x in level_names if x) or None,
+                # DELIBERATELY EMPTY, not removed: `_assert_contract` requires every
+                # adapter to emit the key, and `_NULLABLE_TEXT` turns "" into None at
+                # the boundary, so this is how an adapter says "this API has no such
+                # field". Before, it read `type`, which is
+                # The Muse's posting-PROVENANCE flag: it is the literal string
+                # "external" on 20 of 20 rows probed live 2026-08-20 (with a sibling
+                # `model_type` beside it), so every Muse row normalized to OTHER --
+                # 216 of 216 in the last harvest, and the single largest contributor
+                # to that bucket. catalog/themuse.md records `employment_type: null`
+                # for this API and has been right since it was written; the code was
+                # reading a field the profile says does not exist. Emitting nothing is
+                # the honest answer, and it is the second time in this repo that the
+                # catalog was correct while an adapter was not.
+                "employment_type": "",
                 "salary": salary_from_text(text),
                 "text": text,
+                "sections": secs,
                 "source": "themuse",
             }
         )

@@ -114,7 +114,7 @@ fields:
     {
       path: DepartmentName,
       type: string,
-      note: "THE EMPLOYER — currently misrouted into `department` and thence jobfitr `category`",
+      note: "THE EMPLOYER. Still UNMAPPED — the record has no employer_org-shaped field since `parent_company` went at 0.9.0. NOTE the record's `department` was REMOVED and then RE-CREATED under the same name later in 0.9.0 (2026-08-25), now meaning the org unit only; this adapter fills it from `SubAgency`, never from `DepartmentName`.",
     }
   tags: null
   seniority:
@@ -129,7 +129,7 @@ fields:
 
 traps:
   - "SILENTLY IGNORES unknown params — a typo'd parameter name is a permanent no-op with no error. Verify every param against a control."
-  - "`DepartmentName` is an EMPLOYER ('Department of Veterans Affairs'), not a category. The adapter routes it to `department`, which jobfitr merges into `category` — 957 rows of employer-as-category in the frozen corpus."
+  - "`DepartmentName` is an EMPLOYER ('Department of Veterans Affairs'), not a category, and it is UNMAPPED — the single accepted information loss of 0.9.0. **The record field named `department` is NOT where it lives and this profile said otherwise for two days.** That field was removed at 0.9.0 and then re-created under the same name on 2026-08-25 when `team` and `category` merged into it; it now carries the ORG UNIT only, and this adapter fills it from `SubAgency` (a facility, e.g. 'VA Palo Alto Healthcare System'), falling back to the OPM occupational series. `team` and `category` no longer exist. The vendor key and the record key share the word `department` and mean different things — `catalog/_SCHEMA.md` calls writing `DepartmentName` into an org-unit field the exact mistake the three-key split exists to prevent, and `test_usajobs_parser_maps_nested_federal_shape` is the guard."
   - "`JobCategory[].Name` is the real job function (OPM occupational series, with codes) and is currently unused."
   - "Public-domain federal data does NOT mean the API terms permit commercial use. Two separate questions."
 ---
@@ -195,7 +195,7 @@ discarded:
 | `state`        | `PositionLocation[].CountrySubDivisionCode` = `"California"`       | the free-text `PositionLocationDisplay`     |
 | `city`         | `PositionLocation[].CityName`                                      | —                                           |
 | `function`     | `JobCategory[]` = `{Name: "Occupational Therapist", Code: "0631"}` | —                                           |
-| `employer_org` | `DepartmentName`                                                   | routed to `department` → jobfitr `category` |
+| `employer_org` | `DepartmentName`                                                   | UNMAPPED since 0.9.0 — see traps            |
 
 `0631` is the **OPM occupational series** — a federal standard code for the occupation, which is a
 better controlled vocabulary than anything any other source provides, and it is thrown away while an
@@ -203,15 +203,24 @@ employer name is used as the category.
 
 Also note `OrganizationName` (`"Veterans Health Administration"`) is the truer employer than
 `DepartmentName`, and `SubAgency` (`"VA Palo Alto Healthcare System"`) is the org unit — three
-distinct nouns the current single `department` field flattens into one.
+distinct nouns that the 0.8.2 `department` field used to flatten into one. Two of the three now
+have homes — `company` and, since the 2026-08-25 merge, the RE-CREATED `department` (which carries
+`SubAgency`, the org unit, and nothing else). `DepartmentName` has none. `team` is gone.
 
 **Consequence:** structured location for this source is a mapping change, not a parsing project.
 The data is already in the payload.
 
 ## Two fidelity fixes it is owed
 
-1. **`DepartmentName` → `employer_org`**, never `department`. It is the single largest contributor
-   to jobfitr's employer-as-category bug.
+1. **`DepartmentName` needs an `employer_org`-shaped home, and there is not one.** It must never go
+   back into a category column — that routing was the single largest contributor to the downstream
+   employer-as-category bug. The 0.8.2 field it rode in was removed at 0.9.0; a field of the SAME
+   NAME exists again since 2026-08-25, but it is the org unit and `SubAgency` already holds it, so
+   it is not a home for an employer. `parent_company` — the only employer_org-shaped field the
+   record ever had — went in the same release. So this is not a mapping change any more: it needs a
+   field that does not exist.
+   Until one does, the employing department is dropped, and that is the one accepted information
+   loss of the 0.9.0 removal.
 2. **`JobCategory[]` → `function`.** OPM occupational series is a genuine controlled vocabulary with
    codes — better than anything else any source provides, and currently thrown away.
 

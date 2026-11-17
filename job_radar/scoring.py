@@ -169,7 +169,51 @@ _HYBRID_RE = re.compile(
     r"|\b\d+\s*(?:-\s*\d+\s*)?days?\s+(?:a|per)?\s*week\s+(?:in|at|from)\s+(?:the\s+)?office\b"
     r"|\b\d+\s*days?\s+in\s+(?:the\s+)?office\b"
     r"|\bdays?\s+in\s+(?:the\s+)?office\b"
-    r"|\bin[- ]office\s+\d+\s*days?\b",
+    r"|\bin[- ]office\s+\d+\s*days?\b"
+    # A QUALIFIED telework IS a split week, and routing it here rather than tightening
+    # `_ROLE_REMOTE_RE` is what the documented precedence is for: hybrid runs before the
+    # role-remote branch, so "the specific schedule beats the general claim" already
+    # resolves these correctly once they are recognised at all. Read every telework/
+    # telecommute occurrence in a 7,545-row harvest -- 35 hits, 26 distinct contexts --
+    # and the qualified ones dominate: "50% Telecommuting Permitted" / "Up to 50% telework
+    # permitted" (9), "Part-time telecommuting is an option" (2), "Telework Type: Part-Time
+    # Telework" (2), "part-time telework per our global telework policy" (2). All of them
+    # were reaching `_ROLE_REMOTE_RE`'s bare `\btelecommut\w*` and coming out REMOTE.
+    #
+    # The bare stems in `_ROLE_REMOTE_RE` are deliberately LEFT ALONE. An unqualified
+    # "Telecommuting is available for this position" is a genuine role-level assertion and
+    # a test pins it; the defect was never the stem, it was that nothing claimed the
+    # qualified phrasings first.
+    r"|\b(?:up\s+to\s+)?\d{1,3}\s*%\s*(?:telecommut|telework)\w*"
+    r"|\bpart[- ]time\s+(?:telecommut|telework)\w*"
+    r"|\btelework\s+type\s*:?\s*part[- ]time\b",
+    re.I,
+)
+
+# A FULL week in the office is not a split one. `_HYBRID_RE`'s day-count alternatives
+# never look at the number -- `\b\d+\s*days?\s+in\s+(?:the\s+)?office\b` reads "in office 5
+# days a week" as evidence of a hybrid schedule, when it is the plain statement of an
+# onsite one. Measured: 38 rows in a 7,545-row harvest, 34 labelled hybrid and 3 remote.
+#
+# CONCENTRATION, stated because it changes what the number means: 35 of the 38 are ONE
+# employer (Postman, "we are in office 5 days a week for all roles"), 2 are Anthropic and
+# 1 is OpenAI. This is a correct fix on a narrow, real shape, not a broad win.
+#
+# BLIND TO ITS OWN FAILURE MODE, and this is the part to read before trusting it: the
+# numeral branch cannot see a spelled-out count above five, and 31 corpus bodies write
+# "four days a week in the office". Every one of those is genuinely hybrid TODAY, so the
+# gap costs nothing measurable -- but a posting writing "five days a week" in words is
+# caught only by the `five` alternative below, and one writing "seven" is not caught at
+# all. A metric built on this check cannot detect that; only reading bodies can.
+#
+# `telework type: full-time office` is here rather than in `_HYBRID_RE` because it says
+# office in its own words -- 4 rows whose text reads "Telework Type: Full-Time
+# Office/Project" were coming out REMOTE off the bare stem.
+_ONSITE_RE = re.compile(
+    r"\b(?:5|five)\s*days?\s+(?:a|per)\s*week\s+(?:in|at|from)\s+(?:the\s+)?office\b"
+    r"|\bin[- ]office\s+(?:5|five)\s*days?\b"
+    r"|\b(?:5|five)\s*days?\s+in\s+(?:the\s+)?office\b"
+    r"|\btelework\s+type\s*:?\s*full[- ]time\s+office\b",
     re.I,
 )
 
@@ -184,8 +228,15 @@ _HYBRID_RE = re.compile(
 # with remote_posting(), whose behaviour is frozen public API, and two copies of one
 # alternation is the drift this package has been bitten by three times.
 _NEG_LITERALS = ("remote", "site", "office")
-_HYBRID_LITERALS = ("hybrid", "office")
+# `telecommut` and `telework` joined this set when the qualified-telework alternatives were
+# added to `_HYBRID_RE`. They are load-bearing exactly as `anywhere` was on _ROLE_LITERALS:
+# "Part-time telecommuting is an option" contains neither `hybrid` nor `office`, so without
+# them the gate short-circuits and the pattern never runs.
+_HYBRID_LITERALS = ("hybrid", "office", "telecommut", "telework")
 _ROLE_LITERALS = ("remote", "anywhere", "telecommut", "telework")
+# Every `_ONSITE_RE` alternative ends in the word `office`; nothing else is required by all
+# of them, so this set is complete at one word.
+_ONSITE_LITERALS = ("office",)
 
 
 def _has(low: str, literals: tuple) -> bool:
@@ -290,12 +341,47 @@ def remote_signal(title: str, location: str, body: str = "") -> tuple:
         low = body.lower()
         if _has(low, _NEG_LITERALS) and _REMOTE_NEG_RE.search(low):
             return (None, None)
-        # (4) before (5): a posting that states a split week is hybrid even when it also
+        # (4) A FULL week in the office, before the split-week branch, because every string
+        # this matches also matches `_HYBRID_RE` -- "in office 5 days a week" contains
+        # "days in the office". Ordering is the entire fix; behind hybrid it is unreachable.
+        # This is also the ONLY body path to `onsite`: the negation branch above returns
+        # (None, None) rather than a verdict, so before this, `onsite` was reachable only
+        # from a location or title, which is why greenhouse produced 0 of 4,852 and themuse
+        # 0 of 216. It does NOT make onsite generally reachable -- it recognises one narrow
+        # shape, on 38 rows concentrated in 3 employers. Flipping the 2,872 greenhouse rows
+        # that say nothing at all would be defaulting an unknown to a plausible value.
+        if _has(low, _ONSITE_LITERALS) and _ONSITE_RE.search(low):
+            return ("onsite", "text")
+        # (5) before (6): a posting that states a split week is hybrid even when it also
         # asserts remoteness -- the specific schedule beats the general claim.
         if _has(low, _HYBRID_LITERALS) and _HYBRID_RE.search(low):
             return ("hybrid", "text")
         if _has(low, _ROLE_LITERALS) and _ROLE_REMOTE_RE.search(low):
             return ("remote", "text")
+    # (7) LAST, and the placement is the whole safety argument. `vocab.remote_type` is an
+    # EXACT whole-string lookup into `_REMOTE_MAP` -- the normalizer every adapter already
+    # uses for a vendor's `workplaceType` -- and this function never asked it about the
+    # location, only the loose `_REMOTE_RE`. So a location that IS a work-arrangement word
+    # the map already knows went unread.
+    #
+    # Reaching here means every branch above declined, so this can only fill a `None`; it
+    # cannot overturn a verdict. Measured at 781e504: +22 `In-Office` -> onsite, +19
+    # `Distributed` -> remote, 0 flips. Put it FIRST instead and it breaks the documented
+    # "City (Remote)" demotion -- 2 rows whose location is exactly `Remote` are correctly
+    # hybrid today because their body states a split week.
+    #
+    # Exact-match is what makes it safe where `_REMOTE_RE` would not be: `remote_type` is
+    # asked about the whole string, so "Senior Distributed Systems Engineer" and
+    # "Distributed Systems" return None. Adding `distributed` to `_REMOTE_RE` instead --
+    # which is applied to the title -- would stamp `remote` on 22 currently-unclassified
+    # distributed-systems titles to fix 19 location rows, the same trap the comment on
+    # `_HYBRID_RE` records for "hybrid vehicles".
+    #
+    # CONCENTRATION: all 41 rows are one employer on one source (Cloudflare, greenhouse),
+    # which writes `In-Office` and `Distributed` as its literal location. This is a real
+    # per-row fix on a shape only some vendors write, not a general capability.
+    if location and (mapped := vocab.remote_type(location)):
+        return (mapped, "location")
     return (None, None)
 
 
@@ -472,7 +558,6 @@ def _region_allowed(p: dict, cfg) -> bool:
         or (str(r).upper() in _US_INCLUSIVE_SCOPES and allowed & _US_INCLUSIVE_SCOPES)
         for r in regions or []
     )
-
 
 
 def score_and_signals(p: dict, n: int = 7, cfg=None) -> tuple[int, str]:

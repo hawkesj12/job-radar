@@ -14,9 +14,6 @@ and nesting verbatim — a fixture invented from the code proves only that the c
 agrees with itself. Run: pytest tests/test_sources.py
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from job_radar import config, sources
@@ -28,7 +25,6 @@ REQUIRED_KEYS = {
     "location",
     "url",
     "posted",
-    "department",
     "employment_type",
     "salary",
     "text",
@@ -160,7 +156,7 @@ def test_jobicy_parser_maps_fields(monkeypatch):
     out = sources.search_jobicy(["ml"])
     j = out[0]
     assert j["title"] == "Machine Learning Engineer" and j["company"] == "Globex"
-    # jobIndustry is a LIST in the live API; it must not reach the CSV as a repr.
+    # jobIndustry is a LIST in the live API; it must not reach the record as a repr.
     assert j["department"] == "Engineering"
     assert j["location"] == "Anywhere (Remote)"
     # The list-vs-string case is the whole reason this adapter has a branch.
@@ -215,6 +211,7 @@ def test_himalayas_parser_maps_fields(monkeypatch):
                 "employmentType": "Full Time",
                 "minSalary": 150000,
                 "maxSalary": 200000,
+                "currency": "CAD",
                 "excerpt": "Agentic systems.",
             }
         ]
@@ -226,7 +223,14 @@ def test_himalayas_parser_maps_fields(monkeypatch):
     assert j["title"] == "LLM Engineer" and j["company"] == "Hooli"
     assert j["location"] == "United States, Canada (Remote)"
     assert j["url"] == "https://hooli.com/apply/1"  # direct link beats the guid
+    # THE CURRENCY MUST REACH THE DISPLAY, not only the record. Asserting the digits
+    # alone passed for `$150,000` and `CAD 150,000` alike, so deleting the third
+    # argument from THIS call site left the suite green while a Toronto band rendered
+    # as dollars -- three passing assertions on `util.salary_range` were testing the
+    # helper, never the caller.
     assert "150,000" in j["salary"] and "200,000" in j["salary"]
+    assert "CAD" in j["salary"], "the vendor currency was dropped on the display path"
+    assert j["salary_currency"] == "CAD"
     _assert_contract(out, "himalayas")
 
 
@@ -292,7 +296,23 @@ def test_usajobs_parser_maps_nested_federal_shape(monkeypatch):
     j = out[0]
     assert j["title"] == "IT Specialist (Data Management)"
     assert j["company"] == "National Institutes of Health"
-    assert j["department"] == "Department of Health"
+    # THE TRAP THE RENAME REOPENS, pinned where it happens. 0.9.0 named the org-unit
+    # field `department` (five of the seven org-unit adapters read a vendor key by
+    # that name), which means that ON THIS ONE ADAPTER the vendor's `DepartmentName`
+    # and the record's `department` share a word and mean DIFFERENT THINGS:
+    # "Department of Health" is the EMPLOYING DEPARTMENT, not an org unit.
+    # `catalog/_SCHEMA.md` names writing `DepartmentName` here as "the exact mistake
+    # this split exists to prevent", and the shared word is now the bait for it.
+    # `department` takes `SubAgency` (a facility name, absent from this fixture as it
+    # is from 5 of 82 live federal rows) and falls back to the OPM occupational series
+    # (also absent here) -- neither is the employing department, and `parent_company`,
+    # the recovery the README used to name, was removed earlier in this same release.
+    # So "Department of Health" appears nowhere in the record, and the assert below
+    # keeps it that way. It is `None` here because BOTH permitted sources are absent
+    # from this fixture, which is the point: the adapter has no third thing to reach
+    # for, and the employer is not a fallback.
+    assert j["department"] is None
+    assert not any(v == "Department of Health" for v in j.values())
     # NORMALIZED from PositionSchedule[].Code — `.Name` is EMPTY on 47 of 50 live
     # rows and a shift pattern on the rest, so not one row in 50 produced a usable
     # employment type from it. The vendor's own string is preserved.
@@ -741,11 +761,21 @@ SAMPLES = {
                 "name": "AI Engineer",
                 "contents": "<p>Build RAG and agentic LLM systems.</p>",
                 "publication_date": "2026-07-10T00:00:00Z",
-                "type": "Full Time",
+                # `type` IS NOT AN EMPLOYMENT TYPE, and this fixture used to say
+                # "Full Time", which is a value the API has never sent. That is why
+                # the adapter read it for so long: the fixture made a provenance flag
+                # look like a legitimate type, so the parser test agreed with the bug.
+                # Probed live 2026-08-20 -- `type` is the literal string "external" on
+                # 20 of 20 rows, with `model_type` beside it. A fixture is a CAPTURE,
+                # not an assumption; catalog/themuse.md records employment_type: null.
+                "type": "external",
+                "model_type": "external",
                 "company": {"name": "Acme"},
                 "locations": [{"name": "Austin, TX"}],
                 "categories": [{"name": "Data Science"}],
-                "levels": [{"name": "Senior Level"}],
+                # Both forms ship in the same object -- the canonical token and the
+                # display string. The adapter reads short_name; name becomes the raw.
+                "levels": [{"name": "Senior Level", "short_name": "senior"}],
                 "refs": {
                     "landing_page": "https://www.themuse.com/jobs/acme/ai-engineer"
                 },
@@ -777,6 +807,11 @@ SAMPLES = {
                 "locations": [{"name": "Anywhere"}],
                 "created": "2026-07-10T00:00:00Z",
                 "contract_type": "hourly",
+                # Braintrust mixes opaque numeric ids into both skill arrays -- 164 of
+                # its 227 tag tokens corpus-wide. Captured here because the fixture
+                # carried none, so nothing could catch them reaching `tags` or `text`.
+                "main_skills": [{"name": "Python"}, {"name": "122059"}],
+                "job_skills": [{"name": "AI/ML"}, {"name": "122060"}],
             }
         ]
     },
@@ -897,6 +932,100 @@ def test_every_adapter_honours_the_posting_contract(name, monkeypatch):
     _assert_contract(out, required=required)
 
 
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_no_adapter_still_emits_team_or_category(name, monkeypatch):
+    """`team` and `category` are BOTH GONE at 0.9.0 -- they merged into `department` --
+    and nothing else in the suite would notice either coming back.
+
+    THE REASON THIS EXISTS IS `engine._reorder`, which KEEPS a key it does not name
+    rather than dropping it -- deliberately, so that adding a contract field cannot
+    silently delete it. The consequence is that `department` no longer being in
+    `_NULLABLE_TEXT` or `_READING_ORDER` does NOT remove it: an adapter that assigns
+    `"department": ""` puts the key straight back into the record, and because it is
+    no longer in `_NULLABLE_TEXT` it is not even normalized to None -- it arrives as a
+    literal `""`, the exact empty-string-means-absent lie the contract exists to
+    remove. Seven adapters had that line under the old name; a twentieth adapter, or a
+    revert, would reintroduce it with nothing red.
+
+    The 0.8.2 field named `department` was a DIFFERENT field -- a five-meaning column
+    that this same test used to ban. It now holds the vendor's org unit where one is
+    published and its job family where one is not, which measured as complementary
+    rather than redundant: 0 of 102,553 rows carried both `team` and `category`. The
+    one meaning still banned is the EMPLOYER (USAJOBS' `DepartmentName`), pinned out
+    separately in `test_usajobs_parser_maps_nested_federal_shape`.
+
+    Asserted on the ADAPTER's own output, before the engine, because that is where
+    the key would be written.
+    """
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+
+    out = (
+        sources.DEPTH_ALL[name]("slug")
+        if name in sources.DEPTH_ALL
+        else sources.BREADTH_ALL[name](["AI Engineer"])
+    )
+    assert out, f"{name}: produced no row, so this proved nothing"
+    for r in out:
+        for dead in ("team", "category"):
+            assert dead not in r, (
+                f"{name} still emits `{dead}` -- both merged into `department` at "
+                f"0.9.0. `department` carries the vendor's org unit where it ships "
+                f"one and its job family where it does not; the two never co-occurred."
+            )
+
+
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_every_adapter_emits_sections_or_honestly_omits_them(name, monkeypatch):
+    """0.9.0 wired `sections` at eighteen body sites across FOUR different call shapes
+    -- a plain assignment, two helpers that return the value, a mutator writing into a
+    caller's dict, and one where the local is a parsing intermediate. A site missed in
+    any of them fails SILENTLY: that source simply carries no structure, forever, and
+    nothing else in the suite would notice.
+
+    `list | None`, not `list`. Three adapters legitimately produce None because they
+    send no body at all -- smartrecruiters' list endpoint, and the workday/rippling list
+    endpoints before their detail calls run. Braintrust is a fourth and a different
+    reason: it SYNTHESIZES its text from the title and skill tags, so there is no vendor
+    markup to read and never will be.
+    """
+    assert name in SAMPLES, f"no SAMPLE payload for adapter {name!r} — add one"
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+
+    if name in sources.DEPTH_ALL:
+        out = sources.DEPTH_ALL[name]("slug")
+    else:
+        out = sources.BREADTH_ALL[name](["AI Engineer"])
+    assert out, f"{name}: produced no row from its own sample payload"
+
+    bodyless = {"smartrecruiters", "workday", "rippling", "braintrust"}
+    for row in out:
+        secs = row.get("sections")
+        assert secs is None or isinstance(secs, list), (
+            f"{name}: sections is {type(secs).__name__}, not list or None"
+        )
+        if name not in bodyless and row.get("text"):
+            assert secs is not None, (
+                f"{name}: has a body but sections is None — a wiring site was missed"
+            )
+        for sec in secs or []:
+            assert set(sec) <= {"type", "header", "start", "end"}, sec
+            assert ("start" in sec) == ("end" in sec), "half a span is not a span"
+
+
 # ── the three adapters added in 0.7.0 ───────────────────────────────────────
 def test_rippling_detail_fills_what_the_list_omits(monkeypatch):
     """The list endpoint has no body, no date and one location. Everything that
@@ -932,7 +1061,70 @@ def test_rippling_detail_fills_what_the_list_omits(monkeypatch):
     assert j["employment_type"] == "Salaried, full-time"  # not SALARIED_FT
     # the detail's multi-location array replaces the list's single label
     assert j["location"] == "New York, NY; Remote (Massachusetts, US)"
-    _assert_contract(out, required=REQUIRED_KEYS)
+    # Sections arrive through the DETAIL call, which is why they are asserted here and
+    # not in the all-adapter contract test: that test drives the LIST endpoint, whose
+    # rows carry no body at all, so it exempts rippling and workday by name and could
+    # never see a missed wiring site in either. Un-wiring this branch used to leave the
+    # whole suite green.
+    # `[]`, not None -- and the difference IS the assertion. This fixture's description
+    # is plain text, so "we looked and found no headers" is the right answer; a row that
+    # never reached `clean_with_sections` at all would arrive as None from `_coerce`.
+    # The two-state contract is what makes a missed wiring site visible here.
+    assert j["sections"] == []
+
+
+def test_rippling_string_shaped_description_also_carries_sections(monkeypatch):
+    """`description` arrives as EITHER a dict of two HTML blocks or a bare string, and
+    the two are separate assignments in `_rippling_detail`. An earlier draft of 0.9.0
+    wired only the dict-shaped one, which would have left every string-shaped response
+    with a body and no structure -- silently, for that response shape alone."""
+    listing = [{"uuid": "u1", "name": "AI Engineer", "url": "u", "workLocation": {}}]
+    detail = {
+        # `<p><strong>…</strong></p>` is the real Greenhouse/Rippling heading shape --
+        # the line break comes from `</p>`, since `</strong>` is not a block closer.
+        "description": (
+            "<p><strong>What you'll do</strong></p><p>Build RAG systems.</p>"
+        ),
+        "createdOn": "2023-10-31T10:40:35.194000-07:00",
+    }
+    monkeypatch.setattr(
+        sources, "get_json", lambda url: detail if "/jobs/u1" in url else listing
+    )
+    j = sources.fetch_rippling("acme")[0]
+    assert j["text"] == "What you'll do\nBuild RAG systems."
+    kinds = [s["type"] for s in j["sections"]]
+    assert "responsibilities" in kinds
+
+
+def test_workday_detail_carries_sections_not_just_a_body(monkeypatch):
+    """Same hole as rippling: a Workday body exists only after the per-job detail call,
+    so the list-driven contract test exempts it and cannot catch an un-wired site."""
+    _cfg()
+    # `_wd_path` is what drives the detail call; a row without it is skipped entirely.
+    rows = [
+        {
+            "title": "AI Engineer",
+            "url": "https://x/job/AI_Engineer_R-1",
+            "text": "",
+            "salary": "",
+            "_wd_path": "/job/AI_Engineer_R-1",
+        }
+    ]
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url, *a, **k: {
+            "jobPostingInfo": {
+                "jobDescription": (
+                    "<p><strong>Responsibilities</strong></p><p>Build systems.</p>"
+                ),
+                "startDate": "2026-08-01",
+            }
+        },
+    )
+    sources._workday_add_details("https://x", rows)
+    assert rows[0]["text"] == "Responsibilities\nBuild systems."
+    assert [s["type"] for s in rows[0]["sections"]] == ["responsibilities"]
 
 
 def test_rippling_survives_a_detail_call_that_fails(monkeypatch):
@@ -996,9 +1188,40 @@ def test_themuse_ignores_a_query_because_it_cannot_search(monkeypatch):
         assert "nurse" not in u.lower(), f"query leaked into the URL: {u}"
     j = out[0]
     assert j["company"] == "Acme"
-    assert j["department"] == "Data Science"  # a job FAMILY, not an org unit
+    assert j["department"] == "Data Science"  # a job FAMILY; this vendor ships no org unit
     assert j["url"] == "https://www.themuse.com/jobs/acme/ai-engineer"
     _assert_contract(out, "themuse")
+
+
+def test_themuse_fails_soft_by_default_and_raises_under_strict(monkeypatch):
+    """Every slice has errored since November 2026 (a 404 to this package's client). A
+    harvest must still fail soft -- one dead source cannot sink a scan -- but the
+    canary passes `strict=True` and must SEE the status; swallowed, it could only
+    report "parsed 0 rows from a reachable endpoint" with no reason. The 403
+    challenge shape is used because it is the one carrying extra headers."""
+    import email.message
+    import urllib.error
+
+    calls = []
+
+    def walled(url):
+        calls.append(url)
+        hdrs = email.message.Message()
+        hdrs["cf-mitigated"] = "challenge"
+        raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs, None)
+
+    monkeypatch.setattr(sources, "get_json", walled)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+
+    assert sources.search_themuse([]) == []
+    assert len(calls) == len(sources.THEMUSE_CATEGORIES), (
+        "a dead slice must end only its own category"
+    )
+
+    calls.clear()
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        sources.search_themuse([], strict=True)
+    assert ei.value.code == 403 and len(calls) == 1
 
 
 def _themuse_page(url):
@@ -1088,6 +1311,69 @@ def test_themuse_dedups_a_job_that_spans_two_categories(monkeypatch):
     assert len(out) == 1, f"same job emitted {len(out)} times across slices"
 
 
+def test_themuse_reads_the_canonical_level_token_not_the_display_string(monkeypatch):
+    """The Muse ships {'name': 'Mid Level', 'short_name': 'mid'} in one object and the
+    adapter kept only `name`, throwing the vendor's own canonical token away -- the
+    same class of defect as reading a plain-text field when the structured one is
+    beside it. `short_name` needs no interpretation from us and is already the form a
+    consumer can filter on, so it is the value; `name` is what the vendor displays, so
+    it is the raw. Worth 87 rows on a `seniority='senior'` filter."""
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
+    out = sources.search_themuse([])
+    assert out[0]["seniority"] == "senior"
+    assert out[0]["seniority_raw"] == "Senior Level"
+
+
+def test_themuse_states_no_employment_type_because_the_api_has_none(monkeypatch):
+    """It read `type`, which is The Muse's posting-PROVENANCE flag -- the literal
+    string "external" on 20/20 rows probed live -- so 216 of 216 rows normalized to
+    OTHER, the single largest contributor to that bucket. catalog/themuse.md has
+    recorded `employment_type: null` for this API since it was written; the code was
+    reading a field the profile says does not exist. The key stays present (every
+    adapter owes its caller that) and empty, which the boundary turns into None."""
+    from job_radar import engine
+
+    monkeypatch.setattr(config.active().harvest_depth, "themuse_max_pages", 1)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url: SAMPLES["themuse"])
+    out = sources.search_themuse([])
+    assert "employment_type" in out[0], "the contract requires the key"
+    r = engine._coerce(out[0])
+    assert r["employment_type"] is None
+    assert r["employment_type_raw"] is None
+
+
+def test_braintrust_keeps_its_opaque_ids_out_of_both_tags_and_the_body(monkeypatch):
+    """A five-digit integer is not a skill, and the contract calls `tags` "skills the
+    source itself extracted". The ids reached TWO fields: `tags`, and `text`, where
+    they were interpolated under the label "Skills:" and then read by relevant() and
+    score_and_signals() -- 42 live rows carried them in the scored, searchable body.
+    Filtering `tags` alone would have fixed half the defect while reporting it done."""
+    from job_radar import engine
+
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES["braintrust"])
+    r = engine._coerce(sources.search_braintrust(["ai"])[0])
+    assert r["tags"] == ["Python", "AI/ML"]
+    for opaque in ("122059", "122060"):
+        assert opaque not in r["text"], f"{opaque} is still in the scored body"
+
+
+def test_braintrust_contract_type_survives_its_own_qualifier(monkeypatch):
+    """The adapter builds `f"contract ({contract_type})"`, so the normalizer saw
+    "contract long" and returned OTHER on 29 of 29 rows while bare "contract" maps to
+    CONTRACTOR. The raw keeps the qualifier, because that is what was sent."""
+    from job_radar import engine
+
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES["braintrust"])
+    r = engine._coerce(sources.search_braintrust(["ai"])[0])
+    assert r["employment_type"] == "CONTRACTOR"
+    assert r["employment_type_raw"] == "contract (hourly)"
+
+
 def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
     """`levels` is a real seniority string. It was withheld while `seniority` was a
     contract key no adapter filled; the contract exists now."""
@@ -1099,9 +1385,14 @@ def test_themuse_emits_the_seniority_it_was_holding_back(monkeypatch):
 
 
 # ── Strand B: the record contract ───────────────────────────────────────────
-# These are the gates BUILD-0.7.0 names. The department byte-identity test is the
-# COMPATIBILITY gate: jobfitr pins a released job-radar and reads that column, so if
-# it goes red the release breaks a consumer at a minor version.
+# These are the gates BUILD-0.7.0 names. The `department` byte-identity gate lived
+# here until 0.9.0 merged `team` and `category` into `department` (the column KEPT;
+# `team` is the key that went), redefining the values it pinned to 0.6.0; the suite no
+# longer has an equivalence-against-history harness. That is intrinsic to the
+# removal, not an oversight -- but it is a real subtraction and it is recorded here
+# rather than left to be noticed. Its anti-vacuity coverage survives in
+# `test_every_adapter_honours_the_posting_contract`, which is parametrized over
+# every adapter and asserts each one actually produced rows.
 
 
 def _harvest_one(fn, payload, monkeypatch, **kw):
@@ -1138,8 +1429,7 @@ def test_unknown_remote_is_none_not_false(monkeypatch):
 
     r = engine._coerce({"title": "Engineer", "text": "no arrangement stated"})
     assert r["remote_type"] is None
-    assert r["remote"] is None
-    assert r["remote"] is not False
+    assert r["remote_type"] != "onsite"  # "did not say" is not "said on-site"
 
 
 def test_coerce_does_not_stringify_the_typed_fields():
@@ -1150,14 +1440,20 @@ def test_coerce_does_not_stringify_the_typed_fields():
     r = engine._coerce({"title": None, "remote_type": "remote", "tags": ["a", "b"]})
     assert r["title"] == ""  # required field: coerced to str
     assert r["remote_type"] == "remote"  # typed field: untouched
-    assert r["remote"] is True  # derived from remote_type
     assert r["tags"] == ["a", "b"]
     assert engine._coerce({"tags": "solo"})["tags"] == ["solo"]  # scalar -> list
 
 
 def test_adzuna_area_depth_maps_state_and_remote():
     """`area` is a hierarchy of varying depth. `area == ['US']` EXACTLY means
-    nationwide/remote; depth 5 shifts city one slot but never the state."""
+    nationwide/remote; depth 5 shifts city one slot but never the state.
+
+    THIS DOCSTRING AND ITS OWN ASSERTION USED TO DISAGREE. It said "depth 5 shifts city
+    one slot" and then asserted `city5 == "Prince"` -- the UNSHIFTED last element, a
+    neighbourhood. `_adzuna_place` matched the assertion rather than the sentence, so
+    the test was green and the described behaviour had never been implemented. The
+    docstring was right; the assertion was the defect, and it is corrected here.
+    """
     assert sources._adzuna_place(["US"]) == (None, None, "US", True)
     city, state, country, remote = sources._adzuna_place(
         ["US", "Texas", "Howard County", "Big Spring"]
@@ -1167,19 +1463,162 @@ def test_adzuna_area_depth_maps_state_and_remote():
         ["US", "New York", "New York City", "Manhattan", "Prince"]
     )
     assert state5 == "New York", "state must stay at area[1] at depth 5"
-    assert city5 == "Prince"
+    assert city5 == "Manhattan", "depth 5: the city tier is area[3], not the last slot"
+    # DEPTH 3 -- the city is the last slot, and the old `>= 4` test discarded it
+    # outright: 'San Francisco, California' (15 rows) and 'New York City, New York' (8)
+    # came back with no city at all while the vendor had supplied a clean one.
+    assert sources._adzuna_place(["US", "California", "San Francisco"])[0] == (
+        "San Francisco"
+    )
     assert sources._adzuna_place(None) == (None, None, None, None)
 
 
 def test_usajobs_employer_is_not_a_category(monkeypatch):
-    """`DepartmentName` is "Department of Veterans Affairs" -- the EMPLOYER. It stays
-    in `department` byte-identically for compatibility, and is now also stated as what
-    it actually is."""
+    """`DepartmentName` is "Department of Veterans Affairs" -- the EMPLOYER, never a
+    job family. It rode in the deprecated `department` until 0.9.0 removed that field;
+    the value is now unmapped, which is the single genuine loss of the nineteen
+    adapters. `team` carries `SubAgency` and `category` the OPM series."""
     place = sources._usajobs_place(
         [{"CityName": "Austin", "CountrySubDivisionCode": "TX", "CountryCode": "US"}]
     )
     assert place == {"city": "Austin", "state": "TX", "country": "US"}
     assert sources._usajobs_place(None)["state"] is None
+
+
+def test_a_truncated_body_says_so_and_a_built_one_says_so(monkeypatch):
+    """Two bodies that are not ordinary bodies, each labelled by the adapter that knows.
+
+    Adzuna caps every description at 500 characters and ends it with an ellipsis -- 275
+    of 275 rows locally, 7,146 of 7,150 [live prod, 2026-08-20], and a live probe
+    confirms no fuller field exists. Braintrust sends no prose at all and its adapter
+    BUILDS a sentence from the title and skills. Without a label both are
+    indistinguishable in the record from a real 6,870-character description.
+
+    There is no `full`: seventeen adapters would have to claim a completeness nobody
+    measured, so `None` -- not characterized -- is the honest value for them.
+    """
+    payload = {
+        "results": [
+            {
+                "title": "AI Engineer",
+                "company": {"display_name": "Acme"},
+                "location": {"display_name": "Louisville, KY", "area": ["US", "KY"]},
+                "redirect_url": "https://www.adzuna.com/details/1",
+                "created": "2026-08-01T00:00:00Z",
+                "description": "Responsibilities: Develop and v" + "x" * 460 + "\u2026",
+            }
+        ]
+    }
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "k")
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *_a, **_k: None)
+    rows = sources.search_adzuna(["ai engineer"])
+    assert rows, "adzuna produced no rows"
+    assert rows[0]["text_basis"] == "excerpt"
+
+
+def test_a_synthesized_braintrust_body_reports_no_headers_not_no_body(monkeypatch):
+    """`sections: null` means "there was no body to read" and `[]` means "a body with no
+    headers". This adapter emitted `null` while shipping a body on 29 of 29 rows, which
+    is a false statement about the posting -- and it collapses the exact two-state
+    distinction the field exists to carry."""
+    payload = {
+        "results": [
+            {
+                "id": 1,
+                "title": "AI Platform Engineer",
+                "employer": {"name": "Acme"},
+                "created": "2026-08-01T00:00:00Z",
+                "contract_type": "long",
+                "expected_hours_per_week": 40,
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *_a, **_k: None)
+    rows = sources.search_braintrust(["ai engineer"])
+    assert rows, "no braintrust rows"
+    row = rows[0]
+    assert row["text"], "the adapter builds a body, so there is one"
+    assert row["sections"] == [], (
+        f"a body with no headers is [], not {row['sections']!r}"
+    )
+    assert row["text_basis"] == "synthesized"
+
+
+def test_lever_reads_the_html_body_and_promotes_its_own_list_headings(monkeypatch):
+    """The Ashby defect, one adapter over, and missed when Ashby's was fixed: this read
+    `descriptionPlain`/`additionalPlain`, so `sections` was `[]` on 122 of 135 Lever
+    rows. Lever also labels each `lists[]` entry with its own heading, which the adapter
+    appended as bare prose -- throwing away structure the vendor handed us, then failing
+    to find it again.
+
+    Asserted POSITIONALLY, on headings the plain fields do not contain, and against the
+    NEIGHBOURING section's prose: a wrong-span bug survives every string-identity check
+    while pointing at the wrong block, and one shipped here before.
+    """
+    payload = [
+        {
+            "text": "Applied AI Engineer",
+            "hostedUrl": "https://jobs.lever.co/acme/1",
+            "categories": {"location": "Remote"},
+            # HTML and plain are BOTH sent; only the first carries structure.
+            "description": "<div><strong>A World-Changing Company</strong></div>",
+            "descriptionPlain": "A World-Changing Company",
+            "lists": [
+                {
+                    "text": "What We Require",
+                    "content": "<li>Three years of Python.</li>",
+                },
+                {
+                    "text": "What We Value",
+                    "content": "<li>Ability to adjust quickly.</li>",
+                },
+            ],
+            "additional": "<div><strong>Benefits</strong> Health cover.</div>",
+            "additionalPlain": "Benefits Health cover.",
+        }
+    ]
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_lever("acme")
+
+    headers = [s["header"] for s in row["sections"] if s.get("header")]
+    assert "What We Require" in headers and "What We Value" in headers, (
+        f"the vendor's own list headings did not become sections. got {headers!r}"
+    )
+    # PINS THE FIELD CHOICE, not just the list wrapping. This heading is bold in
+    # `description` and flat prose in `descriptionPlain`, so it is the only assertion
+    # here that fails when the adapter reads the plain field again -- the list headings
+    # survive either way, which made an earlier version of this test pass against the
+    # very mutation it exists to catch.
+    assert "A World-Changing Company" in headers, (
+        f"read the plain intro -- a markup-only heading is missing. got {headers!r}"
+    )
+    assert "Benefits" in headers, "read `additionalPlain` -- its heading is missing"
+    sec = next(s for s in row["sections"] if s.get("header") == "What We Require")
+    span = row["text"][sec["start"] : sec["end"]]
+    assert "Three years of Python." in span
+    assert "Ability to adjust quickly." not in span, "span points at the next section"
+    assert "<li>" not in row["text"] and "<strong>" not in row["text"]
+
+
+def test_lever_falls_back_to_plain_when_the_vendor_sends_no_html(monkeypatch):
+    """Reading the HTML field ALONE would silently empty the body for an employer who
+    fills only the plain one -- `""` is a legal value, so nothing raises and the row
+    ships with no description at all. Same safety net as Ashby's."""
+    payload = [
+        {
+            "text": "Applied AI Engineer",
+            "hostedUrl": "https://jobs.lever.co/acme/1",
+            "categories": {"location": "Remote"},
+            "descriptionPlain": "We build things.",
+            "additionalPlain": "Health cover.",
+        }
+    ]
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_lever("acme")
+    assert "We build things." in row["text"] and "Health cover." in row["text"]
 
 
 def test_lever_workplace_type_is_read_not_inferred():
@@ -1413,6 +1852,301 @@ def test_usajobs_pages_with_the_page_parameter(monkeypatch):
     assert len(out) == 5
 
 
+def test_hn_does_not_ship_the_whole_comment_as_the_location():
+    """`" ".join(parts[2:4])` put the ENTIRE BODY in the location when a comment ran out of
+    pipes. hn `location` averaged 461 characters and reached 2,158, against greenhouse's
+    maximum of 331 and ashby's 34 -- 82 of 196 rows over 100. Every prose rule in
+    `vocab.remote_scope` is written for a short string, so it produced wrong values, not
+    merely noisy ones.
+
+    The strings below are VERBATIM from a 7,545-row harvest, elided only in the body."""
+    from job_radar.sources import _hn_location
+    from job_radar.vocab import remote_scope
+
+    # The pronoun "us", and a URL slug ending in the same two letters. `US_LOCATION_RE`
+    # carries a bare `us` on purpose -- "Remote - US" is 227 rows -- but against 2 KB of
+    # prose it matches English. 12 rows, 3 of them inside a link.
+    contaminated = (
+        "REMOTE (EU, Switzerland, Norway) Full-time or Contract Multiple roles open. "
+        "We are a small boutique consultancy and are quite experienced. A lot of us have "
+        "extensive consultancy backgrounds. Apply: https://grnh.se/bhfswi9e5us"
+    )
+    assert remote_scope(contaminated)[0] == ["CH", "NO", "US"], "the defect"
+    assert remote_scope(_hn_location(contaminated))[0] == ["CH", "NO"], (
+        "US was a pronoun"
+    )
+
+    canada = (
+        "Toronto, Canada REMOTE (Canada only) Makeship empowers influencers, creators, "
+        "and brands of all sizes to bring their ideas to life. If you apply, please note "
+        "that you found us through Hacker News."
+    )
+    assert remote_scope(canada)[0] == ["CA", "US"], "the defect"
+    assert remote_scope(_hn_location(canada))[0] == ["CA"], (
+        "Canada only means Canada only"
+    )
+
+    # TRUNCATED, NOT DROPPED. Filtering over-long segments emptied the location on 9 rows
+    # whose header and body share one segment, discarding a real boundary to remove the
+    # noise stuck to it.
+    shared = (
+        "REMOTE (US) Origamics is building AI models that reason about hardware and "
+        "electronics systems."
+    )
+    assert remote_scope(_hn_location(shared))[0] == ["US"], (
+        "a stated bound must survive"
+    )
+
+    # A mid-token cut INVENTS a place, which is why the cap is not tuned tighter: at 48
+    # this truncates inside "(NYC, NC, MA)", `split_place` reads the fragment as a city
+    # with state NC, `has_city` flips and the correct ['US'] is suppressed. THIS ASSERTION
+    # PINS THE CAP, not the word-boundary rewind -- see the note below.
+    listy = (
+        "Python / SQL / Node.js / Terraform Remote (USA, most states) or Onsite "
+        "(NYC, NC, MA) We're building the data platform."
+    )
+    assert remote_scope(_hn_location(listy))[0] == ["US"]
+
+    # THE WORD-BOUNDARY REWIND IS NOT EXERCISED BY ANY CORPUS ROW AT CAP 64, and saying so
+    # is the point. Every one of the 196 hn segments was truncated both ways and ZERO
+    # produced a different `remote_scope`. It is kept because the failure mode is real and
+    # demonstrated at a smaller cap, not because anything here proves it -- so a mutation
+    # that removes it will NOT fail this test, and a reader must not take these greens as
+    # coverage of it. Only the shape below pins the mechanism at all, and it is
+    # constructed, not observed.
+    # One long token straddling the cap: with the rewind the whole partial token is
+    # dropped, without it a 57-character fragment of it survives into the location.
+    made_up = "Remote " + "x" * 80
+    assert _hn_location(made_up) == "Remote", (
+        "a partial token must not reach the location"
+    )
+
+    # 64 is the shortest cap that keeps a measured multi-place header intact.
+    wide = (
+        "London / NYC / SF / Seattle / Remote (US + Europe) Full-time We're hiring a "
+        "Trust and Safety engineer."
+    )
+    assert remote_scope(_hn_location(wide)) == (["US"], ["EUROPE"])
+
+    # A short segment is returned untouched -- this only ever removes.
+    assert _hn_location("Remote (Italy)") == "Remote (Italy)"
+
+
+def test_hn_header_ends_at_a_block_tag_not_a_newline():
+    """The cap above is a MITIGATION; this is the cure, and they compose.
+
+    An HN comment ends its header at a BLOCK TAG. `clean` flattens that tag into the
+    same text run, so the location segment swallows the body and the cap can then only
+    make the result SHORTER, never correct -- measured on the live Portless comment
+    (hn_id 48889875), the cap alone leaves 83 characters of which 49 are pitch copy.
+    Splitting the DECODED markup first returns the header outright.
+
+    Both are load-bearing. Over 196 live comments, maximum location length: cap alone
+    119, split alone 548, split-then-cap 97. The split fixes the common case; the cap
+    catches the tail where a comment carries no block tag before a long header. Removing
+    either one regresses the other's weak side -- do not "simplify" one away.
+
+    The markup below is VERBATIM from the live Firebase item, elided only in the body.
+    `flat.ndjson` CANNOT substitute for it: its `text` is post-strip and contains zero
+    markup tags on all 196 rows, so the boundary this pins is structurally invisible
+    there. That is why this fixture is inline rather than reconstructed from the corpus.
+    """
+    from job_radar.sources import _hn_rows
+
+    portless = (
+        "Portless | AI Engineer (Founding seat) | Remote (North America) | $180k-$230k"
+        "<p>AI usage today is basic &#x2F; decks, spreadsheets, a few people vibe-coding "
+        "dashboards. No real agentic workflows yet. This is a founding seat to build "
+        "them end to end."
+    )
+    out: list = []
+    _hn_rows({"children": [{"text": portless, "id": 48889875, "author": "x"}]}, out)
+    assert out[0]["location"] == "Remote (North America) $180k-$230k", (
+        "the header ends at the <p>, and nothing after it is a location"
+    )
+    # The mutation this pins: drop the split and the body arrives, capped at 64 per
+    # segment rather than removed. Asserting the ABSENCE of body prose is what makes
+    # this test fail when the split is deleted -- a length bound alone would not,
+    # because the cap already bounds the length.
+    assert "vibe-coding" not in out[0]["location"]
+    assert "AI usage" not in out[0]["location"]
+
+    # THE FALLBACK. A comment whose block tag precedes its pipes has no header to split,
+    # and must keep the old behaviour rather than emptying a populated location. 4 of 196
+    # comments split short today and 0 of them lose a location; this keeps that true when
+    # a thread formats differently next month.
+    leading_block = (
+        "<p>Acme Corp | Staff Engineer | Remote (US) | Full-time<p>We build things."
+    )
+    out2: list = []
+    _hn_rows({"children": [{"text": leading_block, "id": 1, "author": "y"}]}, out2)
+    assert out2[0]["location"].startswith("Remote (US)"), (
+        "an unsplittable header must fall back, never empty"
+    )
+
+
+def test_hn_a_doubled_pipe_does_not_empty_the_title():
+    """Live, 2026-11-16: "Planlab.ai | | Product Engineer (Design) & Platform Engineer
+    | ONSITE in London, UK | ...". Read positionally, the empty segment became the
+    title and the real title became the location -- 1 of 446 rows, and the whole of
+    the hn canary failure. A leading pipe still means no company and is still skipped.
+    """
+    from job_radar.sources import _hn_rows
+
+    doubled = (
+        "Planlab.ai | | Product Engineer (Design) &amp; Platform Engineer | ONSITE in "
+        "London, UK | 100k-160k GBP<p>We are building AI tools for architects."
+    )
+    out: list = []
+    _hn_rows({"children": [{"text": doubled, "id": 1, "author": "a"}]}, out)
+    assert out[0]["title"] == "Product Engineer (Design) & Platform Engineer"
+    assert out[0]["company"] == "Planlab.ai"
+    assert out[0]["location"] == "ONSITE in London, UK", (
+        "the slot that became the title is not also read as a location"
+    )
+
+    # A BLANK AFTER THE TITLE MUST NOT SHIFT THE LOCATION. Live Tivly header, verbatim
+    # shape. Compacting the list slid "Full-time" into slot 3; raw indices keep the
+    # location exactly what it was before the doubled-pipe fix.
+    tivly = (
+        "Tivly | Principal Software Engineer (Java) | | [REMOTE (US) only currently "
+        "residing in: Alabama, Florida, Georgia] | Full-time | [$170k\u2013$190k + bonus]"
+        "<p>Tivly helps small businesses."
+    )
+    out_t: list = []
+    _hn_rows({"children": [{"text": tivly, "id": 4, "author": "d"}]}, out_t)
+    assert out_t[0]["title"] == "Principal Software Engineer (Java)"
+    assert out_t[0]["location"].startswith("[REMOTE (US) only")
+    assert "Full-time" not in out_t[0]["location"]
+
+    leading: list = []
+    _hn_rows({"children": [{"text": "| Acme | Engineer | Remote", "id": 2}]}, leading)
+    assert leading == [], "no company in the first segment -- skipped, as before"
+
+    # A header that ENDS with a pipe must not, once compacted, look too short and fall
+    # back to the body-bearing segments -- that put a hiring blurb in `location`.
+    trailing = (
+        "experienceflyover.com | Chicago, Las Vegas |<p>Currently hiring BI Analyst "
+        "and Network Specialist<p>Apply below."
+    )
+    out3: list = []
+    _hn_rows({"children": [{"text": trailing, "id": 3, "author": "c"}]}, out3)
+    assert "hiring" not in out3[0]["location"]
+
+
+def _hn_one(text, company_id=1):
+    from job_radar.sources import _hn_rows
+
+    out: list = []
+    _hn_rows({"children": [{"text": text, "id": company_id, "author": "a"}]}, out)
+    return out[0]
+
+
+def test_hn_reads_the_href_not_the_truncated_anchor_text():
+    """HN renders a long link as `<a href="FULL">https://…/j...</a>`. `clean` strips the
+    tag, keeps the DISPLAY text, and throws the href away -- so the old prose regex
+    recovered a URL with a literal ellipsis in it, which 404s. 48 of 196 rows, skewed to
+    `boards.greenhouse.io` and `jobs.lever.co`: the bug destroyed the best links.
+
+    Live measurement over 196 comments, before -> after:
+        truncated (dead)  48 -> 0     deep link  69 -> 107
+        bare homepage     46 -> 34    hn thread  33 ->  55
+
+    Markup is entity-encoded exactly as HN sends it -- `&#x2F;` for a slash. Decoding
+    BEFORE matching is load-bearing and is the same ordering bug 0.9.0 fixed in `clean`.
+    """
+    encoded = (
+        "Acme Corp | Staff Engineer | Remote (US) | Full-time "
+        '<a href="https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmecorp&#x2F;jobs&#x2F;'
+        '596644?gh_jid=596644">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmecorp&#x2F;j'
+        "...</a><p>We build things."
+    )
+    assert (
+        _hn_one(encoded)["url"]
+        == "https://boards.greenhouse.io/acmecorp/jobs/596644?gh_jid=596644"
+    ), "the full target was in the markup the whole time"
+
+
+def test_hn_will_not_hand_you_another_employers_board():
+    """A host check proves a board is REAL, never WHOSE it is. Measured: the Phaselaw
+    comment carries `jobs.ashbyhq.com/Pear-VC/...` -- an investor's board posting for a
+    portfolio company. `_is_direct_apply` passes it on the ATS allowlist alone.
+
+    Handing a user the wrong employer's posting is worse than handing them a broken
+    link: the broken one fails visibly, this one looks right. Gated on RECOVERED links
+    only -- a URL the poster typed is never second-guessed."""
+    from job_radar.sources import _slug_owns_company
+
+    assert not _slug_owns_company(
+        "https://jobs.ashbyhq.com/Pear-VC/361caae7", "Phaselaw"
+    )
+    # A slug ABBREVIATES, so containment has to run both ways: "Eleos Technologies"
+    # ships as `eleostech`, and equality would reject a correct board.
+    assert _slug_owns_company(
+        "https://jobs.lever.co/eleostech/b48", "Eleos Technologies"
+    )
+    assert _slug_owns_company("https://jobs.ashbyhq.com/Nango", "Nango")
+    assert _slug_owns_company(
+        "https://job-boards.greenhouse.io/canopyworks/jobs/4317128009", "Canopy"
+    )
+    # Nothing to check is not evidence of a mismatch -- a bare careers page has no slug,
+    # and `_ATS_HOSTS` already carried the positive evidence that got it here.
+    assert _slug_owns_company(
+        "https://www.adalat.ai/careers/engineering-lead", "Adalat AI"
+    )
+
+    # AND THE GATE IS WIRED IN, which the three assertions above do not show. Deleting
+    # `and _slug_owns_company(...)` from `_hn_url` leaves every one of them green -- it
+    # was measured, not assumed, and it is the exact green-but-blind shape this file
+    # keeps finding. Only a row driven through `_hn_rows` pins the call site.
+    wrong_owner = (
+        "Phaselaw | Founding Engineer | Remote | Full-time https://phase.law "
+        '<a href="https://jobs.ashbyhq.com/Pear-VC/361caae7">apply</a>'
+        "<p>We build things."
+    )
+    assert _hn_one(wrong_owner)["url"] == "https://phase.law", (
+        "an investor's board is not this employer's posting"
+    )
+
+
+def test_hn_prefers_a_dead_end_it_can_explain_over_one_it_cannot():
+    """Two rules that only look like the same rule.
+
+    TIER 1 ONLY. `_best_apply_link`'s middle tier is "not on the known-aggregator list",
+    running on a list measured as under-populated. Applied here it promotes 15
+    unclassified hosts and, on the Double Holo row, trades an employer homepage for a
+    LinkedIn redirect -- on a product whose entire claim is direct-to-employer.
+
+    THREAD OVER A KNOWN 404. When no tier-1 href exists and the prose URL is truncated,
+    the comment link wins: it reaches the posting's details, and `_is_direct_apply` reads
+    False on it, so the row stays honestly not-direct rather than being promoted."""
+    # The real Double Holo row: the poster typed their homepage, and the comment also
+    # carries a LinkedIn href DEEPER than it. A "prefer the deeper link" rule takes the
+    # aggregator; tier-1 refuses it and the employer's own domain stands.
+    aggregator = (
+        "Double Holo | Engineer | Remote | Full-time https://doubleholo.com "
+        '<a href="https://www.linkedin.com/jobs/view/4438695357">jobs</a>'
+        "<p>We build things."
+    )
+    assert _hn_one(aggregator)["url"] == "https://doubleholo.com", (
+        "an aggregator must never displace the employer's own link"
+    )
+
+    truncated_only = (
+        "Acme Corp | Staff Engineer | Remote (US) | Full-time "
+        "https://uctalent.io/referral/Huynh_Nhu/DNwhgw...<p>We build things."
+    )
+    got = _hn_one(truncated_only, company_id=48889875)["url"]
+    assert got == "https://news.ycombinator.com/item?id=48889875", (
+        "a truncated URL is a known 404; the thread reaches the posting"
+    )
+    from job_radar.sources import _is_direct_apply
+
+    assert not _is_direct_apply(got, "Acme Corp"), (
+        "the fallback must not promote the row to direct_apply"
+    )
+
+
 def test_hn_reads_two_threads_not_one(monkeypatch):
     """One thread is the start-of-month cliff: on the 1st the newest thread is nearly
     empty and the prior month's rows vanish. Measured 2026-08-04: 138 vs 245."""
@@ -1436,109 +2170,6 @@ def test_hn_reads_two_threads_not_one(monkeypatch):
     out = sources.search_hn_whoishiring([])
     assert seen == ["aug", "jul"], f"read {seen}, expected the two newest"
     assert len(out) == 2
-
-
-# ── the compatibility gate ──────────────────────────────────────────────────
-def test_department_is_byte_identical_to_0_6_0(monkeypatch):
-    """THE COMPATIBILITY GATE. If this goes red, the release breaks a consumer.
-
-    `department` is deprecated but still emitted, because jobfitr pins a released
-    job-radar and reads that column today (as `category`). Removing or changing it
-    before 1.0 would break a shipped consumer at a MINOR version.
-
-    This is an equivalence test against history, not a self-consistent pin: it loads
-    0.6.0's sources.py out of git, runs both versions against the SAME fixtures, and
-    compares the department values. A pin written from the current code would only
-    prove the code agrees with itself.
-
-    Compared as a SET, deliberately. Row COUNTS changed on purpose in 0.7.0 —
-    himalayas now runs two lanes, smartrecruiters pages — so counting rows would fail
-    for the right reasons and hide the wrong ones. What must not change is the VALUE
-    the mapping derives from a given posting.
-    """
-    import importlib.util
-    import subprocess
-    import sys
-
-    src = subprocess.run(
-        ["git", "show", "b839c81:job_radar/sources.py"],
-        capture_output=True,
-        text=True,
-        cwd=str(Path(__file__).parent.parent),
-    )
-    if src.returncode != 0:
-        # Skip ONLY where there is genuinely no history to read (an sdist, a wheel
-        # test). Where .git exists and the blob still cannot be read, that is a
-        # SHALLOW CLONE, and skipping is how this gate silently never ran in CI:
-        # actions/checkout defaults to depth 1, and `pytest -q` prints a bare `s`
-        # with no reason. A compatibility gate that quietly does not run reads as
-        # assurance, which is worse than not having it. ci.yml now sets
-        # fetch-depth: 0; this makes a regression there loud instead of invisible.
-        if (Path(__file__).parent.parent / ".git").exists():
-            pytest.fail(
-                "0.6.0 blob unreachable but .git is present — shallow clone? "
-                "The department compatibility gate cannot run. "
-                "CI needs `fetch-depth: 0` on actions/checkout."
-            )
-        pytest.skip("no git history here (sdist/wheel test) — gate cannot run")
-    blob = Path(tempfile.mkdtemp()) / "sources_060.py"
-    blob.write_text(src.stdout, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("job_radar._v060_sources", blob)
-    old = importlib.util.module_from_spec(spec)
-    sys.modules["job_radar._v060_sources"] = old
-    spec.loader.exec_module(old)
-
-    restore = config.active()  # this test mutates the process global; put it back
-    c = _cfg()
-    # Keyed sources return [] before making a request. Counting those as "compared"
-    # is how the anti-vacuity guard below stayed partly vacuous: adzuna, google_jobs,
-    # usajobs and hn were all comparing [] == []. USAJOBS is the case the CHANGELOG
-    # names as the sharp one (DepartmentName is the EMPLOYER), so a gate blind to it
-    # was blind to its own headline example. Same three lines the contract test
-    # above already uses.
-    monkeypatch.setattr(c, "env", lambda key: "test-key")
-    # USAJOBS builds its own urllib Request rather than going through get_json, so it
-    # has to be stubbed a level lower — and it is the adapter whose department mapping
-    # matters most here (DepartmentName is the EMPLOYER, the CHANGELOG's headline
-    # example). A gate that skipped it was blind to its own motivating case.
-    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
-
-    def departments(mod, name, depth):
-        fn = (mod.DEPTH_ALL if depth else mod.BREADTH_ALL).get(name)
-        if fn is None or name not in SAMPLES:
-            return None
-        og, op, osl = mod.get_json, mod.post_json, mod.time.sleep
-        mod.get_json = lambda u, *a, **k: SAMPLES[name]
-        mod.post_json = lambda u, b, *a, **k: SAMPLES[name]
-        mod.time.sleep = lambda s: None
-        try:
-            rows = fn("slug") if depth else fn(["AI Engineer"])
-        except Exception:  # noqa: BLE001 — a keyed source without a key returns []
-            return None
-        finally:
-            mod.get_json, mod.post_json, mod.time.sleep = og, op, osl
-        return sorted({r.get("department") for r in rows})
-
-    compared, empty = [], []
-    for name, depth in [
-        (n, True) for n in sorted(set(old.DEPTH_ALL) & set(sources.DEPTH_ALL))
-    ] + [(n, False) for n in sorted(set(old.BREADTH_ALL) & set(sources.BREADTH_ALL))]:
-        before, after = departments(old, name, depth), departments(sources, name, depth)
-        if before is None:
-            continue
-        assert before == after, f"{name}: department changed {before} -> {after}"
-        # An adapter that produced NO rows compared [] == [] and proved nothing. Track
-        # it separately rather than counting it toward the guard.
-        (compared if before else empty).append(name)
-    assert not empty, (
-        f"{empty} yielded no rows, so the gate compared [] == [] for them and proved "
-        "nothing. Hand them a key / stub their transport, or the gate is blind to "
-        "exactly the adapters whose department mapping is most interesting."
-    )
-    assert len(compared) >= 8, (
-        f"only compared {compared} — the gate proved almost nothing"
-    )
-    config.set_active(restore)
 
 
 def test_a_null_title_does_not_cost_the_whole_employer(monkeypatch):
@@ -1677,6 +2308,27 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
                 "salary_max": 61482.41,
                 "salary_is_predicted": "1",
                 "redirect_url": "https://a/1",
+                # A BODY THAT QUOTES THE MODEL'S OWN FIGURE, AND IT IS INERT --
+                # `derive_salary` reads no body, so nothing below exercises a scan.
+                # WAS: "carried for Phase 1 ... when the section-scoped scan lands,
+                # this is the row it must refuse." That scan was abandoned: a
+                # section-scoped body read reaches 11 rows of a 102,553-row harvest,
+                # because eleven of thirteen adapters already run `salary_from_text`
+                # over the WHOLE body to build the display string, so a row with no
+                # display is by construction one where that function already returned
+                # "". There is no pending change that arms this fixture.
+                #
+                # It stays because without a `description` this payload yields
+                # `text=None, sections=[]`, and a fixture that cannot hold the row
+                # under test is how the sibling test in test_core.py sat green through
+                # a release. NOTE what this test does and does not prove: it DOES call
+                # `derive_salary` (twice -- verified at runtime with a counting wrapper,
+                # not read off a line number), so the adapter -> `_coerce` ->
+                # `derive_salary` path is real and exercised. But a predicted row
+                # arrives `salary=None`, so the quarantine has nothing to refuse and
+                # this half stays green under a quarantine disarm. The guard that
+                # actually fails on a disarm is the test_core.py sibling.
+                "description": "Compensation. $61,482–$61,482 a year. Benefits.",
             },
             {
                 "title": "SWE",
@@ -1696,9 +2348,46 @@ def test_adzuna_predictions_never_reach_the_commitment_columns(monkeypatch):
     out = [engine._coerce(r) for r in sources.search_adzuna(["x"])]
     predicted, real = out[0], out[1]
     assert predicted["salary_min"] is None, "a prediction reached the commitment column"
-    assert predicted["salary_estimated_min"] == 61482.41
+    assert predicted["salary_max"] is None
+    assert predicted["salary_basis"] is None
+    # THE PREDICTION IS DISCARDED, not relocated. The salary_estimated_* columns that
+    # used to receive it were removed at 0.9.0 (empty on 102,799 of 102,799 rows of a
+    # harvest whose source mix excluded the one adapter filling them).
+    #
+    # THE EMPTY DISPLAY STRING IS NOT "the whole protection", which is what this comment
+    # claimed until 0.9.0 -- along with engine.py, vocab.py and two other docstrings.
+    # `engine.derive_salary`'s `if not display` check refuses nothing: measured on
+    # 1a1414d, feeding it a predicted row that still carried `$129,584–$129,584` wrote
+    # salary_min=129584.0 with basis='parsed'. The empty string only avoids handing it
+    # such a row. The protection is `derive_salary`'s PREDICTED_PAY_SOURCES guard, and
+    # the end-to-end assertion below is what proves the two are independent.
+    assert "salary_estimated_min" not in predicted
     assert real["salary_min"] == 115000.0 and real["salary_basis"] == "stated"
-    assert real.get("salary_estimated_min") is None
+
+    # THE DISPLAY STRING IS INSIDE THE SPLIT, NOT BESIDE IT. The commitment columns
+    # were already null on a predicted row while `salary` still rendered "$61,482" --
+    # a string a human reads as an employer's offer, and the only field most UIs show.
+    # 221 of 277 adzuna rows locally, ~6,781 of 7,150 in the live consumer's store.
+    # `None`, not `""`: the adapter emits "" and `_coerce` normalizes every nullable
+    # text field to None. Asserting "" here passes on the adapter and fails on the
+    # record a consumer actually receives.
+    assert predicted["salary"] is None, "a prediction rendered as a display string"
+    assert real["salary"] == "$115,000–$145,000", "a real range lost its display string"
+
+    # A WIRING TEST, NOT A MEASUREMENT, and the label matters. It proves the guard is
+    # REACHABLE through the real adapter path. It cannot tell you how often a predicted
+    # row occurs, because no measurement of a real Adzuna row is available to this repo:
+    # `_reports/full_flat_raw.ndjson` holds 0 adzuna rows out of 102,799 (11 sources:
+    # greenhouse 69,867, ashby 26,218, lever 4,804, himalayas 1,047, smartrecruiters
+    # 498, hn 219, braintrust 54, jobicy 45, remoteok 34, remotive 8, arbeitnow 5), so
+    # "0 predicted rows gained a salary_min" is true of that file before anyone writes
+    # a line -- an explained zero, which is CONTRIBUTING's form 8. This runs the real
+    # adapter into the real `_coerce` into the real `derive_salary` instead.
+    engine.derive_salary(predicted)
+    assert predicted["salary_min"] is None, "a prediction reached the commitment column"
+    assert predicted["salary_basis"] is None
+    engine.derive_salary(real)
+    assert real["salary_min"] == 115000.0, "a real vendor range was quarantined"
 
 
 def test_usajobs_reads_its_rate_interval(monkeypatch):
@@ -1832,6 +2521,97 @@ def test_direct_apply_asks_whether_you_can_actually_apply_there(monkeypatch):
         assert r["direct_apply"] is want, f"{src} -> {r['direct_apply']}"
 
 
+def test_direct_apply_reads_the_url_too_and_can_only_ever_raise():
+    """The test above passes NO url, so it exercises only the source branch and cannot
+    see that the URL was ignored -- which is how `direct_apply` stayed per-SOURCE while
+    its own docstring said per-URL. `jobs.ashbyhq.com` is direct on 1,202 rows and
+    not-direct on 10, the only difference being that hn carried the second set.
+
+    MONOTONE IS THE WHOLE DESIGN. Replacing the source rule with the URL rule demotes
+    2,638 rows in a 67,481-row production store against 85 gained -- 31:1, all genuine
+    employer careers pages, and they rot rather than drop: intake rejects them every
+    harvest while the stale rows stay served."""
+    from job_radar import engine
+
+    # RAISES: hn is not a depth source, but this link reaches the employer's ATS.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "hn",
+                "url": "https://jobs.ashbyhq.com/runway-ml/c3e",
+            }
+        )["direct_apply"]
+        is True
+    )
+
+    # NEVER LOWERS: a depth source stays direct even on a host the URL rule cannot read.
+    # This is the 2,638 in one assertion -- `okta` is 4 characters, so the employer-domain
+    # branch is structurally blind to Okta's own careers page.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "greenhouse",
+                "company": "Okta",
+                "url": "https://www.okta.com/company/careers/opportunity/8139696",
+            }
+        )["direct_apply"]
+        is True
+    )
+    # ...and an aggregator with no positive evidence stays false.
+    assert (
+        engine._coerce(
+            {"title": "x", "source": "remoteok", "url": "https://remoteok.com/l/123"}
+        )["direct_apply"]
+        is False
+    )
+
+    # A RECOVERED link does not promote. Of 5 rows the ATS-platform additions newly
+    # reach, 4 are 404/410 -- promoting on host shape would assert "you can apply here"
+    # about a dead posting, which is the defect this release fixes, pointed the other way.
+    assert (
+        engine._coerce(
+            {
+                "title": "x",
+                "source": "hn",
+                "url": "https://jobs.ashbyhq.com/runway-ml/c3e",
+                "_url_recovered": True,
+            }
+        )["direct_apply"]
+        is False
+    )
+
+
+def test_the_company_name_can_be_the_ats_subdomain():
+    """`bitpay.applytojob.com` matched on `bitpay` and read as BitPay's own careers page.
+    The company name was the ATS's SUBDOMAIN and a substring test cannot tell those apart.
+
+    All 6 measured rows were real ATS platforms, so they were right BY ACCIDENT -- the
+    identical rule promotes `nike.some-aggregator.com`. The platforms are named in
+    `_ATS_HOSTS` so those rows keep their verdict through the INTENTIONAL branch, which
+    is why that addition and this tightening are one change and not two."""
+    from job_radar.sources import _ATS_HOSTS, _is_direct_apply
+
+    # Right for the right reason now: the platform is named, not the subdomain guessed.
+    assert "applytojob.com" in _ATS_HOSTS
+    assert _is_direct_apply("https://bitpay.applytojob.com/apply/scufGKyASo/", "BitPay")
+    # The latent hole, closed: an employer-named subdomain on a host nobody vouched for.
+    assert not _is_direct_apply("https://nike.some-aggregator.com/jobs/1", "Nike Inc")
+    # A real careers page on the employer's own registrable domain still passes.
+    assert _is_direct_apply("https://careers.acmehealth.com/jobs/1", "Acme Health Inc")
+    # `personio.de` was listed while the same vendor's .com was not -- the gap that
+    # survives an audit because a reader sees "Personio" in the tuple and ticks it off.
+    assert _is_direct_apply(
+        "https://friendlycaptcha.jobs.personio.com/job/2686399", "Friendly Captcha"
+    )
+    # ACCEPTED RESIDUAL. Shared hosting where the SUBDOMAIN is the owner is invisible to
+    # a registrable-domain match. 1 row in 7,545. Allowlisting github.io would certify
+    # every project page on GitHub as a direct apply -- a far worse trade, so this stays
+    # failing ON PURPOSE and a future reader must not "fix" it.
+    assert not _is_direct_apply("https://joulent.github.io/careers/", "Joulent")
+
+
 def test_google_jobs_decides_direct_apply_per_row(monkeypatch):
     """_best_apply_link already prefers the first non-aggregator option to CHOOSE the
     url — it just discarded the reasoning. A row whose only option is LinkedIn is not
@@ -1882,7 +2662,10 @@ def test_a_missing_deadline_stays_absent(monkeypatch):
 
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
     assert r["expires"] is None
-    fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00Z"
+    # ET offset, because that is what greenhouse sends -- 3,064 live values across
+    # three boards are 100% -04:00/-05:00 and 0 are `Z`. An offset already in
+    # Eastern must not shift when `to_date` converts.
+    fake["jobs"][0]["application_deadline"] = "2026-09-30T00:00:00-04:00"
     r = engine._coerce(sources.fetch_greenhouse("acme")[0])
     assert r["expires"] == "2026-09-30"
 
@@ -1899,8 +2682,11 @@ def test_posted_and_its_basis_are_produced_together():
     """
     from job_radar.util import posted_from
 
+      # ET, not the vendor's UTC day: midnight UTC is 20:00 the PREVIOUS day in
+    # Eastern. `to_date` converts an offset-bearing instant rather than truncating
+    # it, so a `...T00:00:00Z` fixture legitimately lands one day earlier.
     assert posted_from("2026-07-30T00:00:00Z") == {
-        "posted": "2026-07-30",
+        "posted": "2026-07-29",
         "posted_basis": "stated",
     }
     # An unparseable or absent date leaves the basis None — honestly unknown, never
@@ -2196,7 +2982,10 @@ def test_remote_scope_returns_areas_and_regions_separately():
     assert remote_scope("Remote - US & Canada") == (["CA", "US"], None)
     # BOTH fields when the string states both. An early return on regions discarded every
     # country on 111 measured rows.
-    assert remote_scope("Americas (USA or Canada) (Remote)") == (["CA", "US"], ["AMERICAS"])
+    assert remote_scope("Americas (USA or Canada) (Remote)") == (
+        ["CA", "US"],
+        ["AMERICAS"],
+    )
     # ISO 3166-2 for a stated US state -- never a bare `TX`, because seven codes are both a
     # US state and an ISO country and the column would be undecidable.
     assert remote_scope("Remote - TX") == (["US-TX"], None)
@@ -2211,12 +3000,162 @@ def test_anywhere_is_unbounded_only_when_no_place_is_named():
     is the worst direction this field can be wrong in."""
     from job_radar.vocab import remote_scope
 
-    assert remote_scope("Anywhere in France, Belgium, Spain") == (["BE", "ES", "FR"], None)
+    assert remote_scope("Anywhere in France, Belgium, Spain") == (
+        ["BE", "ES", "FR"],
+        None,
+    )
     assert remote_scope("Any location, United States")[0] != []
     assert remote_scope("Anywhere in Texas")[0] != []
     # the genuine article still resolves
     assert remote_scope("Remote - Anywhere") == ([], None)
     assert remote_scope("Worldwide") == ([], None)
+
+
+def test_ashby_secondary_locations_become_the_locations_list():
+    """Ashby ships a structured per-place array and the adapter used to ignore it.
+
+    `secondaryLocations` is populated on 422 of 1,730 live postings (24.4%) and carries
+    a full addressLocality / addressRegion / addressCountry per entry, in a response
+    already fetched. Without it Ashby emitted no `locations` key at all and `_coerce`
+    fell back to splitting the DISPLAY string -- which on this source names one place,
+    so a posting open in three offices reported one.
+
+    The nested `state` is canonicalized HERE because nothing downstream does it:
+    `_coerce` applies the US-state-is-a-code rule to the scalar only, and builds
+    `locations[]` only when an adapter left it None.
+    """
+    from job_radar.sources import _ashby_locations
+
+    def addr(city, region, country):
+        return {
+            "postalAddress": {
+                "addressLocality": city,
+                "addressRegion": region,
+                "addressCountry": country,
+            }
+        }
+
+    got = _ashby_locations(
+        {
+            "location": "San Francisco",
+            "address": addr("San Francisco", "California", "United States"),
+            "secondaryLocations": [
+                {
+                    "location": "Toronto",
+                    "address": addr("Toronto", "Ontario", "Canada"),
+                },
+                {
+                    "location": "Seattle",
+                    "address": addr("Seattle", "Washington", "United States"),
+                },
+            ],
+        }
+    )
+    assert [e["raw"] for e in got] == ["San Francisco", "Toronto", "Seattle"]
+    # a US subdivision is a CODE, matching the scalar rule; a non-US one keeps its name
+    assert [e["state"] for e in got] == ["CA", "Ontario", "WA"]
+    # NO per-place url. Entries carried the posting's own on every one until 0.9.0.
+    assert all("url" not in e for e in got)
+    # one place is not a list -- `_coerce` owns the single-place shape
+    assert _ashby_locations({"location": "Berlin", "address": None}) is None
+
+
+def test_ashby_region_that_is_the_country_repeated_is_dropped():
+    """A vendor putting the country in `addressRegion` is not stating a subdivision.
+
+    RAW STRING EQUALITY, and the alternative is why. "Drop a region that RESOLVES to the
+    row's own country" reads as the more principled rule and destroys real data:
+    `England` resolves to GB, but England IS an ISO 3166-2:GB subdivision (GB-ENG), and
+    27 of the 34 values that rule deleted on 1,730 live postings were exactly that -- 39%
+    collateral. `vocab._COUNTRY_CODES` carries `england -> GB` for PROSE matching; using
+    it to validate a data column is the error.
+    """
+    from job_radar.sources import _ashby_place
+
+    def pa(**kw):
+        return {"postalAddress": kw}
+
+    assert _ashby_place(pa(addressRegion="UK", addressCountry="UK"))["state"] is None
+    assert (
+        _ashby_place(pa(addressRegion="Australia", addressCountry="Australia"))["state"]
+        is None
+    )
+    # ...and a REAL subdivision that merely resolves to the same country survives
+    assert (
+        _ashby_place(pa(addressRegion="England", addressCountry="United Kingdom"))[
+            "state"
+        ]
+        == "England"
+    )
+    # the vendor's own trailing whitespace never reaches a grouped column
+    assert (
+        _ashby_place(pa(addressRegion="California ", addressCountry="United States"))[
+            "state"
+        ]
+        == "California"
+    )
+
+
+def test_a_city_is_never_a_country_region_or_state_name():
+    """THE ACCEPTANCE METRIC for the geography fixes, and it is deliberately not a
+    fill-rate one.
+
+    "Rows that gained a `state`" reads IDENTICALLY for the right fix and the wrong one:
+    re-splitting "Americas, Europe, Israel" into city="Americas" scores as a win on that
+    metric while turning visible junk into plausible junk. The number that separates them
+    is how many rows gained a `city` that is not a city at all.
+
+    THE EXEMPTIONS ARE LOAD-BEARING and were found by running the naive version: "New
+    York" (316 corpus parts), "Washington" (124) and "Singapore" are real cities that are
+    ALSO a state or a country, so a blanket "reject a city that is a state name" nulls
+    thousands of correct values. A metric that lies is worse than no metric.
+    """
+    from job_radar.vocab import (
+        _COUNTRY_CODES,
+        _STATE_NAMES,
+        split_place,
+        strip_arrangement,
+    )
+
+    both_a_city_and_not = {"new york", "washington", "singapore"}
+    for raw in (
+        "Americas, Europe, Israel (Remote)",
+        "LATAM,  Brazil (Remote)",
+        "Canada, United States (Remote)",
+        "Remote - Illinois, USA",
+        "Texas, United States",
+        "Singapore, Singapore",
+    ):
+        city = split_place(strip_arrangement(raw))["city"]
+        if city is None:
+            continue
+        low = city.strip().lower()
+        assert low in both_a_city_and_not or (
+            low not in _STATE_NAMES and low not in _COUNTRY_CODES
+        ), f"{raw!r} put a non-city in `city`: {city!r}"
+
+
+def test_a_parsed_city_came_from_the_string_it_was_parsed_from():
+    """The mechanical half of the gate: a `city` must be present in its own input.
+
+    Cheap, total, and it catches manufacture -- a value assembled rather than read.
+    BLIND TO the wrong-token case by construction: a neighborhood picked out of
+    "Grand Central, Manhattan" passes this perfectly, because it really is in the
+    string. That one needs the vendor's hierarchy, not this check.
+    """
+    from job_radar.vocab import split_place, strip_arrangement
+
+    for raw in (
+        "Costa Mesa, California, United States",
+        "Toronto, Ontario, Canada",
+        "New York, New York, United States",
+        "Mountain View, California",
+        "Waco, TX",
+        "London, United Kingdom",
+    ):
+        city = split_place(strip_arrangement(raw))["city"]
+        if city is not None:
+            assert city.lower() in raw.lower(), f"{city!r} is not in {raw!r}"
 
 
 def test_a_list_of_countries_is_not_a_city():
@@ -2235,8 +3174,14 @@ def test_a_list_of_countries_is_not_a_city():
         )["city"]
         is None
     )
-    # ...while an ordinary city+state head survives
-    assert split_place("Austin, Texas, United States")["city"] == "Austin, Texas"
+    # ...while an ordinary city+state head SURVIVES -- still the claim this test makes,
+    # and still true. What changed is the shape, not the guard: split_place now re-splits
+    # a comma-bearing head when the tail is a spelled-out country, so the subdivision
+    # reaches `state` instead of riding along inside `city`. The docstring's trade is
+    # unchanged and is why this is not a comma test; it is narrowed because the head can
+    # now be read, not because it was ever wrong to keep it.
+    assert split_place("Austin, Texas, United States")["city"] == "Austin"
+    assert split_place("Austin, Texas, United States")["state"] == "TX"
     assert split_place("Waco, TX")["city"] == "Waco"
 
 
@@ -2269,7 +3214,7 @@ def test_a_list_of_blanks_is_malformed_not_worldwide():
 
 
 def test_the_continents_remotive_actually_sends_are_all_kept():
-    """"Americas, Europe, Asia, Africa, Oceania" is remotive's canonical five-continent
+    """ "Americas, Europe, Asia, Africa, Oceania" is remotive's canonical five-continent
     value -- the worked example in catalog/remotive.md -- on 11% of a live feed. Asia,
     Africa and Oceania were silently dropped, making a five-continent role invisible to a
     searcher on three of them."""
@@ -2310,14 +3255,26 @@ def test_a_comma_bearing_country_name_survives_the_string_branch():
     naming the wrong country is worse than no code, so the whole string is tried first."""
     from job_radar.sources import stated_scope
 
-    assert stated_scope("Congo, The Democratic Republic of the")["remote_areas"] == ["CD"]
+    assert stated_scope("Congo, The Democratic Republic of the")["remote_areas"] == [
+        "CD"
+    ]
     assert stated_scope("USA, EMEA")["remote_areas"] == ["US"]
 
 
 def test_remote_scope_takes_only_STATED_boundaries():
     """An office address is not an eligibility boundary. The rule applies to countries and
     subdivisions alike -- scoping it to subdivisions made it a carve-out, and on 6,779
-    area-carrying rows `remote_areas` then meant nothing more than `country`."""
+    area-carrying rows `remote_areas` then meant nothing more than `country`.
+
+    THE FIRST FIVE STRINGS PASSED WHILE THE INVARIANT WAS BROKEN ON 622 CORPUS ROWS, and
+    the reason is the point of the second block: four of them pass because `has_city` is
+    TRUE on them -- the one shape where that proxy works -- and the fifth passes through the
+    state-name guard, a different branch entirely. The failure path was never exercised. The
+    inputs were hand-written; the corpus's are not, and that difference was the bug.
+
+    So the second block is DRAWN FROM THE CORPUS, with its row count at 781e504 beside each
+    string, and it must stay that way. Every one of these returned an office country as a
+    stated remote-eligibility boundary before the arrangement gate."""
     from job_radar.vocab import remote_scope
 
     for office in (
@@ -2328,6 +3285,23 @@ def test_remote_scope_takes_only_STATED_boundaries():
         "New York (Remote)",
     ):
         assert remote_scope(office) == (None, None), office
+
+    # Real locations from a 7,545-row harvest, counts as measured. `has_city` is False on
+    # every one -- these are the strings `split_place` could not read, not the ones it read
+    # as having no city, which is the distinction the proxy cannot make.
+    for office, rows in (
+        ("US", 109),
+        ("United States", 89),
+        ("London, UK", 50),  # split_place does not resolve a bare "UK" tail
+        ("San Mateo, CA United States", 48),  # no comma before the country
+        ("Singapore", 34),
+        ("San Francisco, CA • New York, NY • United States", 23),  # bullet-separated
+        ("Canada", 22),
+        ("Mexico City", 7),  # a CITY whose name ends in a country name
+        ("US > Arizona > Phoenix", 0),  # prod-only shape; 0 in this harvest, 43 in prod
+        ("Cambridge, MA USA", 0),  # prod-only, 82 rows there
+    ):
+        assert remote_scope(office) == (None, None), f"{office!r} ({rows} rows)"
 
 
 def test_remote_scope_does_not_read_new_mexico_as_mexico():
@@ -2426,10 +3400,83 @@ def test_ashby_salary_never_reads_the_equity_component():
     assert sources._ashby_salary({})["salary_min"] is None
 
 
+def test_ashby_reads_the_html_body_because_plain_text_carries_no_headers(monkeypatch):
+    """The 0.9.0 defect: this adapter read `descriptionPlain`, so `sections` was []
+    on 1,198 of 1,198 Ashby rows -- the feature dead on the second-largest source.
+
+    Asserted POSITIONALLY, on a header the plain field does not contain at all. A
+    test that only checked `len(sections) > 0` would pass against either field the
+    moment the plain text happened to carry a colon, and the repo has already been
+    bitten by tests that survive mutation of the thing they exist to pin.
+    """
+    payload = {
+        "jobs": [
+            {
+                "title": "Applied AI Engineer",
+                "location": "Remote",
+                "jobUrl": "https://jobs.ashbyhq.com/acme/1",
+                # BOTH present, as they are on 457/457 live postings. The headers
+                # exist only in the markup; the plain field is the same prose with
+                # every structural cue flattened out of it.
+                "descriptionHtml": (
+                    "<p><strong>ABOUT ACME</strong></p><p>We build things.</p>"
+                    "<p><strong>RESPONSIBILITIES</strong></p><p>Ship models.</p>"
+                ),
+                "descriptionPlain": (
+                    "ABOUT ACME\n\nWe build things.\n\nRESPONSIBILITIES\n\nShip models."
+                ),
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_ashby("acme")
+
+    headers = [s["header"] for s in row["sections"] if s.get("header")]
+    assert "RESPONSIBILITIES" in headers, (
+        f"read the plain field -- markup-derived headers absent. got {headers!r}"
+    )
+    assert any(s["type"] == "responsibilities" for s in row["sections"])
+    # The span must index THIS row's own text, and must resolve to the section it
+    # names -- not merely to a valid slice. Asserted against the OTHER section's
+    # prose too, because a wrong-span bug preserves every string-identity check
+    # while pointing at the neighbouring block; that is how one shipped before.
+    sec = next(s for s in row["sections"] if s.get("header") == "RESPONSIBILITIES")
+    span = row["text"][sec["start"] : sec["end"]]
+    assert "Ship models." in span
+    assert "We build things." not in span
+    # Markup never survives into the body.
+    assert "<p>" not in row["text"] and "<strong>" not in row["text"]
+
+
+def test_ashby_falls_back_to_plain_when_the_vendor_sends_no_html(monkeypatch):
+    """`descriptionHtml` was present on 457/457 live postings, so the fallback is a
+    safety net against a vendor change -- but a missing HTML field must not empty the
+    body, which is what reading `descriptionHtml` ALONE would have done. That failure
+    would be silent: a body of "" is a legal value, so nothing raises."""
+    payload = {
+        "jobs": [
+            {
+                "title": "Applied AI Engineer",
+                "location": "Remote",
+                "jobUrl": "https://jobs.ashbyhq.com/acme/1",
+                "descriptionPlain": "Plain body only.",
+            }
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url: payload)
+    (row,) = sources.fetch_ashby("acme")
+    assert row["text"] == "Plain body only."
+    # No markup means no headers -- `[]` is "a body with no headers", NOT `None`,
+    # which is reserved for "no body at all".
+    assert row["sections"] == []
+
+
 def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
     """Lever and USAJOBS both put a tenth of the posting in the obvious field and the
     rest in siblings, so reading the obvious one fed the scorer a fragment."""
-    lever = sources._lever_text(
+    # Both helpers return (text, sections) as of 0.9.0 -- the body still has to carry
+    # every field, which is what this test is about.
+    lever, _ = sources._lever_text(
         {
             "descriptionPlain": "Intro.",
             "lists": [{"text": "Requirements", "content": "<li>Python</li>"}],
@@ -2439,7 +3486,7 @@ def test_bodies_are_assembled_from_every_field_the_vendor_splits_them_across():
     assert "Intro." in lever and "Requirements" in lever and "Python" in lever
     assert "Why us." in lever
 
-    federal = sources._usajobs_text(
+    federal, _ = sources._usajobs_text(
         {
             "UserArea": {
                 "Details": {
@@ -2666,6 +3713,9 @@ def test_no_adapter_emits_a_basis_outside_its_closed_vocabulary():
         ("seniority_basis", _vocab.SENIORITY_BASES),
         ("posted_basis", _vocab.POSTED_BASES),
         ("salary_basis", _vocab.SALARY_BASES),
+        # `text_basis` joins the same enforcement rather than getting its own: the
+        # whole point of a closed vocabulary is that one mechanism polices all of them.
+        ("text_basis", _vocab.TEXT_BASES),
     ):
         used = set(_re.findall(rf'"{field}":\s*"([a-z_]+)"', src))
         used |= set(_re.findall(rf'"{field}":\s*"([a-z_]+)"\s+if', src))
@@ -2838,7 +3888,7 @@ def test_the_raw_boundary_is_the_vendors_string_not_a_rebuild():
 
 
 def test_a_continent_inside_a_country_name_is_not_a_stated_region():
-    """"South Africa" contains "africa".
+    """ "South Africa" contains "africa".
 
     Adding the continents made ZA the one country in 425 that also carried a continent
     tag, while France carried no EUROPE. The tag is not false — South Africa is in
@@ -2858,7 +3908,17 @@ def test_a_continent_inside_a_country_name_is_not_a_stated_region():
     assert remote_scope("Remote - Africa")[1] == ["AFRICA"]
     # And a region that merely sits NEXT TO a country is untouched — only a region whose
     # span falls INSIDE a matched country name is masked.
-    assert remote_scope("Bengaluru, Karnataka, India, APAC") == (["IN"], ["APAC"])
+    #
+    # The REGION half is this test's subject and is unchanged. The areas half used to read
+    # `["IN"]` and that was a wrong value pinned green: "Bengaluru, Karnataka, India" is an
+    # office address, `split_place` cannot read it (city/state/country all None), and the
+    # docstring's own rule — "a country deduced from an office city" is inference, not a
+    # statement — says it must not become a boundary. The incoherence it left: the same
+    # string WITHOUT the region returns (None, None), so appending "APAC" was what promoted
+    # the office country to an eligibility bound. The arrangement gate in `remote_scope`
+    # answers the areas half now; nothing about the span-masking changed.
+    assert remote_scope("Bengaluru, Karnataka, India, APAC") == (None, ["APAC"])
+    assert remote_scope("Bengaluru, Karnataka, India") == (None, None)
 
 
 def test_the_state_name_guard_survives_being_hoisted_to_one_alternation():
@@ -2951,3 +4011,258 @@ def test_a_subdivision_code_resolves_because_it_cannot_be_ambiguous():
     assert stated_scope(["US-CA", "Canada"])["remote_areas"] == ["CA", "US-CA"]
     for a in stated_scope("US-TX")["remote_areas"]:
         assert REMOTE_AREA_RE.match(a), a
+
+
+def test_rippling_org_unit_reaches_team(monkeypatch):
+    """THE PRECONDITION FOR REMOVING `department` at 0.9.0.
+
+    Rippling was the ONE adapter of nineteen that filled the deprecated `department`
+    and set neither `team` nor `category`. Every other one assigns its org unit to
+    `team` or its job family to `category` on the line beside the `department` it also
+    filled, so dropping that field cost them nothing -- but on this adapter it would
+    have silently deleted the org unit from every row.
+
+    No corpus measurement could see it: Rippling is keyless but was not among the 14
+    sources in the harvest the cut was measured on. It was found by reading all
+    nineteen adapters instead of counting rows, which is the only method that covers
+    a source that did not run.
+    """
+    listing = [
+        {
+            "uuid": "u1",
+            "name": "AI Engineer",
+            "department": {"id": "Eng", "label": "Engineering"},
+            "url": "https://ats.rippling.com/acme/jobs/u1",
+            "workLocation": {"label": "Remote (US)"},
+        }
+    ]
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: listing)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    j = sources.fetch_rippling("acme")[0]
+    assert j["department"] == "Engineering", "Rippling s org unit no longer reaches the record"
+
+
+@pytest.mark.parametrize(
+    "name", sorted(set(sources.DEPTH_ALL) | set(sources.BREADTH_ALL))
+)
+def test_no_adapter_puts_a_url_on_a_location(name, monkeypatch):
+    """`locations[]` entries carried the posting's own url until 0.9.0 -- 9,585 of
+    9,585 in a 7,568-row harvest, 0 differing from the row's `url`. It was not merely
+    redundant: it ADVERTISED a per-place apply link that none of the nineteen sources
+    publishes, so a consumer could reasonably have built a per-office apply flow on a
+    value that never varied.
+
+    THIS RUNS OVER EVERY ADAPTER because the three that build the list are not the
+    ones the corpus covered. `engine._coerce`'s two fallback branches are guarded
+    separately by `test_every_locations_element_has_the_same_keys`, which calls the
+    engine rather than an adapter -- adapter output is not record output, and one test
+    cannot stand in for the other.
+    """
+    c = _cfg()
+    monkeypatch.setattr(c, "env", lambda key: "test-key")
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources, "post_json", lambda url, body, *a, **k: SAMPLES[name])
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    _usajobs_response(monkeypatch, SAMPLES["usajobs"])
+    if name in sources.DEPTH_ALL:
+        out = sources.DEPTH_ALL[name]("slug")
+    else:
+        out = sources.BREADTH_ALL[name](["AI Engineer"])
+    want = {"raw", "city", "state", "country"}
+    for row in out:
+        for el in row.get("locations") or []:
+            assert set(el) == want, (
+                f"{name}: location keys {sorted(el)} != {sorted(want)} -- a per-place "
+                "`url` is the row's own url on every source and was removed at 0.9.0"
+            )
+
+
+def test_ashby_marks_remote_from_workplace_type_not_the_boolean(monkeypatch):
+    """`isRemote` is TRUE ON EVERY HYBRID ROW -- measured on openai (n=733):
+    isRemote=True with workplaceType='Hybrid' on 442. `remote_type` was rewired to
+    `workplaceType` in 0.9.0 on that measurement; the location string was not, so
+    7,435 hybrid postings rendered as `'San Francisco (Remote)'` in the one field a
+    listing page shows, beside `remote_type: 'hybrid'`."""
+    payload = {
+        "jobs": [
+            {"title": "A", "location": "San Francisco", "isRemote": True,
+             "workplaceType": "Hybrid", "jobUrl": "https://x/1"},
+            {"title": "B", "location": "Austin", "isRemote": True,
+             "workplaceType": "Remote", "jobUrl": "https://x/2"},
+            {"title": "C", "location": "Boston", "isRemote": False,
+             "workplaceType": "OnSite", "jobUrl": "https://x/3"},
+        ]
+    }
+    monkeypatch.setattr(sources, "get_json", lambda url, *a, **k: payload)
+    monkeypatch.setattr(sources.time, "sleep", lambda *a: None)
+    rows = sources.fetch_ashby("acme")
+    hybrid, remote, onsite = rows[0], rows[1], rows[2]
+    assert hybrid["location"] == "San Francisco", "a hybrid role claimed (Remote)"
+    assert hybrid["remote_type"] == "hybrid"
+    assert remote["location"] == "Austin (Remote)", "a real remote role lost its suffix"
+    assert onsite["location"] == "Boston"
+
+
+def test_a_named_persons_contact_details_never_reach_source_extra():
+    """Greenhouse user-type metadata carries a named employee's work email and
+    internal staff number -- 1,280 rows of a 102,799-row harvest, at veeam.com,
+    nice.com, celonis.com and others. The board publishes it; republishing it under a
+    consumer's name is a decision nobody made.
+
+    TWO ENCODINGS. A dict test alone misses the 57 rows carrying the address as a
+    plain string -- 59 values, of which 25 are embedded in longer text. And the four legitimate dict shapes in that harvest -- salary
+    {max_value,min_value,unit}, referral {amount,unit}, a bare pay range, and the
+    person object -- mean the person-KEY test drops nothing real."""
+    md = [
+        {"name": "Hiring Manager",
+         "value": {"name": "A Person", "email": "a@corp.com",
+                   "user_id": 1, "employee_id": "E1"}},
+        {"name": "Recruiter Email", "value": "someone@corp.com"},
+        {"name": "Contact", "value": "reach us at team@corp.com for questions"},
+        {"name": "Salary Range",
+         "value": {"unit": "USD", "min_value": "1", "max_value": "2"}},
+        {"name": "Referral", "value": {"amount": "500", "unit": "USD"}},
+        {"name": "Department", "value": "Engineering"},
+    ]
+    out = sources._gh_metadata(md)
+    assert "Hiring Manager" not in out, "a person object survived"
+    assert "Recruiter Email" not in out, "a bare email string survived"
+    assert "Contact" not in out, "an embedded email survived"
+    # the legitimate dict shapes must be untouched
+    assert out["Salary Range"] == {"unit": "USD", "min_value": "1", "max_value": "2"}
+    assert out["Referral"] == {"amount": "500", "unit": "USD"}
+    assert out["Department"] == "Engineering"
+
+
+def test_a_lever_posting_with_no_body_at_all_reports_no_sections_not_an_empty_list():
+    """`sections: []` is a claim ABOUT a body -- "we read one and it had no headers".
+    With every Lever field empty there is no body for it to be about, and the row
+    asserted both "no body" (`text` -> None at the boundary) and "a body with no
+    headers" at once. 21 rows [102,799-row harvest, 2026-08-20], all Lever, because it
+    is the only adapter that BUILDS a body from parts that can all be absent.
+    """
+    assert sources._lever_text({"description": "", "lists": [], "additional": ""}) == (
+        "",
+        None,
+    )
+
+
+def test_a_lever_posting_with_a_headerless_body_still_reports_an_empty_list():
+    """The other half, and the reason this is fixed in the adapter rather than in
+    `clean_with_sections`: 1,137 rows genuinely have a body carrying no headers, and
+    from inside that function the two cases are indistinguishable. Only the caller
+    knows whether a body existed.
+    """
+    text, secs = sources._lever_text({"description": "plain body, no markup"})
+    assert text == "plain body, no markup"
+    assert secs == []
+
+
+def test_a_job_seeker_post_inside_a_hiring_thread_is_dropped():
+    """P34. `search_hn_whoishiring` already filters THREADS to "who is hiring", so a
+    seeker using the seeker template inside one is unreachable by any thread-level
+    filter. The live row carried a private individual's email and GitHub profile in
+    `title` and their location line in `company`.
+
+    THE PIPE IN THIS FIXTURE IS LOAD-BEARING. `_hn_rows` drops any comment with fewer
+    than two pipe-separated parts, and the real seeker row has exactly one pipe --
+    before the GitHub url -- which is precisely why it survived that gate and reached
+    the record. Without it here the comment is dropped by the OLD gate and this test
+    passes with the new one disarmed, which is how it was first written.
+    """
+    seeker = (
+        "Location: Blacksburg, Virginia, USA Remote: Yes (open to remote) "
+        "Willing to relocate: Yes Technologies: Java, Python "
+        "Resume/CV: https://example.com/cv " + chr(124) + " https://github.com/someone "
+        "Email: someone@example.edu Software Engineer with 3+ years."
+    )
+    out: list = []
+    sources._hn_rows({"children": [{"text": seeker, "id": 1, "author": "a"}]}, out)
+    assert out == [], "a seeker post reached the record"
+
+
+def test_the_seeker_filter_does_not_drop_a_hiring_post_that_asks_for_a_resume():
+    """The measurement that set the threshold at three labels rather than one.
+    Scored over 219 real hn comments, `resume/cv OR willing-to-relocate` fired
+    twice -- and the second was a GENUINE listing saying "Resume:" because it was
+    asking for one. No single label may decide, including the most seeker-specific.
+    """
+    hiring = (
+        "Acme Corp | Senior Backend Engineer | Remote (US) | 180k-230k. "
+        "We are hiring. Resume: send to jobs@acme.com and we will reply."
+    )
+    assert not sources._is_hn_seeker_post(hiring)
+    out: list = []
+    sources._hn_rows({"children": [{"text": hiring, "id": 2, "author": "b"}]}, out)
+    assert len(out) == 1, "a genuine hiring post was dropped"
+    assert out[0]["company"] == "Acme Corp"
+
+
+def test_the_seeker_labels_are_not_anchored_to_a_line_start():
+    """The first version of this detector scored 0 of 219 INCLUDING the row it was
+    written for, because it anchored each label with `^` under re.M -- and `clean`
+    flattens the seeker block onto one line, so `^` can never match. A detector that
+    fires on nothing looks exactly like a clean corpus.
+    """
+    one_line = (
+        "Location: Austin Remote: Yes Willing to relocate: No "
+        "Technologies: Go Email: x@example.com"
+    )
+    assert "\n" not in one_line
+    assert sources._is_hn_seeker_post(one_line)
+
+
+def test_greenhouse_emits_the_board_owner_it_was_already_being_sent(monkeypatch):
+    """`company_name` rode on every Greenhouse row and this adapter threw it away, so
+    the engine stamped the watchlist's slug instead and a user read
+    `langanengineeringandenvironmentalservicesllc`.
+
+    Measured live 2026-08-24 over 104 boards: present and non-empty on 100% of rows,
+    and byte-identical to `discover.board_owner`'s separate `/v1/boards/{slug}` call on
+    103 of 103 boards that had a row to compare -- so this costs no extra request, and
+    does not need `content=true`.
+
+    Asserted on the ADAPTER's output, not on a harvested record: the engine decides
+    whether to USE it (fill-only), and conflating the two hides which layer moved."""
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url: {
+            "jobs": [
+                {
+                    "title": "Staff Engineer",
+                    "company_name": "Abnormal",
+                    "absolute_url": "https://x/1",
+                    "location": {"name": "Remote"},
+                    "content": "python",
+                    "first_published": "2026-07-20T00:00:00-04:00",
+                }
+            ]
+        },
+    )
+    assert [r["company"] for r in sources.fetch_greenhouse("abnormalsecurity")] == [
+        "Abnormal"
+    ]
+
+
+def test_greenhouse_reports_no_company_rather_than_an_empty_one(monkeypatch):
+    """`None` means "the source did not say" and must stay distinct from `""`: the
+    engine falls back to the watchlist entry on None, and `str(None)` is the string
+    "None", which is why contract fields are never blindly coerced."""
+    monkeypatch.setattr(
+        sources,
+        "get_json",
+        lambda url: {
+            "jobs": [
+                {
+                    "title": "Staff Engineer",
+                    "company_name": "",
+                    "absolute_url": "https://x/1",
+                    "location": {"name": "Remote"},
+                    "content": "python",
+                    "first_published": "2026-07-20T00:00:00-04:00",
+                }
+            ]
+        },
+    )
+    assert [r["company"] for r in sources.fetch_greenhouse("x")] == [None]

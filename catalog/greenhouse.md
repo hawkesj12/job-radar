@@ -217,6 +217,21 @@ answers, but only the owner name proves the board is not Capital One's. Lever, A
 and Teamtailor all return a board's contents without ever naming who owns it, so on those
 platforms a slug that resolves is the whole of the available evidence.
 
+**It is also the employer's display name, and until 0.9.0 the adapter read neither use.**
+`fetch_greenhouse` dropped the field, so a mined board showed its slug as the employer.
+Re-probed 2026-08-24 across 104 boards: `company_name` is present and non-empty on **100% of
+rows**, carries **one distinct value per board**, and is **byte-identical to what the separate
+`/v1/boards/{slug}` identity endpoint returns** on 103 of 103 boards that had a row to compare.
+So `board_owner`'s second request is redundant for any caller that has already fetched the
+board — and the field arrives **without `content=true`**, on the cheap no-body URL the liveness
+probe already uses.
+
+Two cautions for anyone mapping it. **It is not always the better string:** `allwebleads`
+reports `AWL` and `canonical` reports `Canonical` where the curated name is `Canonical Ltd.`,
+so it belongs in a fill, not an overwrite. And **roughly one board in ten ships edge
+whitespace** in it — `' Higher Logic'`, `'Home Chef  '`, `' ALO'`, `'Brandtech+ '`,
+`'Horace Mann '` — which is invisible in a JSON dump and survives into a CSV column.
+
 ## How this was probed
 
 `catalog/_probe.py` on 2026-08-03, one request per second, with steps 2 and 3 skipped — a

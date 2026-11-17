@@ -15,7 +15,7 @@ import inspect
 import json
 import re
 
-from job_radar import emit, engine, shortlist
+from job_radar import config, emit, engine, shortlist
 
 
 def _keys_read_by_nested() -> set[str]:
@@ -63,6 +63,23 @@ def test_the_machine_feed_carries_the_whole_contract():
     )
 
 
+def test_an_empty_sections_list_survives_the_wire_as_an_empty_list():
+    """`or None` on the sections line of `emit._nested` collapses `[]` into `null` and
+    destroys the two-state contract: `[]` means we read the body and it had no headers,
+    `null` means there was no body. A consumer cannot tell those apart afterwards.
+
+    This assertion exists because that mutation passed the ENTIRE suite. The six-line
+    comment on that line was the only thing protecting it, and a comment is not a gate.
+    Every other `or None` in `_nested` is on a str-typed field, where "" and None do
+    mean the same thing; `sections` follows `remote_areas`, which omits it.
+    """
+    assert emit._nested({"sections": []})["sections"] == []
+    assert emit._nested({})["sections"] is None
+    assert emit._nested({"sections": [{"type": None, "header": "x"}]})["sections"] == [
+        {"type": None, "header": "x"}
+    ]
+
+
 def test_a_real_row_survives_the_whole_pipeline_to_json():
     """End to end on the values, not just the key names: a harvested posting, coerced
     at the real boundary, emitted, and read back as JSON the way a consumer would."""
@@ -95,7 +112,7 @@ def test_a_real_row_survives_the_whole_pipeline_to_json():
     # hybrid is NOT remote, and the feed must be able to say so distinctly from
     # "nobody told us" -- the whole reason the contract separates None from False.
     assert got["remote"]["type"] == "hybrid"
-    assert got["remote"]["is_remote"] is False
+    assert "is_remote" not in got["remote"], "the bool was removed at 0.9.0"
     assert got["text"], "the body is the entire input to the fit score"
 
 
@@ -138,3 +155,157 @@ def test_records_emits_one_valid_json_object_per_line():
     assert len(lines) == 3 and not text.endswith("\n")
     for ln in lines:
         json.loads(ln)
+
+
+def test_a_merge_record_survives_every_shape_sources_arrives_in():
+    """`sources` reached the wire through two exits that disagreed about its shape.
+
+    `_nested` accepted only a `set`, so the SAME value after a json round trip -- a
+    list -- emitted `null`, silently destroying the record that a cross-source dedup
+    merge ever happened. `manifest` accepted set and list, then fell back to
+    `[r["source"]]`, so a store row (which has no `sources` column at all) counted one
+    row under a source literally named "adzuna, greenhouse".
+
+    Dedup is where a mistake deletes a job, and these 35 multi-source rows in a
+    7,568-row local harvest are the only record a merge happened anywhere.
+    """
+    base = {
+        "title": "AI Engineer",
+        "company": "Acme",
+        "url": "https://x/1",
+        "dedup_key": "acme|ai engineer|us",
+    }
+    want = ["adzuna", "greenhouse"]
+    for shape in ({"adzuna", "greenhouse"}, ["greenhouse", "adzuna"], ("adzuna", "greenhouse")):
+        row = {**base, "source": "greenhouse", "sources": shape}
+        assert emit._nested(row)["sources"] == want, f"lost the merge from a {type(shape).__name__}"
+
+    # THE STORE ROW: no `sources` key, the merge folded into the singular `source`.
+    stored = {**base, "source": "adzuna, greenhouse"}
+    got = emit._nested(stored)
+    assert got["sources"] == want, "the store's joined source did not round-trip back"
+    assert got["source"] == "adzuna", "`source` must be a real adapter token, never the joined string"
+
+    counts = json.loads(emit.manifest([stored], [], [], config.Config()))["rows_by_source"]
+    assert counts == {"adzuna": 1, "greenhouse": 1}, (
+        f"manifest counted {sorted(counts)} -- a fabricated source name is not a source"
+    )
+
+
+def test_a_single_source_row_is_untouched_by_the_merge_recovery():
+    """The split is on `", "`, and no registered source token contains a comma or a
+    space (19 of 19), so it has exactly one inverse and cannot fire on a normal row."""
+    row = {"title": "T", "company": "C", "url": "https://x/1", "source": "google_jobs"}
+    got = emit._nested(row)
+    assert got["source"] == "google_jobs" and got["sources"] == ["google_jobs"]
+    assert emit._nested({**row, "source": ""})["source"] is None
+
+
+def test_no_text_drops_the_body_keys_rather_than_nulling_them():
+    """`text` is 72% of the median record's bytes and there was no way to ask for the
+    record without it, which is why the harvest output was unreadable by hand.
+
+    DROPPED, not nulled: `text: null` already means "the source sent no body"
+    (smartrecruiters, 250 of 250 rows), so nulling it here would make a caller's
+    display choice indistinguishable from a fact about the posting.
+    """
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "greenhouse", "text": "a long body", "text_basis": "excerpt",
+    }  # fmt: skip
+    full = json.loads(emit.records([row]))
+    assert full["text"] == "a long body" and full["text_basis"] == "excerpt"
+
+    lean = json.loads(emit.records([row], include_text=False))
+    assert "text" not in lean and "text_basis" not in lean, (
+        "the body keys must be ABSENT, not null -- null already means something else"
+    )
+    # Nothing else moves. The flag is a display choice, not a contract change.
+    assert set(full) - set(lean) == {"text", "text_basis"}
+    assert all(lean[k] == full[k] for k in lean)
+
+
+def test_a_source_that_sent_no_body_still_says_so_with_null():
+    """The other side of the same distinction: with the body INCLUDED, a source that
+    sent nothing must still be able to say `null`, or the two states collapse."""
+    row = {"title": "T", "company": "C", "url": "https://x/1", "source": "smartrecruiters"}
+    got = json.loads(emit.records([row]))
+    assert "text" in got and got["text"] is None
+
+
+def test_omit_empty_prunes_the_nested_record_recursively():
+    """The wire shape NESTS, so pruning only the top level leaves `salary: {raw: null,
+    min: null, …}` -- eight nulls in a wrapper, which is most of what makes an empty
+    record long. `[]` and `{}` survive for the same reason as in `engine._shape`."""
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "greenhouse", "remote_areas": [], "sections": [],
+        "remote_type": "remote",
+    }  # fmt: skip
+    full = json.loads(emit.records([row]))
+    lean = json.loads(emit.records([row], omit_empty=True))
+
+    assert full["salary"]["min"] is None, "the baseline should carry the null wrapper"
+    assert lean["salary"] == {}, "a wrapper that prunes empty is kept, not dropped"
+    assert lean["remote"]["areas"] == [] and lean["sections"] == [], (
+        "[] means the posting SAID anywhere / the body had no headers -- not null"
+    )
+    assert "expires" not in lean and lean["title"]["raw"] == "AI Engineer"
+    # Every surviving value is untouched; this drops keys, it does not rewrite them.
+    assert lean["remote"]["type"] == full["remote"]["type"] == "remote"
+
+
+def test_a_merged_row_still_credits_every_source_that_produced_it(tmp_path, monkeypatch):
+    """ATTRIBUTION IS A CONDITION OF ACCESS on five of the wired sources, and two say
+    outright they will revoke it. The credit line is the one obligation job-radar can
+    discharge itself rather than hand downstream, so a merged row must credit BOTH
+    adapters, not a string naming neither.
+
+    THE THIRD EXIT of the `sources`-shape defect, missed when `_nested` and `manifest`
+    were fixed. `cli` built its token set inline as
+    `r.get("sources") or [r.get("source")]`, and the rows it reads carry a `source`
+    folded by the store as `", ".join(sorted(tokens))` -- so a cross-source merge
+    produced one token literally named "remoteok, remotive", which resolves against no
+    attribution entry and is dropped in silence. 12 such fabricated tokens in a
+    7,568-row local harvest.
+
+    Nobody was under-credited there, and by luck rather than design: every source in a
+    merged row also appeared in a single-source row. A low-volume source whose rows all
+    merged would have gone uncredited with no error.
+
+    THIS DRIVES `cmd_scan` AND READS ITS PRINTED OUTPUT, deliberately. An earlier
+    version called `emit._sources` directly and passed with the defect restored --
+    testing the helper is not testing the call site, which is the failure this whole
+    release keeps re-learning. The mutation that matters is reverting cli's inline
+    expression, and this goes red for it.
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from job_radar import cli, engine
+
+    row = {
+        "title": "AI Engineer", "company": "Acme", "url": "https://x/1",
+        "source": "remoteok", "sources": {"remoteok", "remotive"},
+        "posted": "2026-08-01", "text": "remote llm work", "location": "Remote",
+    }  # fmt: skip
+    monkeypatch.setattr(engine, "harvest", lambda cfg, wl: ([row], [], []))
+    args = argparse.Namespace(
+        out=str(tmp_path / "s.csv"), watchlist=None, limit=25, verbose=False,
+        format="text", all=False, strict=False, no_text=False, drop_empty=False,
+    )  # fmt: skip
+    cfg = config.Config()
+    cfg.remote_only, cfg.min_score, cfg.max_age_days = False, -999, 100000
+    cfg.llm.enabled = False
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cli.cmd_scan(args, cfg)
+    out = buf.getvalue()
+
+    assert "Remote OK" in out and "Remotive" in out, (
+        "a merged row must credit BOTH sources in the printed credit line; got:\n"
+        + "\n".join(ln for ln in out.splitlines() if "Jobs from" in ln or not ln.strip())
+    )
+    assert "remoteok, remotive" not in out, "a fabricated source name reached the output"

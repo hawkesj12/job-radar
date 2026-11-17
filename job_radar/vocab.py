@@ -21,6 +21,7 @@ keeps its raw; it is never dropped and never guessed at.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .dedup import _QUAL_NOISE, _QUAL_RE, _TITLE_NOISE
 
@@ -77,6 +78,31 @@ _EMPLOYMENT_MAP = {
 
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
 
+# A trailing parenthetical QUALIFIES a type; it does not change it. Braintrust's
+# adapter builds `f"contract ({contract_type})"` (sources.py), so the string that
+# arrives here is "contract (long)" -- `_PUNCT` flattens it to "contract long",
+# which is not in the map, so 29 of 29 braintrust rows normalized to OTHER while
+# bare "contract" three lines up maps to CONTRACTOR. The adapter was defeating its
+# own normalizer. Applied ONLY after a direct lookup misses, so it can never change
+# a value that already resolved: measured over the corpus, 29 rows rescued, 0
+# changed. The raw keeps the qualifier -- "contract (long)" is the truth.
+_PAREN_TAIL = re.compile(r"\s*\([^)]*\)\s*$")
+
+# Every employment word, as a whole phrase, for scanning a TITLE. Built from the map
+# above so the two can never drift, and used ONLY as a veto -- see
+# engine._employment_from_extra for why a title is never asked what the type IS.
+# Longest-first so "contract to hire" wins over "contract"; the separator class lets
+# one entry match "part time", "part-time" and "part/time".
+TITLE_EMPLOYMENT_RE = re.compile(
+    r"(?<![a-z])("
+    + "|".join(
+        re.escape(k).replace(r"\ ", r"[\s\-_/]+")
+        for k in sorted(_EMPLOYMENT_MAP, key=len, reverse=True)
+    )
+    + r")(?![a-z])",
+    re.I,
+)
+
 
 def _flatten(v) -> str:
     """Vendor values arrive as a string OR a list of them (jobicy, arbeitnow).
@@ -98,7 +124,55 @@ def employment_type(raw) -> tuple[str | None, str | None]:
         return None, None
     key = _PUNCT.sub(" ", raw_s.lower())
     key = " ".join(key.split())
-    return _EMPLOYMENT_MAP.get(key, "OTHER"), raw_s
+    hit = _EMPLOYMENT_MAP.get(key)
+    if hit is None:
+        # Retry once with a trailing parenthetical removed -- see _PAREN_TAIL. Only
+        # on a miss, so a value that already resolved cannot be altered here.
+        stripped = _PAREN_TAIL.sub("", raw_s).strip()
+        if stripped != raw_s:
+            key = " ".join(_PUNCT.sub(" ", stripped.lower()).split())
+            hit = _EMPLOYMENT_MAP.get(key)
+    return hit or "OTHER", raw_s
+
+
+# ── seniority ───────────────────────────────────────────────────────────────
+# THERE IS NO CLOSED VOCABULARY HERE, AND THAT IS DELIBERATE. Every other
+# normalizer in this module maps onto a vocabulary someone else published --
+# `employment_type` onto schema.org's `employmentType`, `salary_period` onto its
+# `unitText` (see the module docstring: "Not invented"). No such enumeration exists
+# for seniority, so a closed set of rungs would be an OPINION about how levels
+# order, and `catalog/_SCHEMA.md` ("Fidelity, not opinion ... whether a consumer
+# maps a category is that consumer's business") governs this field exactly as it
+# governs `department`.
+#
+# The concrete harm that settled it, probed live 2026-08-20: SmartRecruiters'
+# `experienceLevel` ships LinkedIn's published enumeration verbatim -- Internship,
+# Entry level, Associate, Mid-Senior level, Director, Executive -- in which
+# `Associate` ranks ABOVE `Entry level`. The one ladder available to copy collapses
+# `Associate` to an entry rung, so adopting it would have contradicted a vendor's
+# own published ordering on the source where it fires on 60% of rows.
+#
+# So this does exactly two mechanical things and no judgment:
+#   - CASE-FOLDS. `Senior` and `senior` are the same word. Measured: a
+#     `seniority='senior'` filter missed 319 rows, 179 of them for case alone.
+#   - NULLS the two values that explicitly decline to classify.
+# `Mid-Senior Level` stays `mid-senior level`, NOT `senior`. `Associate` stays
+# `associate`, NOT `entry`. Those are the ladder, and the ladder belongs downstream.
+_SENIORITY_DECLINED = frozenset({"not applicable", "any", "n/a"})
+
+
+def seniority(raw) -> tuple[str | None, str | None]:
+    """Vendor level string -> (case-folded, raw). `None` means no level was stated.
+
+    Case-folding only -- see the block comment above for why there is no rung map.
+    A vendor that answered "Not Applicable" DID answer, so the value is `None` (we
+    have no level) while the raw preserves that they responded at all.
+    """
+    raw_s = _flatten(raw).strip()
+    if not raw_s:
+        return None, None
+    folded = " ".join(raw_s.lower().split())
+    return (None if folded in _SENIORITY_DECLINED else folded), raw_s
 
 
 # ── salary period ───────────────────────────────────────────────────────────
@@ -148,6 +222,102 @@ def salary_period(raw) -> str | None:
     return _PERIOD_MAP.get(" ".join(s.split()))
 
 
+# Periods per year, for the implied-annual check in _period_is_contradicted.
+_ANNUALIZE = {"hour": 2080, "day": 260, "week": 52, "month": 12, "year": 1}
+
+# ORDER-OF-MAGNITUDE UNITS PER USD. A PLAUSIBILITY CEILING, NOT AN ACCOUNTING
+# CONVERSION -- nothing here is displayed, stored or summed, and no figure is ever
+# converted. The only question asked of this table is "is this number absurd for a
+# salary", and that question has roughly a decade of slack in it.
+#
+# WHY IT EXISTS: both magnitude thresholds are denominated in USD, and applying a USD
+# ceiling to a weak currency deletes correct data. Ungated, the implied-annual ceiling
+# fired on 27 stated rows in a 102,799-row harvest [corpus tree 515521d] of which 24
+# were CORRECT monthly salaries -- `COP 17,500,000 per month`, `HUF 1.8M per month`,
+# `PHP 90K per month`, `CZK 150K per month`.
+#
+# HOW MUCH SLACK THERE ACTUALLY IS, AND IT IS NOT THE SAME ON BOTH THRESHOLDS. The
+# 12.8x margin quoted for this table was measured on the implied-annual CEILING, where
+# the nearest spared row sits an order of magnitude clear and no rate here has moved
+# 10x in decades. Re-derived on the `year` FLOOR it is 1.07x: the nearest spared row
+# is a PHP posting at a USD-equivalent of 5,357 against a floor of 5,000. A 7% error
+# in one rate moves that row. The floor is therefore the fragile half of this table --
+# quote 12.8x only of the ceiling, and re-measure both if an entry is ever edited.
+#
+# All 27 currencies the corpus contains have an entry; an unknown one falls back to
+# 1.0, which is the old USD-only behaviour and the conservative direction.
+_USD_SCALE = {
+    "USD": 1, "EUR": 0.92, "GBP": 0.79, "CHF": 0.88, "CAD": 1.37, "AUD": 1.52,
+    "NZD": 1.65, "SGD": 1.34, "AED": 3.67, "BRL": 5.4, "MYR": 4.7, "PLN": 4.0,
+    "RON": 4.6, "HKD": 7.8, "CNY": 7.2, "SEK": 10.5, "MXN": 17, "ZAR": 18.5,
+    "CZK": 23, "TWD": 32, "PHP": 56, "INR": 83, "ALL": 92, "JPY": 150,
+    "HUF": 360, "KRW": 1330, "COP": 4100,
+}  # fmt: skip
+
+
+def _period_is_contradicted(lo, hi, period, currency) -> bool:
+    """Does the figure's own magnitude disprove the period stated beside it?
+
+    Disbelieving a witness, never inventing one -- the caller nulls the period and
+    keeps the numbers, which is the only direction `salary_period` allows.
+
+    THIS LIVED INSIDE `salary_from_display`, SO IT GUARDED ONLY THE PARSED LANE, and
+    that is the whole of P7: a vendor-STATED figure reached the record having passed
+    no sanity check at all. Measured on a 102,799-row harvest [corpus tree 515521d,
+    one day, 11 of 19 sources]: 15 stated rows exceed a hi/lo ratio of 5, 9 exceed 50.
+    The tempting comparison -- "the worst ratio among `parsed` is 5.0" -- is CIRCULAR
+    and is written here only to be corrected: 5.0 is `_D_MAX_RATIO`'s own output,
+    because every wider parse was refused and is all-None. It is evidence about the
+    guard, not about the data.
+
+    BOTH THRESHOLDS ARE SCALED BY CURRENCY (`_USD_SCALE`), AND THE FIRST TWO ATTEMPTS
+    AT THAT WERE WRONG IN OPPOSITE DIRECTIONS. Applying the USD ceiling unscaled
+    deletes correct data: it fired on 27 stated rows of which 24 were correct monthly
+    salaries in weak currencies. GATING it on `currency in (None, "USD")` instead was
+    measured on a full shipped-pipeline run of 29,712 parsed rows and BREAKS 6 rows to
+    fix 1 -- five CAD annual salaries where `week` had been scraped out of a weekly
+    lunch stipend, an office-days policy and `40h/week`, which the ceiling correctly
+    kills and a gate republishes as `CAD 160,000 per week`. Scaling satisfies both:
+    CAD 160,000/week is still $6.1M implied and still vetoed, while PHP 90,000/month
+    is $19,286 and is not.
+
+    SCALING THE `year` FLOOR TOO WAS EXPECTED TO OVER-FIRE AND MEASURED THE OPPOSITE:
+    29 stated rows unscaled, 47 scaled, and all 18 newly caught are one defect -- a
+    MONTHLY band labelled `year`. THE EVIDENCE FOR THOSE 18 IS NOT UNIFORM AND MUST
+    NOT BE READ AS 18 VERIFIED ROWS: one is confirmed by its own body ("Php 70,000 -
+    Php 95,000 per month" against a structured `year`), one is confirmed with NO FX
+    rate involved (one employer, one title, one band -- `HUF 1,045,000 - 1,567,500` --
+    filed once as `year` and twice as `month`), and the other 16 rest on the scale
+    table alone.
+
+    THE RESIDUAL ON THE FLOOR, named because scaling created it and this corpus cannot
+    see it: a genuine low-wage ANNUAL salary in a weak currency now falls under the
+    scaled floor. The Philippine statutory minimum is about PHP 158,600 a year against
+    a scaled floor of PHP 280,000, so a real minimum-wage annual posting WOULD lose its
+    period. Zero such rows here -- but this corpus is 11 of 19 sources on one day, and
+    that is exactly the population it under-samples. The unscaled floor could not do
+    this. It is the one place this change can make a row worse.
+
+    NOT PORTED to the stated lane at all, each a decision with a measurement behind
+    it: `_D_MAX_RATIO` (refusing a wide range outright) would have this lane DELETE
+    the shape `_distribute_multiplier` REPAIRS in the parsed lane -- one input, two
+    opposite verdicts -- and its population is bimodal with nothing between 17.5x and
+    994.7x, so a single threshold describes neither cluster (`$141K - $930K` is a real
+    research band). `lo < 1000 and no period` would delete 15 real figures (`$22-$26`
+    on a Support Specialist, `$64.10` on an RN) whose only defect is a vendor interval
+    this codebase does not map -- our parsing gap, not their error.
+    """
+    # BOTH thresholds are USD-denominated, so both are divided by the currency's
+    # scale before comparison. An unknown currency scales by 1.0 -- the old USD-only
+    # behaviour, and the conservative direction.
+    scale = _USD_SCALE.get(currency or "USD", 1.0)
+    if period == "year":
+        return hi is not None and hi / scale < 5_000
+    if not period or lo is None:
+        return False
+    return lo * _ANNUALIZE.get(period, 0) / scale > 1_000_000
+
+
 def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict:
     """Structured salary -> the five record fields. Returns all-None when there is
     no real figure.
@@ -176,11 +346,20 @@ def salary(lo=None, hi=None, currency=None, period=None, basis="stated") -> dict
             "salary_min": None, "salary_max": None, "salary_currency": None,
             "salary_period": None, "salary_basis": None,
         }  # fmt: skip
+    hi = hi if hi is not None else lo
+    cur = str(currency).upper() if currency else None
+    per = salary_period(period)
+    # EVERY LANE, NOT JUST THE PARSED ONE -- this is the chokepoint all nineteen
+    # adapters reach, which is why the magnitude veto lives here rather than in
+    # `salary_from_display`, where it guarded 0 stated rows. See
+    # `_period_is_contradicted` for the measurement and for what was NOT ported.
+    if per and _period_is_contradicted(lo, hi, per, cur):
+        per = None
     return {
         "salary_min": lo,
-        "salary_max": hi if hi is not None else lo,
-        "salary_currency": (str(currency).upper() if currency else None),
-        "salary_period": salary_period(period),
+        "salary_max": hi,
+        "salary_currency": cur,
+        "salary_period": per,
         "salary_basis": basis,
     }
 
@@ -214,6 +393,148 @@ _G_SALARY = re.compile(
     re.I,
 )
 _MULT = {"k": 1_000, "m": 1_000_000}
+
+
+def _distribute_multiplier(lo_n, lo_mul, hi_n, hi_mul):
+    """`$200-260K` means 200,000-260,000. The K is written ONCE and distributes left.
+
+    THE BUG THIS EXISTS TO STOP, because it is one character from shipping: `_G_NUM`
+    binds the multiplier per-number, so the pattern reads `$200-260K` as lo=200 and
+    hi=260,000 -- `salary_min` of 200 on a $200K job, wrong by 1,300x, in the column
+    README:39 defines as what the employer COMMITTED to. Measured on 26 rows of
+    `_reports/flat.ndjson` [local 94-board harvest, 0.9.0, 2026-08-20].
+
+    It is latent in `google_salary` today and harmless ONLY because that pattern
+    requires a trailing period phrase, which gates these strings out. Making the
+    period optional -- which is the whole point of `salary_from_display` -- is
+    precisely what arms it. Same class as the `US$6,117-US$8,342` failure recorded
+    above, which wrote the MAXIMUM into `salary_min`.
+
+    Guarded on `lo < 1000`: a bare `200` beside `260K` cannot be a real floor, while
+    `150,000 - 250,000` needs no help and must not be touched.
+    """
+    if lo_n is None or hi_n is None:
+        return lo_n, hi_n
+    if not lo_mul and hi_mul and lo_n < 1000:
+        return lo_n * _MULT[hi_mul.lower()], hi_n
+    return lo_n, hi_n
+
+
+# Same shape as _G_SALARY but the trailing period phrase is OPTIONAL, because an
+# employer writes `$200,000 - $250,000` and Google writes `165K-195K a year`. That
+# one difference is why 3,500 rows carried a fully formed pay range in `salary` with
+# every structured column null: the only text parser in the codebase could not read
+# a period-less range, so `README.md:41`'s promise that basis="parsed" means "read
+# out of free text" was kept on exactly 12 rows corpus-wide.
+_D_SALARY = re.compile(
+    _G_NUM % ("lo", "lomul")
+    + r"\s*(?:[-–—]|to)\s*(?:"
+    + (_G_NUM % ("hi", "himul"))
+    + r")\s*"
+    # `a year` / `per hour` AND `/hr` — employers write both, and the slash form is
+    # 30 of 4,703 display strings. 28 of those 30 were rescued by the adjacency
+    # window because the body happened to spell it out nearby; reading it off the
+    # string itself does not depend on that luck.
+    r"(?:\s*(?:(?:an?|per)\s+|/\s*)(?P<per>hours?|hrs?|weeks?|wks?|months?|mos?|years?|yrs?|days?))?",
+    re.I,
+)
+# A range wider than this is not a pay band, it is a parse that went wrong -- it
+# catches `$150,000 - 250,000k` ($250 MILLION) and the malformed `$306 - $390,000`.
+# 5x is deliberately loose: real bands top out near 2x, so this only fires on nonsense.
+_D_MAX_RATIO = 5
+
+
+def salary_from_display(raw, period=None, currency=None) -> dict:
+    """A display string like `$200,000 - $250,000` -> the structured fields.
+
+    The sibling of `google_salary`, for the eleven adapters that produce a display
+    string and nothing else. RANGES ONLY -- both endpoints required. A lone figure is
+    refused because `$120,000` and `$60` and `up to $200,000` are indistinguishable
+    here without a period, and a floor written into `salary_min` from a ceiling is
+    the failure mode this whole function is built to avoid.
+
+    `period` and `currency` are passed IN by the caller, which read them from text
+    ADJACENT to the figure. They are never inferred from the number's magnitude --
+    see `salary()`. Magnitude is used only to REFUSE a stated period, which is
+    disbelieving a witness rather than inventing one.
+
+    Returns all-None on anything it will not vouch for. Every refusal below was
+    measured on `_reports/flat.ndjson` [local 94-board harvest, 0.9.0, 2026-08-20];
+    3,292 of 3,500 target rows (94.1%) trip none of them.
+    """
+    m = _D_SALARY.search(str(raw or ""))
+    if not m:
+        return salary()
+
+    def _n(num, mul):
+        try:
+            v = float(str(num).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return (v * _MULT[mul.lower()] if mul else v) or None
+
+    lo = _n(m.group("lo"), m.group("lomul"))
+    hi = _n(m.group("hi"), m.group("himul"))
+    lo, hi = _distribute_multiplier(lo, m.group("lomul"), hi, m.group("himul"))
+    if lo is None or hi is None:
+        return salary()
+    if lo > hi:  # the honest repair; see google_salary
+        lo, hi = hi, lo
+    if hi / lo > _D_MAX_RATIO:
+        return salary()
+
+    # The string's own period wins over the caller's -- `165K-195K a year` states it
+    # inline, and that is stronger evidence than a word 90 characters away.
+    period = _PERIOD_MAP.get((m.group("per") or "").lower()) or period
+    # A figure under 1,000 with no period is genuinely undecidable: `$30-120` is an
+    # hourly rate or a thousands-shorthand and nothing here can tell. Emitting it
+    # with period=None would manufacture exactly the unusable rows this is fixing.
+    if lo < 1000 and not period:
+        return salary()
+    # THE MAGNITUDE VETO MOVED INTO `salary()` and is no longer applied here -- see
+    # `_period_is_contradicted`. It had guarded this lane alone, which was P7. Two
+    # real failures are why it exists at all, both found by hand-reading output
+    # rather than by review:
+    #
+    #   "Estimated Hourly Pay Range $140,000 - $220,000"  -- the employer's own label,
+    #   and believing it writes `hour` on a six-figure salary.
+    #
+    #   "$186,400 - $233,000 USD PLEASE NOTE: our policy requires a 90-day waiting
+    #   period"  -- `day` harvested out of "90-day", giving $186,400 PER DAY. 66 of
+    #   872 period assignments (7.6%) were absurd this way: 55 day, 9 week, 2 month.
+    #   An earlier version of this veto covered only `hour` and `year` and missed
+    #   every one of them.
+    #
+    # Implied-annual is the general form; per-unit thresholds only ever cover the
+    # units someone thought of. The ceiling applies to SUB-annual periods only, so a
+    # genuine $1.5M/yr package is not vetoed for being large. Behaviour in THIS lane
+    # is unchanged by the move: measured byte-exact on 29,712 parsed rows.
+    #
+    # WAS: that byte-exact claim, and an independent re-run over 30,157 rows found TWO.
+    # Net 1 fixed / 1 damaged, and the damaged one matters more than the count:
+    #
+    #   Airbnb MX  `$100,000-$125,000` MXN, body says "Mexico MONTHLY Pay Range".
+    #              The unscaled ceiling deleted a period the employer stated. Fixed.
+    #   Convera HK `$240K - $325K HKD ($20K - $27K per month)`. The band is ANNUAL;
+    #              `_adjacent_evidence` took `month` out of the PARENTHETICAL. The
+    #              unscaled ceiling killed that wrong period BY ACCIDENT -- 2.88M HKD
+    #              exceeds 1M. Scaled, 2.88M / 7.8 = $369K, so it survives and the
+    #              record now reads HKD 240,000-325,000 per MONTH, off by 12x and
+    #              contradicted by the posting's own next clause.
+    #
+    # SO THE SAFETY ARGUMENT ABOVE WAS ONLY EVER CHECKED AT ONE SCALE. "CAD 160,000
+    # per week is still $6.1M implied and still vetoed" is true at CAD's 1.37 and
+    # false at HKD's 7.8: scaling weakens the ceiling BY THE SCALE FACTOR, so the
+    # further a currency is from the dollar the less the ceiling catches. That is the
+    # cost of the fix, not a counter-example to it -- 18 monthly bands filed as annual
+    # are worth one accidental catch lost.
+    #
+    # A scale CAP was measured and rejected: it separates the two rows only at <= 2.5,
+    # it must be ceiling-only (a capped floor un-fixes all 18), and 2.5 tuned on n=2 is
+    # a constant nobody can defend. The Convera row's real defect is upstream and
+    # already registered -- `_adjacent_evidence` reads a parenthetical as adjacency,
+    # which is the same shape that hid OTE inside `(base + commission)` at 0.9.0.
+    return salary(lo, hi, currency=currency, period=period, basis="parsed")
 
 
 def google_salary(raw) -> dict:
@@ -567,7 +888,41 @@ def _placeless_head(head: str) -> bool:
     return h in _PLACELESS
 
 
-def split_place(raw) -> dict:
+# THE SEPARATORS A VENDOR USES BETWEEN PLACES, in one place because two lists of the
+# same thing is the drift this package has paid for three times (three URL parsers, two
+# remote-vs-place tuples, `_PLACELESS` derived from `_QUAL_NOISE` rather than restated).
+#
+# `dedup.normalize_location` DELIBERATELY DOES NOT USE THIS -- see its docstring. That is
+# a decision, not an oversight, and single-sourcing the constant is what makes the
+# difference visible instead of accidental.
+LOCATION_SEPARATORS = r"[;|\u2022]"
+
+
+def _country_is_not_a_city(place: dict) -> dict:
+    """A parsed `city` that IS a country name is not a city.
+
+    Replaces an earlier comma-based guard that was measurably worse: nulling any
+    comma-bearing city flipped `remote_scope`'s `has_city` gate and made 9 measured
+    parts publish a list of OFFICE ADDRESSES as a stated remote-eligibility boundary
+    ("Seattle, San Francisco, New York" asserting US-NY). This predicate cannot do
+    that, because a real city is not a country name -- which is precisely the thing
+    split_place was confused about. Every office shape holds: "Austin, Texas, United
+    States", "Costa Mesa, California, United States", "Munich, Germany" and "Waco, TX"
+    all still return (None, None) from remote_scope.
+
+    The nulls it DOES cause flip that gate the right way: "Singapore, Singapore" ->
+    ['SG'] and "Canada, United States (Remote)" -> ['CA','US'] are stated boundaries
+    the country-in-the-city-column error was suppressing. 9 rows gain one, 0 values
+    change. Two-letter values are left alone -- country_code passes any two letters
+    through, and "Waco, TX" must not lose its city to that.
+    """
+    c = place["city"]
+    if c and len(c.strip()) > 2 and country_code(c) is not None:
+        return {**place, "city": None}
+    return place
+
+
+def _split_place_inner(raw) -> dict:
     """A free-text location -> {city, state, country}, or None where it cannot be
     read with confidence.
 
@@ -656,12 +1011,41 @@ def split_place(raw) -> dict:
                 "state": state,
                 "country": country,
             }
-    if tail.upper() in _US_STATES:
+    # GEORGIA IS AN ACCEPTED COLLISION, measured rather than waved through. Exactly
+    # four US state/territory NAMES are also ISO 3166-1 country names -- american
+    # samoa, guam, puerto rico and georgia -- and the first three resolve to the SAME
+    # alpha-2 under both registers (AS/GU/PR), so they cannot be read wrong. Only
+    # georgia differs: USPS GA against ISO GE, so "Tbilisi, Georgia" reads as US here.
+    # Vetoing the name was tried and is much worse: 401 rows in the consumer's
+    # production store have ", Georgia" in `location` -- Atlanta 179, Alpharetta 15,
+    # Marietta, Snellville, Lawrenceville -- and none is Georgian. This is the same
+    # trade _COUNTRY_CODES already makes by omitting the name, pinned by a test.
+    # (`jordan` and `chad` are NOT state names and were never at risk on this path.)
+    # `georgia` IS VETOED HERE AND ONLY HERE -- the two-part bare tail, where nothing
+    # in the string corroborates the US. Exactly four US state/territory NAMES are also
+    # ISO 3166-1 country names (american samoa, guam, puerto rico, georgia) and the
+    # first three resolve to the SAME alpha-2 under both registers, so only georgia can
+    # be read wrong: USPS GA against ISO GE.
+    #
+    # SCOPE IS THE WHOLE POINT. Measured on the consumer's 67,481-row store, 401 rows
+    # carry ", Georgia": 283 of them read "..., Georgia, United States" and are decided
+    # by the country branch BELOW, never here, so they keep their state. The 118 that
+    # reach this branch are the ambiguous ones -- 107 US, and 11 the Republic of Georgia
+    # (Tbilisi 10, Adjara 1). A veto placed inside us_state_code() instead would have
+    # broken all 283.
+    #
+    # The trade, stated plainly: 107 rows forgo a gain and return to the all-None they
+    # already have today, to stop 11 rows INVENTING country="US" for Georgian jobs --
+    # which, in a US-only consumer, surfaces them to US seekers. Forgone gains against
+    # invented values is not a symmetric trade. `_coerce`'s country-agreement gate
+    # cannot rescue these: 9 of the 11 carry no adapter country to disagree with.
+    _st = None if tail.lower() == "georgia" else us_state_code(tail)
+    if _st and tail.lower() not in _COUNTRY_CODES:
         # The state is real whether or not the head names a city, so a placeless
         # head loses only the city -- "Remote, TX" is a Texas row with no city.
         return {
             "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
-            "state": tail.upper(),
+            "state": _st,
             "country": "US",
         }
     # A NAME only, never a bare two-letter tail. country_code() passes any two
@@ -671,14 +1055,70 @@ def split_place(raw) -> dict:
     # "Paris, FR" to avoid inventing a country for every Canadian city.
     code = country_code(tail) if len(tail) > 2 else None
     if code:
-        # Same as above: the country the string names survives, the invented city
-        # does not -- "Remote, France" is a French row with no city.
+        # SPLIT THE HEAD AGAIN when it still carries a comma, symmetric with the
+        # three-part branch above. "Costa Mesa, California, United States" reaches
+        # here with head="Costa Mesa, California", and returning that head whole
+        # wrote the subdivision into `city` and left `state` null on 1,578 measured
+        # greenhouse rows -- 11,447 of 67,481 rows in the consumer's production
+        # store. The three-part branch already does exactly this; it was simply
+        # gated on len(tail)==2, so a spelled-out country never reached it.
+        place_city = head
+        place_state: str | None = None
+        # A SOLE HEAD THAT NAMES A SUBDIVISION OR A REGION IS NOT A CITY. "Remote -
+        # Illinois, USA" names a state and "LATAM, Brazil" names a region; writing
+        # either into `city` is the category error this module refuses to create, and
+        # re-splitting the head (below) cannot catch it because there is no comma to
+        # split on. Measured on 44 corpus parts, every one a genuine subdivision
+        # ("California, USA, Remote", "Colorado, United States"): zero real cities are
+        # lost, because a "City, ST" string exits at the US-state branch above and
+        # never reaches here, and "New York, New York, United States" keeps its city
+        # via the comma-bearing path below.
+        #
+        # The state is LIFTED rather than discarded -- the string really does state a
+        # boundary, and that is the field for it.
+        if "," not in head:
+            sole = us_state_code(head) if code == "US" else None
+            if sole:
+                return {"city": None, "state": sole, "country": code}
+            if " ".join(head.lower().split()) in set(_REMOTE_REGIONS):
+                return {"city": None, "state": None, "country": code}
+        if "," in head and not _head_is_a_list(head):
+            maybe_city, _, maybe_region = head.rpartition(",")
+            maybe_city, maybe_region = maybe_city.strip(), maybe_region.strip()
+            st = us_state_code(maybe_region) if code == "US" else None
+            # A US region that does not resolve is NOT discarded -- this may only
+            # canonicalize, never lose a value, the same rule engine._coerce holds
+            # for `state`. Outside the US the subdivision has no canonical form and
+            # is dropped, which is what the three-part branch already does.
+            if maybe_city and (st or code != "US"):
+                place_city, place_state = maybe_city, st
+                # The re-split can EXPOSE a region that was hidden inside a compound
+                # head: "Americas, Europe, Israel" leaves "Americas, Europe", and
+                # splitting it yields the single token "Americas". _head_is_a_list
+                # cannot see this -- it counts COUNTRY names and a continent is not
+                # one -- so without this the re-split turns visible junk into
+                # plausible junk, which is the worse of the two.
+                if " ".join(place_city.lower().split()) in set(_REMOTE_REGIONS):
+                    return {"city": None, "state": place_state, "country": code}
         return {
-            "city": None if _placeless_head(head) or _head_is_a_list(head) else head,
-            "state": None,
+            "city": None
+            if _placeless_head(place_city) or _head_is_a_list(place_city)
+            else place_city,
+            "state": place_state,
             "country": code,
         }
     return empty
+
+
+def split_place(raw) -> dict:
+    """Public entry: the parser above, then the country-is-not-a-city predicate.
+
+    A wrapper rather than a guard inside each branch, because there are five return
+    points and a rule applied at four of them is the drift this package keeps paying
+    for. It runs AFTER the re-split by construction, which is what keeps its
+    population at the residual instead of every "City, Subdivision, Country" row.
+    """
+    return _country_is_not_a_city(_split_place_inner(raw))
 
 
 # Multi-country regions and timezone bands a remote role can be bounded to. These are NOT
@@ -818,6 +1258,30 @@ _REMOTE_STRIP = re.compile(
     re.I,
 )
 
+# A location that NAMES AN ARRANGEMENT. Separate from `_REMOTE_STRIP` -- which is a
+# rewriting pattern and carries `\(\s*\)` for the brackets it leaves behind -- because this
+# one is a QUESTION, and "( )" is not an answer to it. `distributed` and the
+# `_REMOTE_ANYWHERE` words are members here and not there for the same reason: they say
+# what the arrangement is without being noise to strip out of an address.
+_STATES_AN_ARRANGEMENT = re.compile(
+    r"(?<![a-z])(?:remote|hybrid|onsite|on-site|wfh|work from home|telecommute|telework"
+    r"|distributed|anywhere|world[- ]?wide|globally|global|any location)(?![a-z])",
+    re.I,
+)
+
+
+_ARRANGEMENT_COMPOUND = re.compile(
+    r"(?<![-\w])(?:remote|hybrid|onsite|on-site|wfh|telecommute)-([A-Za-z]+)", re.I
+)
+
+
+def _compound_fragment_is_a_place(frag: str) -> bool:
+    return bool(
+        (country_code(frag) if len(frag) > 2 else None)
+        or us_state_code(frag)
+        or US_LOCATION_RE.fullmatch(frag)
+    )
+
 
 def strip_arrangement(s: str) -> str:
     """Remove the work-arrangement words and any brackets they leave behind.
@@ -833,6 +1297,9 @@ def strip_arrangement(s: str) -> str:
     Bounded rather than `while True`: this converges in two passes on every real input, and
     an unbounded loop over user-supplied text is a hang waiting for a pathological string.
     """
+    s = _ARRANGEMENT_COMPOUND.sub(
+        lambda m: m.group(0) if _compound_fragment_is_a_place(m.group(1)) else " ", s
+    )
     for _ in range(4):
         out = _REMOTE_STRIP.sub(" ", s)
         if out == s:
@@ -864,6 +1331,26 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
 
     ALL matches, not the longest. "Remote - US & Canada" is two countries, and 13 measured
     rows name several US states; a scalar picked one arbitrarily and dropped the rest.
+
+    A LOCATION THAT NAMES NO ARRANGEMENT STATES NO AREA. `has_city` was carrying that alone
+    and it is a PROXY that fails open: it reads
+    `split_place(...)["city"]`, so a string the parser merely could not read -- "San Mateo,
+    CA United States" (no comma before the country), "London, UK", "US > Arizona > Phoenix"
+    -- came back `city=None` and its office country was published as an eligibility
+    boundary. Measured at 781e504: 509 rows on the prose path, 486 of them not remote at
+    all, plus 4,038 in a 67,481-row production store. The rule is this docstring's own
+    ("STATED ONLY"), applied one level earlier than the proxy, and it is a strictly
+    stronger test -- a string with no arrangement word cannot be stating a remote bound no
+    matter what the address parser makes of it.
+
+    Deliberately NOT a fix to `has_city`: nulling a comma-bearing city instead was measured
+    at 2,037 rows newly asserting an office address as a boundary, including the
+    "Costa Mesa, California, United States" that this module's own test pins. The narrow
+    predicate that WAS safe there now lives in `_country_is_not_a_city`.
+
+    `scoring.remote_signal` is unaffected: it only reaches here inside
+    `if _REMOTE_RE.search(location)`, whose alternation is a subset of this gate's, so the
+    check is a no-op on that path rather than a second opinion that could disagree.
     """
     s = _flatten(raw).strip()
     if not s:
@@ -927,8 +1414,15 @@ def remote_scope(raw) -> tuple[list[str] | None, list[str] | None]:
     # which is the honest answer when the alternative is calling New York a restriction.
     guards = named | {_STATE_NAMES[m.group(0)] for m in _STATE_NAME_RE.finditer(low)}
 
+    # GOVERNS AREAS ONLY, for the reason the city test already governs areas only: a region
+    # name is never an office address, so it needs no arrangement word to be a real
+    # statement. Measured at 781e504 -- of the locations with no arrangement word that still
+    # yielded a boundary, 622 were areas and ZERO were regions, so gating regions too bought
+    # nothing and cost "Bengaluru, Karnataka, India, APAC", which states APAC and says
+    # nothing about remoteness. The suite caught that; the corpus then showed the whole
+    # defect was areas.
     areas: set[str] = set()
-    if not has_city:
+    if not has_city and _STATES_AN_ARRANGEMENT.search(s):
         areas = set(named)
         # A bare US state with no city -- "Remote - TX". `US-TX`, not `TX`: seven codes are
         # both a US state and an ISO country (AR CA CO DE ID IL IN), so a bare code left the
@@ -1008,13 +1502,171 @@ SENIORITY_BASES = frozenset({"stated", "title"})
 # `posted_basis` -- see util.posted_from / sources.posted_from_relative.
 POSTED_BASES = frozenset({"stated", "relative"})
 
-# `salary_basis` -- `estimated` rides in salary_estimated_* rather than here, so a
-# figure in salary_min is always one an employer committed to.
+# `salary_basis` -- there is deliberately no `estimated` member, so a figure in
+# salary_min is always one an employer committed to.
 # `parsed` = read out of a vendor's free-text salary string (google_jobs' "47-55 an
 # hour"); `stated` = the vendor sent real numeric fields. `estimated` is deliberately
-# absent -- a model's guess rides in salary_estimated_* instead, so a figure in
-# salary_min is always one an employer committed to.
+# absent -- a model's guess is DISCARDED rather than given a column, so a figure in
+# salary_min is always one an employer committed to. The salary_estimated_* pair that
+# used to carry them was removed at 0.9.0 -- NOT because it was empty (it read 0 of
+# 102,799 only on a harvest whose source mix excluded the one adapter that fills it;
+# the live consumer's store holds 6,633), but because nothing downstream ever read it.
+# The protection is `engine.derive_salary`'s PREDICTED_PAY_SOURCES guard, which
+# refuses by SOURCE. An earlier version of this line said it "rides on the adapter
+# emitting no display string at all", which credited a line that refused nothing:
+# measured on 1a1414d, a predicted row still carrying the en-dash fake range
+# `$129,584–$129,584` parsed straight into salary_min with basis="parsed".
 SALARY_BASES = frozenset({"stated", "parsed"})
+
+# `salary_currency_basis` -- HOW the currency beside a figure was decided, including
+# when it was DELIBERATELY NOT decided. A third axis from `salary_basis` (how the
+# figure was extracted) and `salary_kind` (what the figure measures).
+#
+# THE REFUSAL WAS INVISIBLE, WHICH IS THE BUG THIS FIXES. `_adjacent_evidence` sets a
+# currency only when exactly one ISO code sits in its window, because `$` is shared by
+# USD/CAD/AUD/SGD/HKD/MXN. That refusal is correct and stays. But it left 15,098 of
+# 41,944 amount-bearing rows (36.0%) carrying a bare number, indistinguishable from a
+# row nobody asked about -- so `ORDER BY salary_min` sorts an unlabelled 11 next to an
+# unlabelled 60,000,000. The fix is to LABEL the refusal, not to end it.
+#
+#   vendor_field   the source published a currency as structured data, before any text
+#                  pass ran. 12,299 rows, and NOT the same fact as iso_adjacent:
+#                  a vendor-structured salary's display string is SYNTHESIZED by the
+#                  adapter, so `text.find(display)` fails and no window is ever read
+#                  on 12,142 of them -- 98.7% (ashby, lever, himalayas, braintrust, jobicy).
+#                  NOT `by construction`, which an earlier version of this comment
+#                  claimed and which is false: the display IS locatable on 157 rows
+#                  (1.3%), and 20 of those hold exactly one ISO code in the window,
+#                  so the employer really did write a code beside that figure. The
+#                  label is still right, because a basis names WHAT DECIDED the
+#                  value and on all 12,299 that was the vendor's field, corroborating
+#                  text or not. Folding them into `iso_adjacent` would instead assert
+#                  the employer wrote the code that decided it -- the same class of
+#                  provenance lie that the remote-basis vocabulary already had to
+#                  unpick, where six adapters labelled a board-wide fact `stated`.
+#   iso_adjacent   exactly one ISO code in the window. 14,547 rows.
+#   ambiguous      two or more codes in the window, so the currency was REFUSED on
+#                  purpose. 89 rows -- and hand-read, 86 are genuine dual-currency
+#                  postings (`Canada Base Salary Band ... / USA Base Salary Band ...`,
+#                  one quoting three). The employers declined to pick; neither do we.
+#   absent         no ISO code was found in the window, OR the figure could not be
+#                  located in the body at all. 15,009 rows. THE `OR` IS THE
+#                  DEFINITION, not an implementation detail: 15,004 rows had a
+#                  window that held no code, and on 5 the body is non-empty but
+#                  `text.find(display)` fails -- a spacing or punctuation difference
+#                  between the display string and the prose -- so no window was ever
+#                  built. 0.01%, and stated as 0.01%. Those two states are
+#                  deliberately conflated: a consumer behaves identically on both,
+#                  and a fifth member reading `5` in the census is exactly how
+#                  `posted_basis` ended up carrying one value across a whole corpus.
+#                  Written out so the five are not rediscovered later as a defect.
+#
+# [instrumented over _reports/full_flat_raw.ndjson, harvest 2026-08-25, 103,489 rows;
+# sources.py/engine.py/vocab.py blob-identical to the tree that produced it]
+SALARY_CURRENCY_BASES = frozenset(
+    {"vendor_field", "iso_adjacent", "ambiguous", "absent"}
+)
+
+# `salary_kind` -- WHAT QUANTITY the figure measures. A different axis from
+# `salary_basis`, which records only HOW it was extracted, and the gap between them is
+# why ~670 on-target-earnings bands and a $32,000-$48,000 new-hire EQUITY GRANT sat in
+# columns the README defines as what an employer COMMITTED to as base pay.
+#
+# THERE IS DELIBERATELY NO `hourly_rate`, although the brief for this field asked for
+# one. An hourly rate is base pay expressed per hour: the QUANTITY is base, the INTERVAL
+# is `salary_period == "hour"`, and that column is already populated on 2,106 rows.
+# Two columns encoding one fact is how they drift -- measured before deciding, the two
+# signals already disagree on 430 rows (288 where a window says "per hour" and the
+# period does not, 142 the other way). `department` and `team` cost a release to unpick
+# for exactly this reason. Hourly cues therefore resolve to `base`.
+#
+# `unspecified` MEANS NO QUANTITY WORD IN THE WINDOW -- not a word judged
+# insufficiently specific, and never a guess. A bare `Salary Range` / `Pay Range` IS a
+# label; a figure with nothing near it is not. Inferring `base` from absence is the
+# "default an unknown to a plausible value" the contract forbids everywhere else.
+# 41.8% of rows with a salary display [102,799-row harvest, 2026-08-20], and the honest
+# floor under that is a SEPARATE fact: 28.0% cannot locate their display string inside
+# their own body at all, so there is no window to read. Those two were conflated in an
+# earlier version of this comment. WAS: 86.0% -- measured before the cue table accepted
+# bare quantity words. Do not lower this number by guessing.
+# `bonus` AND `total_comp` WERE REMOVED after their precision was measured, not
+# assumed. Blind labelling of rows the detector called each: `bonus` 0/25 and 0/25 (two
+# readers, one anchored), `total_comp` 3/22 and 5/25. Both far under the 40% line fixed
+# before the draw.
+#
+# THE CAUSE IS A CLASS, NOT A THRESHOLD: `+ bonus` after a figure means the bonus is NOT
+# IN IT. The cue is anti-correlated with the label, and proximity makes it worse -- the
+# nearer the word, the more certain the exclusion. No threshold fixes a signal pointing
+# the wrong way. Removal is mostly not a refusal either: 1,171 of the 1,815 rows land on
+# `base`, which is the right answer on 22 of 25 labelled rows.
+# `sponsorship` -- THREE states, not two. `conditional` is not a hedge on the schema, it
+# is where every hedged employer template goes: on a 190-row stratified hand-label,
+# conditional rows (33) OUTNUMBER `offered` (27), and they are repeating boilerplate
+# ("considers sponsorship on a case-by-case basis", "may be available for select
+# positions"). Without the state each one is forced into `offered` or `not_offered`, and
+# `offered` is exactly where the sign-flip cost lives -- a wrong `offered` sends a person
+# to spend an hour on an application they were never eligible for.
+#
+# `None` remains "the posting did not say", and stays the answer for ~91% of rows.
+SPONSORSHIP_STATES = frozenset({"offered", "conditional", "not_offered"})
+
+# `sponsorship_basis` -- HOW the polarity was decided, deliberately NOT where the text
+# was found. The brief specified `{requirements, body}`; measured, only 12.9% of
+# sponsorship occurrences sit in a typed `requirements` section, so that vocabulary would
+# read `body` on ~87% of rows and carry no information. A basis that is constant is
+# decoration, which the extraction plan forbids by name.
+#
+# `adjacent` WAS RULED IN AND IS NOT HERE, and that reverses half of a ruling on evidence
+# that did not exist when the ruling was made -- flagged, not quietly dropped. The path
+# it named decided 229 rows and was wrong on both of the scope-strings hand-checked out
+# of it, including a clean offer read as a refusal. A vocabulary member nothing emits is
+# the same smell that got two `salary_kind` members removed at 0.9.0, so it goes with the
+# code rather than sitting here describing a path that no longer exists.
+SPONSORSHIP_BASES = frozenset({"sentence"})
+
+# `clearance` -- THREE states, and the third is a sign flip if you omit it. 2,191 of
+# 5,585 clearance rows (39.2%) say a candidate must be ABLE TO OBTAIN a clearance rather
+# than already hold one; folding those into `required` tells an eligible US citizen the
+# job is closed to them.
+CLEARANCES = frozenset({"required", "obtainable", "mentioned"})
+
+# `clearance_basis` -- here the section vocabulary DOES do real work, unlike
+# sponsorship's: 64.7% of the preference cues that decide a clearance's state are the
+# enclosing `requirements` section's own heading rather than anything in the sentence.
+# THAT 64.7% IS ABOUT WHERE `_PREFERRED` CUES SIT, and it must not be restated as
+# "the cues that decide the state" -- the README said exactly that and it was a
+# different quantity. Measured on the shipped detector: `requirements` is the basis
+# on 3,262 of 5,623 labelled rows (58.0%), and on 66.8% of clearance EVENTS. Both
+# are real, neither is 64.7%, and a true number re-framed into a claim it was never
+# measured for is how a correct figure becomes a false sentence.
+CLEARANCE_BASES = frozenset({"requirements", "body"})
+
+
+SALARY_KINDS = frozenset({"base", "ote", "equity", "unspecified"})
+
+# `text_basis` -- what KIND of body this is, when it is not an ordinary one.
+#
+# THERE IS DELIBERATELY NO `full`. Seventeen adapters would have to claim it and nobody
+# has verified completeness for any of them, so `full` would assert something no
+# measurement supports -- the same reason `_coerce` refuses to default an unknown to a
+# plausible value. `None` here means "not characterized", which is the truth.
+#
+# `text is None` already carries "the source sent no body" (smartrecruiters, 250 of 250
+# rows), so that state needs no vocabulary entry of its own.
+#
+# `excerpt` -- the source itself truncates. Adzuna caps every description at 500
+# characters and ends it with an ellipsis: 275 of 275 rows on a local harvest, 7,146 of
+# 7,150 `[live prod, 2026-08-20]`, and `catalog/adzuna.md` has recorded
+# `median_chars: 500` plus "Description truncated" since 2026-08-03. A live probe
+# confirms the API carries no fuller field, and it reproduces on a non-tech query.
+# `synthesized` -- there was no prose body and the adapter BUILT one from structured
+# fields. Braintrust, 29 of 29 rows, ~157 characters of title plus skills.
+#
+# SET IN THE ADAPTER, NEVER SNIFFED. A `len == 500 and endswith("…")` detector would
+# mislabel the first Greenhouse posting that happens to be that shape; the Adzuna
+# adapter already knows it is Adzuna. Same discipline as reading a structured signal
+# instead of re-deriving it from prose.
+TEXT_BASES = frozenset({"excerpt", "synthesized"})
 
 
 def remote_type(raw) -> str | None:
@@ -1033,6 +1685,35 @@ def remote_type(raw) -> str | None:
 # The seniority words that can DECORATE a title. Every one of them can also BE a
 # job -- "Director of Engineering", "Team Lead", "Chief of Staff" -- which is what
 # the positional rule in decompose_title exists to protect.
+def _rank_key(word: str) -> str:
+    """A title word, folded to the ASCII key `_SENIORITY` is written in.
+
+    `_SENIORITY` is ASCII-keyed, so `senior` is a member and `senior` with a
+    circumflex is not, and `Senior Software Engineer` got a seniority while
+    `Senior Software Engineer` spelled the Portuguese way got `None`. P4 fixed the
+    neighbouring defect -- `_WORD_RE` was deleting the accented letter outright, so
+    the ROOT came back as a word no employer wrote -- and its register implied this
+    was the same bug. It is not: repairing the token still leaves it outside the
+    table, which is why this is a separate change.
+
+    24 rows in a 102,799-row harvest [corpus tree 515521d] contain a token that folds
+    into a `_SENIORITY` key -- `senior` accented 20, `junior` accented 4 -- and THREE
+    of them lead the title, which is the only position this table is consulted from.
+    The other 17 sit mid-title and are unreachable without also moving WHERE a rank
+    may be read, a much larger change with its own failure mode (`Member of the
+    Technical Staff`, `Tech Lead` -- a rank word that IS the role). A count of 20 was
+    circulated for this fix; it silently included that rule change. Fold the lookup,
+    do not move the position.
+
+    ZERO REVERSE RISK, measured rather than assumed: across all 102,799 titles the
+    only tokens that fold INTO a `_SENIORITY` key and are not already members are
+    those two words. Nothing else in the corpus collides.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFD", word.lower()) if not unicodedata.combining(c)
+    )
+
+
 _SENIORITY = {
     "jr": "junior", "junior": "junior", "sr": "senior", "senior": "senior",
     "staff": "staff", "principal": "principal", "lead": "lead",
@@ -1047,7 +1728,290 @@ _LEVEL = {
     "iii": "III", "3": "III", "iv": "IV", "4": "IV",
 }  # fmt: skip
 
-_WORD_RE = re.compile(r"[A-Za-z0-9+#/&]+")
+# Words a numeral QUALIFIES rather than levels: "Tier III", "Level 2", "Grade 4".
+# The numeral is real but it is not the role's level, and the antecedent is not
+# part of the role name either -- `Tier III Service Desk Engineer` is a Service
+# Desk Engineer.
+_LEVEL_ANTECEDENT = frozenset({"tier", "level", "grade", "band"})
+
+# A hyphen/dash/pipe/colon acting as a DELIMITER -- whitespace on at least one
+# side. See decompose_title for the measurement behind that test.
+_DECOR_RE = re.compile(r"\s+[-–—|:]+\s*|\s*[-–—|:]+\s+")
+
+# ── does this word name an OCCUPATION? ───────────────────────────────────────
+# MORPHOLOGY FIRST, VOCABULARY SECOND. English names an occupation with an AGENT
+# NOUN -- "one who does X" -- and that is a SUFFIX, not a word list: engineER,
+# directOR, scientIST, technicIAN, consultANT, superintendENT, millWRIGHT,
+# radioLOGIST. A rule written on the suffix generalises to industries nobody
+# enumerated; a word list only ever knows the jobs its author thought of.
+#
+# WHY THAT MATTERS HERE SPECIFICALLY: this corpus is 94 TECH boards. A list curated
+# against it silently under-performs on the lane it was not written for. Measured on
+# 67,481 PRODUCTION titles [live prod 2026-08-20] -- share carrying a recognisable
+# role noun:
+#
+#     source        list only   + morphology
+#     adzuna          94.3%        98.4%     <- the non-tech lane
+#     usajobs         90.2%        97.6%     <- the non-tech lane
+#     greenhouse      99.2%        99.6%
+#     ALL             98.5%        99.4%
+#
+# The suffix recovers Radiologist, Veterinarian, Underwriter, Millwright and
+# Sommelier -- none of which any hand-written list here would have held -- while
+# still rejecting Airbag, Ridehailing, Modeling, Guidance and G71.
+#
+# TWO EXCLUSIONS, both load-bearing: `Senior` ends in -or, and `Director` is a real
+# role. Seniority words and title noise are removed BEFORE the suffix test, or
+# `Senior, Applied AI Engineer` reads `Senior` as an occupation.
+# WHICH SUFFIXES EARN THEIR PLACE, measured on 67,481 production titles rather than
+# assumed. The precision of each was read off the words it actually catches:
+#
+#   -ist   panelist geologist receptionist phlebotomist pathologist radiologist  KEEP
+#   -ian   optician veterinarian physician clinician dietitian technician        KEEP
+#   -er    practitioner supplier owner provider ... but also customer center     keep
+#   -or    contractor vendor creator investor ... but also behavior floor motor  keep
+#   -wright millwright                                                           KEEP
+#   -ant   restaurant plant participant infant tenant grant want propellant      DROP
+#   -ent   development management client equipment content talent engagement     DROP
+#
+# `-ant` and `-ent` are dropped because they are overwhelmingly ordinary nouns, and
+# a FALSE POSITIVE here is not harmless: it suppresses a fall-through that should
+# have happened. `Plant 3 - Journeyman Millwright` rooted at `Plant` for exactly
+# that reason. The genuine `-ant`/`-ent` occupations (consultant, accountant, agent,
+# superintendent) live in the irregulars below, where they cost nothing.
+#
+# `-er` and `-or` are kept despite similar noise because they carry most of the
+# occupational vocabulary in English, and their false positives (`center`, `power`)
+# are rarely the ONLY word in a leading segment.
+# TWO TIERS OF EVIDENCE, because a suffix is not a single quality of proof.
+#
+# STRONG suffixes are occupational almost without exception. WEAK ones (-er, -or)
+# carry most of English's occupational vocabulary AND most of its ordinary nouns, so
+# they are worth reading but not worth trusting on their own. Measured on 67,481
+# production titles: words passing by a BARE -er/-or are the only word in a leading
+# segment 206 times outside tech against 39 inside it -- 5.3x -- and roughly 80% are
+# not occupations at all (`cyber` 115, `owner` 14, `power` 12, `center` 10,
+# `career` 7, `worcester`, `prior`).
+#
+# Treating them as full proof cost 152 MASKED REGRESSIONS: `Call Center - Customer
+# Service Agent` rooted at `Call Center`, `Prior Law Enforcement - Court Security
+# Officer` at `Prior Law Enforcement`. Masked because the false positive SATISFIES a
+# "does the root still name a role" check -- `center` passes it -- so the defect is
+# invisible to the obvious metric. Only a two-tier comparison surfaces it.
+#
+# -man/-woman/-person/-hand/-wife/-mate are here because English builds plenty of
+# occupations that way and none of them are common in software: foreman, lineman,
+# longshoreman, herdsman, switchman, deckhand, midwife, journeyman, crewmate.
+# Their absence is exactly the tech-corpus bias this whole function was rewritten to
+# remove.
+_STRONG_SUFFIX = ("ist", "ian", "smith", "wright", "keeper", "master", "logist",
+                  "man", "woman", "person", "hand", "wife", "mate")  # fmt: skip
+_WEAK_SUFFIX = ("er", "or")
+
+#: how strongly a word claims to name an occupation. 0 no · 1 weak · 2 strong.
+ROLE_NONE, ROLE_WEAK, ROLE_STRONG = 0, 1, 2
+
+
+def _role_evidence(word: str) -> int:
+    """How strongly does this word claim to name an occupation? See the tiers above.
+
+    PLURALS AND SLASH-COMPOUNDS are read too, because employers write both and a
+    suffix test that only knows the singular silently fails on them. Measured on 500
+    genuinely non-tech titles [live Adzuna probe, 10 trades, 2026-08-20]: the only
+    roots naming no occupation at all were `WELDERS`, `Electricians`,
+    `Machinist/Tool & Die` and `Certified Medical Assistant/LPN` -- a plural `s` and
+    a `/` that `_WORD_RE` keeps inside the token. Both are morphology, not
+    vocabulary, so both are handled here rather than by adding words to a table.
+    """
+    lw = word.lower()
+    # `machinist/tool` -> test each side; a compound counts if any part is a role.
+    if "/" in lw:
+        # A part that is a RANK contributes nothing: `Senior/Lead Cyber Security -
+        # Incident Response Engineer` rooted at the rank compound because `lead` is
+        # in the irregulars table, which is consulted before the seniority exclusion.
+        # `Machinist/Tool` and `Technician/Electrician` are unaffected.
+        return max(
+            (
+                _role_evidence(part)
+                for part in lw.split("/")
+                if part and part not in _SENIORITY
+            ),
+            default=ROLE_NONE,
+        )
+    # `welders` -> `welder`, `electricians` -> `electrician`. Only when it leaves a
+    # real word behind, so `sales` and `operations` are not read as occupations.
+    if len(lw) > 4 and lw.endswith("s") and not lw.endswith("ss"):
+        singular = lw[:-1]
+        if singular in _ROLE_NOUN or (
+            len(singular) > 3
+            and singular.endswith(_STRONG_SUFFIX)
+            and singular not in _SENIORITY
+            and singular not in _TITLE_NOISE
+        ):
+            return ROLE_STRONG
+    if lw in _ROLE_NOUN:
+        return ROLE_STRONG
+    if lw in _SENIORITY or lw in _TITLE_NOISE:
+        return ROLE_NONE
+    if len(lw) > 3 and lw.endswith(_STRONG_SUFFIX):
+        return ROLE_STRONG
+    if len(lw) > 3 and lw.endswith(_WEAK_SUFFIX):
+        return ROLE_WEAK
+    return ROLE_NONE
+
+
+def _best_role_evidence(words) -> int:
+    return max((_role_evidence(w) for w in words), default=ROLE_NONE)
+
+
+def _is_role_noun(word: str) -> bool:
+    """Does this word name an occupation? Suffix first, irregulars second.
+
+    Used for ONE thing: deciding a segment is not a role at all, so `Airbag - Senior
+    Developer` does not root at `Airbag`. NOT the same question as "is this root any
+    good" -- `Manager` IS an occupation, and `Manager, Payments` correctly roots at
+    `Manager`. Falling through there would swap the role for its domain, which is
+    strictly worse and was measured before being rejected.
+    """
+    return _role_evidence(word) != ROLE_NONE
+
+
+# The IRREGULARS -- occupations English does not build from an agent suffix, so the
+# rule above cannot reach them. An EXCEPTION TABLE, not the decider: a name missing
+# from it degrades to the suffix test rather than to a wrong answer, which is the
+# whole point of the morphology-first order.
+_ROLE_NOUN = frozenset(
+    {
+        # the genuine -ant / -ent occupations, here because those two suffixes are
+        # dropped from _AGENT_SUFFIX for being overwhelmingly ordinary nouns
+        "consultant",
+        "accountant",
+        "attendant",
+        "superintendent",
+        "sergeant",
+        "lieutenant",
+        "assistant",
+        "agent",
+        "engineer",
+        "engineering",
+        "developer",
+        "architect",
+        "scientist",
+        "analyst",
+        "manager",
+        "director",
+        "lead",
+        "head",
+        "chief",
+        "officer",
+        "president",
+        "vp",
+        "designer",
+        "researcher",
+        "consultant",
+        "specialist",
+        "advisor",
+        "advocate",
+        "strategist",
+        "administrator",
+        "coordinator",
+        "associate",
+        "assistant",
+        "technician",
+        "programmer",
+        "tester",
+        "writer",
+        "editor",
+        "recruiter",
+        "accountant",
+        "controller",
+        "auditor",
+        "attorney",
+        "counsel",
+        "paralegal",
+        "nurse",
+        "physician",
+        "therapist",
+        "pharmacist",
+        "technologist",
+        "operator",
+        "driver",
+        "mechanic",
+        "electrician",
+        "welder",
+        "machinist",
+        "supervisor",
+        "representative",
+        "agent",
+        "clerk",
+        "cashier",
+        "server",
+        "cook",
+        "chef",
+        "teacher",
+        "instructor",
+        "tutor",
+        "professor",
+        "trainer",
+        "coach",
+        "intern",
+        "apprentice",
+        "fellow",
+        "partner",
+        "principal",
+        "staff",
+        "generalist",
+        "planner",
+        "buyer",
+        "estimator",
+        "inspector",
+        "scheduler",
+        "dispatcher",
+        "artist",
+        "animator",
+        "producer",
+        "marketer",
+        "seller",
+        "salesperson",
+    }
+)
+
+# THE CHARACTER CLASS IS THE TOKENIZER, and `title_root` is REBUILT by joining what
+# it finds -- so a character missing here is not ignored, it is DELETED, and the word
+# splits at the hole. This was ASCII-only, which meant `Sênior Security Engineer` came
+# out as `S nior Security Engineer`: a string no employer wrote, emitted as the
+# matchable form of the role. 155 rows / 115 distinct titles, 101 of them getting a
+# corrected root [102,799-row harvest, 2026-08-20]. It is the only field in the record
+# that was manufacturing text rather than dropping it.
+#
+# LATIN ONLY, DELIBERATELY, and the obvious fix is the wrong one. `[\w+#/&]+` is
+# Unicode-wide and also un-drops CJK, Hangul, Katakana and Cyrillic -- which sounds
+# strictly better and is not, because on a BILINGUAL title the ASCII-only class was
+# accidentally acting as an English extractor and doing it well. Measured over all 450
+# distinct non-ASCII titles: Latin-only changes 115, full `\w` changes 200, and all 85
+# extra are regressions -- `Cloud Infrastructure Engineer / クラウドインフラエンジニア`
+# roots at `Cloud Infrastructure Engineer` today and would root at the whole bilingual
+# string. The cost of scoping it this way is real and small: 8 titles in that corpus
+# have a root that is the entire unparsed title, and full `\w` repairs 6 of them where
+# this repairs 0. 6 forgone against 85 avoided.
+#
+# `×` (U+00D7) AND `÷` (U+00F7) ARE EXCLUDED by the two range breaks. Both sit inside
+# the Latin-1 Supplement letter block and are math operators, not letters.
+# U+0300-036F (combining diacritics) is in the class for NFD input, where `Sênior` is
+# `S` + `e` + a combining circumflex: without it the class splits at the mark and
+# reproduces the exact bug above. Zero rows in this corpus are NFD -- it is here
+# because a corpus covering 11 of 19 sources cannot prove a vendor never sends it, and
+# it was verified to change nothing that is measurable (115 either way, byte-identical
+# `decompose_title` output on all 450).
+#
+# `+#/&` PREDATE ALL OF THIS and must not be lost: they keep `C++`, `C#`, `and/or` and
+# `R&D` as single tokens. `_` stays OUT -- it is a separator here, which is why the
+# class is a union rather than `\w`.
+#
+# THIS DOES NOT FIX `seniority`. `_SENIORITY` is keyed on ASCII, so `sênior` is still
+# not a member and the seniority of those rows stays None -- measured, 7 non-null
+# before and 7 after. Accent-folding the lookup is a separate change.
+_WORD_RE = re.compile(r"[A-Za-z0-9À-ÖØ-öø-ɏ̀-ͯḀ-ỿ+#/&]+")
 
 
 def decompose_title(title: str) -> dict:
@@ -1080,27 +2044,167 @@ def decompose_title(title: str) -> dict:
         if piece:
             quals.extend(x.strip() for x in re.split(r"[(),]", piece) if x.strip())
     stem = _QUAL_RE.sub("", t)
+
+    # THE DELIMITER DECIDED EVERYTHING, AND ONLY COMMAS WORKED. `_QUAL_RE` has no
+    # alternative for a dash, pipe or colon, so decoration after one was never
+    # captured -- and worse, the delimiter itself was deleted and the tail welded
+    # into the root: `Forward Deployed Engineer - Tokyo` -> `Forward Deployed
+    # Engineer Tokyo`, a role name no employer wrote and no search matches.
+    # Measured [local 94-board harvest, 0.9.0, 2026-08-20]: comma-only titles 3,262,
+    # decoration captured on 99.9%; dash-only titles 1,388, captured on 17.2%. The
+    # same decoration, handled two opposite ways, decided by which key the employer
+    # happened to press.
+    #
+    # WHITESPACE ON AT LEAST ONE SIDE is the whole test, and it is measured rather
+    # than assumed: 1,605 titles have a spaced hyphen, 132 a spaced pipe, 80 a
+    # `word- ` (right space only), 52 an en-dash, 35 a `word: `, 18 an em-dash, 7 a
+    # ` -word` (left space only) -- against 222 with an INTRA-word hyphen
+    # (`Full-Stack`, `Go-to-Market`) which must never split. Requiring spaces on both
+    # sides would miss 122 of them; requiring none would shatter 222.
+    #
+    # This regex is LOCAL and deliberately not added to `dedup._QUAL_RE`: that table
+    # feeds `_marks`, which decides merges, and a wrong merge deletes a job.
+    segs = [s.strip(" -–—|:") for s in _DECOR_RE.split(stem)]
+    segs = [s for s in segs if s]
+    if len(segs) > 1:
+        stem = segs[0]
+        for tail in segs[1:]:
+            quals.extend(
+                x.strip().lower() for x in re.split(r"[(),]", tail) if x.strip()
+            )
+
+    # EVERY candidate segment, in the order the employer wrote them and in their
+    # ORIGINAL case: the delimiter-split pieces, then whatever `_QUAL_RE` lifted out
+    # (a trailing comma clause or a parenthetical). The role-noun rule below has to
+    # see BOTH, because the two paths produce the same defect. `Airbag - Senior
+    # Developer` roots at a product via the dash path; `Ridehailing, Site Reliability
+    # Engineer` roots at a domain via the comma path -- and `Senior, Applied AI
+    # Engineer` roots at the word `Senior`, which is not a role at all.
+    cand = list(segs)
+    for m in _QUAL_RE.finditer(t):
+        piece = (m.group(1) or m.group(2) or "").strip()
+        if piece:
+            cand.extend(x.strip() for x in re.split(r"[(),]", piece) if x.strip())
     toks = _WORD_RE.findall(stem)
+    # A SEGMENT THAT IS PURE DECORATION IS NOT A ROOT. `REMOTE -Principal Software
+    # Developer- Agentic AI` leads with a noise word, and taking segment 0 blindly
+    # would root the posting at `REMOTE`. The existing rule was "stripping never
+    # empties the root, it falls back to the whole title"; this extends it one step
+    # -- try the next segment BEFORE falling back, because a later segment is a real
+    # phrase from the same title while the whole title is the unparsed string.
+    if segs and not [w for w in toks if w.lower() not in _TITLE_NOISE]:
+        for alt in segs[1:]:
+            alt_toks = _WORD_RE.findall(alt)
+            if [w for w in alt_toks if w.lower() not in _TITLE_NOISE]:
+                toks = alt_toks
+                break
+    # A SEGMENT THAT NAMES NO ROLE IS NOT A ROOT EITHER. Employers put a requisition
+    # number, a company, a product or a programme in front of the role:
+    # `Airbag - Senior Developer`, `RQ11391 - Solutions Designer`, `G71 - Full Stack
+    # Engineer`, `Dynamo AI — Forward Deployed Engineer`. Segment 0 is the DOMAIN and
+    # the role is further right -- the mirror of the usual shape, and taking segment
+    # 0 roots the posting at a req number. 28 rows [local 94-board harvest, 0.9.0,
+    # 2026-08-20], every one of them wrong before this.
+    #
+    # THE TEST IS "CONTAINS NO ROLE NOUN AT ALL", never "contains a weak one". A
+    # `Manager, Payments` posting roots at `Manager` and must keep doing so: falling
+    # through on a GENERIC role swaps the role for its domain and is strictly worse.
+    # That distinction is why this is safe and why the bare-generic-noun version of
+    # the idea was measured, found to invert role and domain, and not built.
+    elif len(cand) > 1 and _best_role_evidence(toks) < ROLE_STRONG:
+        # STRICTLY BETTER EVIDENCE WINS -- the whole point of the two tiers.
+        # `Call Center - Customer Service Agent`: segment 0 offers only `center`
+        # (weak, -er) while a later one offers `agent` (strong), so the later one is
+        # the role. Requiring "no evidence at all" in segment 0 left 152 production
+        # titles rooted at `Call Center` / `Prior Law Enforcement` / `Power System
+        # Studies` / `Worcester County South`.
+        #
+        # A STRONG segment 0 is never overridden: `Manager, Payments` roots at
+        # `Manager`, because promoting there would swap the role for its domain --
+        # measured, and the reason the bare-generic version of this was rejected.
+        #
+        # THE BEST CANDIDATE, NOT THE FIRST BETTER ONE. `MA- Worcester County South-
+        # RN Case Manager` splits three ways: `MA` (none), `Worcester County South`
+        # (weak) and `RN Case Manager` (strong). Taking the first improvement roots
+        # it at a COUNTY.
+        best: tuple[str, str] | None = None
+        best_score = _best_role_evidence(toks)
+        for alt in cand[1:]:
+            # A candidate lifted out of a comma clause may carry its own decoration
+            # (`Forward Deployed Engineering - EMEA`); split it the same way segment 0
+            # was, or the tail is welded back into the root.
+            alt_head = next(
+                (s.strip(" -–—|:") for s in _DECOR_RE.split(alt) if s.strip(" -–—|:")),
+                alt,
+            )
+            score = _best_role_evidence(_WORD_RE.findall(alt_head))
+            if score > best_score:
+                best, best_score = (alt, alt_head), score
+            if score == ROLE_STRONG:
+                break  # nothing beats strong; keep the leftmost one that has it
+        if best is not None:
+            alt, alt_head = best
+            # The segment stepped over is decoration, not nothing -- `Airbag` and
+            # `Ridehailing` are the role's DOMAIN and belong in `title_qualifiers`.
+            # Dropping them silently lost a token on 24 titles.
+            skipped = " ".join(toks).strip().lower()
+            if skipped and skipped not in quals:
+                quals.append(skipped)
+            # ...and the segment PROMOTED to root is no longer a qualifier.
+            promoted = alt.strip().lower()
+            quals = [q for q in quals if q not in (promoted, alt_head.lower())]
+            toks = _WORD_RE.findall(alt_head)
 
     seniority = level = None
     i = 0
-    while i < len(toks) - 1 and toks[i].lower() in _SENIORITY:
+    # `_rank_key`, not `.lower()` -- the table is ASCII and the corpus is not.
+    while i < len(toks) - 1 and _rank_key(toks[i]) in _SENIORITY:
         if toks[i + 1].lower() == "of":
             break  # head noun -- "Director of Engineering" IS a Director
         if seniority is None:
-            seniority = _SENIORITY[toks[i].lower()]
+            seniority = _SENIORITY[_rank_key(toks[i])]
         i += 1
 
-    root_words = []
-    for w in toks[i:]:
+    root_words: list[str] = []
+    for j, w in enumerate(toks[i:]):
         lw = w.lower()
-        if lw in _LEVEL and level is None:
+        # A LEVEL MARK FOLLOWS THE ROLE; A LEADING NUMERAL IS A COUNT. `2 Full Stack
+        # AI Engineer, 1 GTM` is a headcount and read as level II; `Tier III Service
+        # Desk Engineer` is a support tier, read as level III, and the root came back
+        # mangled to `Tier Service Desk Engineer` with the III removed. Requiring at
+        # least one preceding word costs nothing real -- no employer writes `II
+        # Engineer` -- and refusing to set a field can never mis-select a value.
+        # 4 rows [local 94-board harvest, 0.9.0, 2026-08-20].
+        if lw in _LEVEL and level is None and j > 0:
+            # `Tier III` / `Level 2` / `Grade 4`: the numeral qualifies the word
+            # before it, and that word is not the role either.
+            if root_words and root_words[-1].lower() in _LEVEL_ANTECEDENT:
+                root_words.pop()
+                continue
             level = _LEVEL[lw]
             continue
         if lw in _TITLE_NOISE:
             continue
         root_words.append(w)
     root = " ".join(root_words).strip(" -–—,/")
+    # A LEVEL OR A SENIORITY WORD IS NOT A ROLE, and "never empty" was not a strong
+    # enough guard. `Staff II, Computer Vision Engineer` -> the comma clause goes to
+    # qualifiers, `Staff` is stripped as seniority, and the level guard above
+    # deliberately refuses to consume a numeral it cannot place -- leaving `II` as a
+    # NON-EMPTY root, so the `root or t` fallback never fired. 4 production rows
+    # (`Associate II, CMC Operations`, `Lead II, Category Management`, ...), and the
+    # class is a SHAPE -- any `<seniority> <level>, <role>` title reaches it.
+    #
+    # Introduced by the level-antecedent guard itself: before it, `II` was consumed
+    # as a level and the root came back empty, which the fallback did catch.
+    # LEVELS ONLY, and the distinction is load-bearing. `_SENIORITY` holds `director`,
+    # `vp`, `head`, `chief`, `associate` and `lead` -- every one of them a REAL ROLE as
+    # well as a rank. Blanking those sent `Director, Investor Relations` and `VP,
+    # Product` back to the whole unparsed title, which is worse than the bare
+    # `Director` they had before: caught by hand-reading 150 rows, ~16 of them.
+    # A bare `II` is never a role; a bare `Director` is.
+    if root_words and all(w.lower() in _LEVEL for w in root_words):
+        root = ""
 
     return {
         "title_root": root or t,  # never empty; falls back to the whole title

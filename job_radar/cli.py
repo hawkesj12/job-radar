@@ -209,8 +209,21 @@ def cmd_scan(args, cfg):
     # and Remotive both state they will revoke API access if their name is not shown
     # as the source. Only the sources that actually contributed are credited --
     # crediting a source that returned nothing is noise, and noise gets ignored.
+    # `emit._sources`, not an inline `r.get("sources") or [r.get("source")]`. THE THIRD
+    # EXIT of the same defect, missed when the other two were fixed. `merged` holds
+    # STORE rows, whose `source` column is `", ".join(sorted(tokens))` -- so on a
+    # cross-source merge the inline form yielded one token literally named
+    # "adzuna, greenhouse", which resolves against no attribution entry and is dropped
+    # in silence. 12 such fabricated tokens in a 7,568-row local harvest.
+    #
+    # Nobody is under-credited on that corpus, and the reason is luck rather than
+    # design: every source in a merged row also appears in at least one single-source
+    # row, so it gets credited there. A low-volume source whose rows ALL merged would
+    # go uncredited with no error -- and adzuna and himalayas, both present in merged
+    # rows here, are among the sources that require attribution as a condition of API
+    # access. Latent, not harmless.
     credit = attribution.credit_line(
-        {s for r in merged for s in (r.get("sources") or [r.get("source")]) if s}
+        {s for r in merged for s in (emit._sources(r) or ()) if s}
     )
     if credit:
         print(f"\n{credit}")
@@ -231,11 +244,11 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
     each holds half of what the feed needs:
 
       * the HARVEST row (`by_key`) carries the 0.7.0 contract -- structured location,
-        remote + basis, category/team/parent_company, salary, tags, seniority
+        remote + basis, category/team, salary, tags, seniority
       * the STORE row (`merged`) carries the HISTORY -- id, first_seen, status, and
         any llm_score
 
-    The store is a nineteen-column CSV and deliberately does not persist the contract
+    The store is an eighteen-column CSV and deliberately does not persist the contract
     fields, so emitting straight from `merged` would produce a feed of nulls that
     looked structurally correct. Emitting straight from the harvest would lose
     `status`, so a consumer could not tell an applied role from a new one. Join them
@@ -256,7 +269,10 @@ def _emit_ndjson(args, cfg, merged, surfaced, errors, discovered, by_key):
         joined["text"] = harvested.get("text") or joined.get("text")
         joined["sources"] = harvested.get("sources") or joined.get("sources")
         rows.append(joined)
-    text = emit.records(rows)
+    # cfg, not args. The flags SET the config above; reading it back here means the
+    # wire format and the library return are driven by one source of truth, and a
+    # caller that set `cfg.include_text` in YAML gets the same shape without a flag.
+    text = emit.records(rows, include_text=cfg.include_text, omit_empty=cfg.omit_empty)
     if text:
         print(text)
     print(emit.manifest(rows, errors, discovered, cfg), file=sys.stderr)
@@ -355,6 +371,29 @@ def main(argv=None):
         action="store_true",
         help="with --format ndjson: emit every tracked role, not just the shortlist",
     )
+    # THE BODY IS 72% OF THE RECORD, and until now there was no way to ask for the
+    # record without it. Measured on a 7,568-row local harvest `[0.9.0]`: the median
+    # record is 8,717 bytes and 2,403 of them without `text` -- so anyone opening the
+    # output to LOOK at it (rather than to score against it) is reading a job
+    # description with a record buried in it.
+    #
+    # Opt-OUT, not opt-in: `text` is the entire input to the fit score, so a consumer
+    # that re-scores our rows needs it and the default must keep it. This flag is for
+    # reading, diffing, and eyeballing a harvest -- the case that had no answer.
+    # `text_basis` goes with it, because it describes a field that is no longer there.
+    common.add_argument(
+        "--no-text",
+        action="store_true",
+        help="omit the description body (~72%% of the record)",
+    )
+    # THE PAIR. Ordering made the record scannable and removed nothing -- 19 of its 50
+    # keys are null on a median row, so ordering alone delivers a tidier wall. These
+    # two are what remove it, and neither does the job alone.
+    common.add_argument(
+        "--drop-empty",
+        action="store_true",
+        help="omit keys that are null or empty (a median record loses 19 of 50)",
+    )
     common.add_argument(
         "--strict",
         action="store_true",
@@ -419,6 +458,17 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     cfg = _resolve_config(args.config)
+    # THE FLAGS SET THE CONFIG, and the config is what everything downstream reads.
+    # These are output SHAPE, and `engine.harvest` applies them to the flat rows it
+    # RETURNS -- so a library caller gets them from YAML without going near argparse.
+    # The first version of `--no-text` passed straight to `emit.records`, which made
+    # the biggest lever on the record reachable from the CLI and from nowhere else;
+    # `emit` is the one module the only known consumer imports nowhere.
+    # Only override on an explicit flag, so a YAML setting is not silently reset.
+    if getattr(args, "no_text", False):
+        cfg.include_text = False
+    if getattr(args, "drop_empty", False):
+        cfg.omit_empty = True
     config.set_active(cfg)
 
     # An unreadable store is the one error that hits EVERY command -- list, apply,
